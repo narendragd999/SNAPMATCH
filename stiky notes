@@ -1,0 +1,53 @@
+E:\Narendra\Application\event_ai_saas
+
+py -3.10 -m venv venv
+venv\Scripts\activate
+python --version
+
+
+venv\Scripts\activate
+python -m uvicorn app.main:app --reload
+
+venv\Scripts\activate
+celery -A app.workers.celery_worker.celery worker --loglevel=info --pool=solo
+
+Celery Beat:-
+celery -A app.workers.celery_worker.celery beat --loglevel=info
+
+
+C:\redis>redis-server.exe
+
+http://127.0.0.1:8000/docs
+
+
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+Razorpay payment gateway
+
+Remember password for user postgres
+Keep port 5432
+
+SQLite database.
+event_ai.db
+
+
+
+==================
+fastapi
+uvicorn
+celery
+redis
+opencv-python
+numpy
+scikit-learn
+insightface
+faiss-cpu
+python-multipart
+
+==================
+pip install -r requirements.txt
+
+
+pip uninstall bcrypt -y
+pip install bcrypt==3.2.2
+
+pip install passlib[bcrypt]

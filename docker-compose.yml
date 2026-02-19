@@ -1,0 +1,72 @@
+services:
+
+  postgres:
+    image: postgres:15
+    container_name: event_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: event_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: event_redis
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: event_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - insightface_models:/root/.insightface
+      - ./indexes:/app/indexes
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
+      - CELERY_BROKER_URL=redis://redis:6379/0
+
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: event_celery
+    command: celery -A app.workers.celery_worker worker --loglevel=info --pool=solo
+    volumes:
+      - ./storage:/app/storage
+      - insightface_models:/root/.insightface
+      - ./indexes:/app/indexes
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
+      - CELERY_BROKER_URL=redis://redis:6379/0
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: event_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+
+volumes:
+  postgres_data:
+  insightface_models:

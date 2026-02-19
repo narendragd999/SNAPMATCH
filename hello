@@ -1,0 +1,79 @@
+Now that search is clean:
+
+Next step should be:
+
+👉 Return all images of matched cluster when user clicks person
+
+This completes real event-photo flow.
+
+Say:
+
+“Next – full cluster retrieval”
+
+And we finish this feature like a real startup.
+
+
+
+========================================================
+Now you can choose next evolution:
+
+🔍 Search inside specific cluster
+
+📊 Cluster statistics dashboard
+
+🖼 Serve images via API
+
+🌐 Build frontend UI
+
+⚡ Improve clustering accuracy
+
+🚀 Convert to production architecture
+
+======================================================
+Speed boost (important)
+
+Currently:
+
+For 1000 images → 1000 similarity comparisons per search
+
+For 10k images → slow
+
+Real startup solution:
+👉 Use FAISS vector index
+
+2️⃣ Accuracy upgrade
+
+Instead of comparing every stored embedding:
+
+Store cluster centroid embedding
+
+Compare query only with centroid
+
+Much faster + cleaner
+
+
+
+{
+  "Registered Name": "Razorpay Payments Private Limited",
+  "CIN": "U62099KA2024PTC188982",
+  "PAN": "AANCR6717K",
+  "TAN": "BLRR30567F",
+  "GST": "29AANCR6717K1ZN"
+}
+
+Test Key ID:
+rzp_test_SGGGsxAiml2k2l
+
+Test Key Secret:
+YLXd7XyOsrp9iF4czesutL7p
+
+
+Add 30-day auto expiry
+
+Add billing history table
+
+Add recurring subscription
+
+Add payment failure handling
+
+Add background expiry cron
