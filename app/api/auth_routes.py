@@ -42,7 +42,7 @@ def register(data: RegisterRequest, response: Response, db: Session = Depends(ge
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=False,  # important for localhost
+        secure=False,   # ← change True to False for localhost
         samesite="lax"
     )
 
@@ -52,7 +52,8 @@ def register(data: RegisterRequest, response: Response, db: Session = Depends(ge
         "user": {
             "id": user.id,
             "email": user.email,
-            "plan_type": user.plan_type
+            "plan_type": user.plan_type,            
+            "role": user.role        # ← add this
         }
     }
 
@@ -73,7 +74,7 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=False,   # ← change True to False for localhost
         samesite="lax"
     )
 
@@ -83,7 +84,8 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
         "user": {
             "id": user.id,
             "email": user.email,
-            "plan_type": user.plan_type
+            "plan_type": user.plan_type,
+            "role": user.role        # ← add this
         }
     }
 

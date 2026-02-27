@@ -29,7 +29,14 @@ export default function AuthPage() {
       const res = await API.post(endpoint, { email, password });
       localStorage.setItem("token", res.data.access_token);
       localStorage.setItem("user", JSON.stringify(res.data.user));
-      window.location.href = "/dashboard";
+
+      // ✅ Redirect based on role
+      if (res.data.user?.role === "admin") {
+        window.location.href = "/admin";
+      } else {
+        window.location.href = "/dashboard";
+      }
+      
     } catch (err: any) {
       setError(
         err?.response?.data?.detail ||

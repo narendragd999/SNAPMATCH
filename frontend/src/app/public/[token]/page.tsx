@@ -1,60 +1,87 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload, Camera, Download, X, Info, Scan,
   ChevronLeft, ChevronRight, ImageIcon, RefreshCw,
+  ImagePlus, CheckCircle2, Users, Sparkles,
+  ArrowRight, Loader2, ZoomIn, Star,
+  AlertCircle, CloudUpload, Trash2, Eye,
+  SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid,
+  MapPin, Sunset, Music, Utensils,
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
+/* ─── Types ──────────────────────────────────────────────────────────────── */
 interface PageData {
-  result_id:   string;
-  page:        number;
-  page_size:   number;
-  total:       number;
-  total_pages: number;
-  has_more:    boolean;
-  items:       any[];
+  result_id: string; page: number; page_size: number;
+  total: number; total_pages: number; has_more: boolean; items: any[];
 }
-
-interface SearchResult {
-  result_id: string;
-  you:       PageData;
-  friends:   PageData;
-}
-
+interface SearchResult { result_id: string; you: PageData; }
 interface TabState {
-  items:    any[];
-  page:     number;
-  total:    number;
-  has_more: boolean;
-  loading:  boolean;
-  error:    string | null;
+  items: any[]; page: number; total: number;
+  has_more: boolean; loading: boolean; error: string | null;
 }
+interface ContribFile { file: File; preview: string; id: string; }
+type Mode       = "search" | "contribute";
+type UploadStep = "drop" | "preview" | "submitting" | "success";
+type GridLayout = "comfortable" | "compact" | "large";
 
 const emptyTab = (): TabState => ({
-  items: [], page: 1, total: 0,
-  has_more: false, loading: false, error: null,
+  items: [], page: 1, total: 0, has_more: false, loading: false, error: null,
 });
 
-// ─── Component ────────────────────────────────────────────────────────────────
+/* ─── Helpers ────────────────────────────────────────────────────────────── */
+const uid    = () => Math.random().toString(36).slice(2);
+const nameOf = (item: any): string =>
+  typeof item === "string" ? item : (item?.image_name ?? "");
+const sceneOf = (item: any): string =>
+  typeof item === "object" && item !== null ? (item?.scene_label ?? "") : "";
 
+/* ─── Animation variants ─────────────────────────────────────────────────── */
+const fadeUp = {
+  hidden:  { opacity: 0, y: 20 },
+  visible: (i = 0) => ({
+    opacity: 1, y: 0,
+    transition: { delay: i * 0.055, duration: 0.48, ease: [0.22, 1, 0.36, 1] },
+  }),
+};
+const stagger = {
+  hidden:  {},
+  visible: { transition: { staggerChildren: 0.055, delayChildren: 0.08 } },
+};
+const scaleIn = {
+  hidden:  { opacity: 0, scale: 0.9 },
+  visible: { opacity: 1, scale: 1, transition: { duration: 0.42, ease: [0.22, 1, 0.36, 1] } },
+};
+
+/* ─── Scene icon map ──────────────────────────────────────────────────────── */
+const SCENE_ICONS: Record<string, React.ReactNode> = {
+  ceremony:  <Sparkles  size={11} />,
+  reception: <Star      size={11} />,
+  dinner:    <Utensils  size={11} />,
+  party:     <Music     size={11} />,
+  outdoor:   <Sunset    size={11} />,
+  venue:     <MapPin    size={11} />,
+};
+const sceneIcon = (label: string) =>
+  SCENE_ICONS[label.toLowerCase()] ?? <MapPin size={11} />;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAIN COMPONENT
+═══════════════════════════════════════════════════════════════════════════ */
 export default function PublicSelfiePage() {
   const params = useParams();
   const token  = params?.token as string;
   const API    = process.env.NEXT_PUBLIC_API_URL;
 
+  /* ── State ── */
   const [event,        setEvent]        = useState<any>(null);
+  const [mode,         setMode]         = useState<Mode>("search");
   const [resultId,     setResultId]     = useState<string | null>(null);
-  const [activeTab,    setActiveTab]    = useState<"you" | "friends">("you");
-  const [tabs,         setTabs]         = useState<Record<"you" | "friends", TabState>>({
-    you: emptyTab(), friends: emptyTab(),
-  });
+  const [tab,          setTab]          = useState<TabState>(emptyTab());
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [cameraOpen,   setCameraOpen]   = useState(false);
@@ -62,565 +89,1019 @@ export default function PublicSelfiePage() {
   const [showInfo,     setShowInfo]     = useState(false);
   const [dragOver,     setDragOver]     = useState(false);
 
-  const videoRef    = useRef<HTMLVideoElement>(null);
-  const clickSound  = useRef<HTMLAudioElement | null>(null);
-  const streamRef   = useRef<MediaStream | null>(null);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const observerRef = useRef<IntersectionObserver | null>(null);
+  /* Scene + Grid */
+  const [activeScene,  setActiveScene]  = useState<string>("all");
+  const [gridLayout,   setGridLayout]   = useState<GridLayout>("comfortable");
+  const [dlAllLoading, setDlAllLoading] = useState(false);
 
-  // ─── Load event ─────────────────────────────────────────────────────────────
+  /* Contribute */
+  const [uploadStep,      setUploadStep]      = useState<UploadStep>("drop");
+  const [contribFiles,    setContribFiles]    = useState<ContribFile[]>([]);
+  const [contribName,     setContribName]     = useState("");
+  const [contribMsg,      setContribMsg]      = useState("");
+  const [contribError,    setContribError]    = useState<string | null>(null);
+  const [uploadCount,     setUploadCount]     = useState(0);
+  const [selectedPreview, setSelectedPreview] = useState<ContribFile | null>(null);
+
+  /* Refs */
+  const videoRef     = useRef<HTMLVideoElement>(null);
+  const streamRef    = useRef<MediaStream | null>(null);
+  const sentinelRef  = useRef<HTMLDivElement | null>(null);
+  const observerRef  = useRef<IntersectionObserver | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const guestUpload = true;
+  // Plan detection — backend returns plan_type on event object
+  const isPro = !!(event?.plan_type && event.plan_type !== "free");
+
+  /* ── Derived: scene counts from loaded items ── */
+  const sceneCounts = tab.items.reduce((acc: Record<string, number>, item) => {
+    const s = sceneOf(item);
+    if (s) acc[s] = (acc[s] ?? 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  const sceneLabels = Object.keys(sceneCounts);
+  const hasScenes   = sceneLabels.length > 0;
+
+  const filteredItems = activeScene === "all"
+    ? tab.items
+    : tab.items.filter(item => sceneOf(item) === activeScene);
+
+  /* ── Load event ── */
   useEffect(() => {
     if (!token) return;
     fetch(`${API}/public/events/${token}`)
-      .then(r => r.json())
-      .then(setEvent);
+      .then(r => r.json()).then(setEvent).catch(() => {});
   }, [token]);
 
-  // ─── Audio ──────────────────────────────────────────────────────────────────
-  const playClick = () => {
-    if (clickSound.current) { clickSound.current.currentTime = 0; clickSound.current.play(); }
-  };
-
-  // ─── Image name helper (matched_photos items vs friends_photos strings) ──────
-  const nameOf = (item: any): string =>
-    typeof item === "string" ? item : item?.image_name ?? "";
-
-  // ─── Upload → POST /search ───────────────────────────────────────────────────
+  /* ── Face search ── */
   const handleUpload = async (file: File) => {
-    playClick();
     setProcessing(true);
     setResultId(null);
-    setTabs({ you: emptyTab(), friends: emptyTab() });
-
+    setTab(emptyTab());
+    setActiveScene("all");
     try {
       const form = new FormData();
       form.append("file", file);
-
-      const res  = await fetch(`${API}/public/events/${token}/search`, {
-        method: "POST", body: form,
-      });
-
+      const res  = await fetch(`${API}/public/events/${token}/search`, { method: "POST", body: form });
       if (!res.ok) throw new Error(await res.text());
-
       const data: SearchResult = await res.json();
-
       setResultId(data.result_id);
-      setTabs({
-        you: {
-          items:    data.you.items,
-          page:     1,
-          total:    data.you.total,
-          has_more: data.you.has_more,
-          loading:  false,
-          error:    null,
-        },
-        friends: {
-          items:    data.friends.items,
-          page:     1,
-          total:    data.friends.total,
-          has_more: data.friends.has_more,
-          loading:  false,
-          error:    null,
-        },
+      setTab({
+        items: data.you.items, page: 1, total: data.you.total,
+        has_more: data.you.has_more, loading: false, error: null,
       });
-
       setTimeout(() =>
-        document.getElementById("results-section")?.scrollIntoView({ behavior: "smooth" }),
-        300,
-      );
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setProcessing(false);
-    }
+        document.getElementById("results-section")?.scrollIntoView({ behavior: "smooth" }), 300);
+    } catch (err) { console.error(err); }
+    finally { setProcessing(false); }
   };
 
-  // ─── Load next page → GET /search/{result_id} ───────────────────────────────
+  /* ── Infinite scroll ── */
   const loadNextPage = useCallback(async () => {
-    const tab = tabs[activeTab];
     if (!resultId || tab.loading || !tab.has_more) return;
-
     const nextPage = tab.page + 1;
-
-    setTabs(prev => ({
-      ...prev,
-      [activeTab]: { ...prev[activeTab], loading: true, error: null },
-    }));
-
+    setTab(prev => ({ ...prev, loading: true, error: null }));
     try {
       const res = await fetch(
-        `${API}/public/events/${token}/search/${resultId}?kind=${activeTab}&page=${nextPage}`,
+        `${API}/public/events/${token}/search/${resultId}?kind=you&page=${nextPage}`
       );
-
       if (res.status === 404) {
-        setTabs(prev => ({
-          ...prev,
-          [activeTab]: {
-            ...prev[activeTab],
-            loading:  false,
-            has_more: false,
-            error:    "Session expired. Please upload your photo again.",
-          },
-        }));
+        setTab(prev => ({ ...prev, loading: false, has_more: false, error: "Session expired." }));
         return;
       }
-
       if (!res.ok) throw new Error(await res.text());
-
       const data: PageData = await res.json();
-
-      setTabs(prev => ({
-        ...prev,
-        [activeTab]: {
-          items:    [...prev[activeTab].items, ...data.items],
-          page:     data.page,
-          total:    data.total,
-          has_more: data.has_more,
-          loading:  false,
-          error:    null,
-        },
+      setTab(prev => ({
+        items: [...prev.items, ...data.items], page: data.page,
+        total: data.total, has_more: data.has_more, loading: false, error: null,
       }));
-    } catch (err) {
-      console.error(err);
-      setTabs(prev => ({
-        ...prev,
-        [activeTab]: {
-          ...prev[activeTab],
-          loading: false,
-          error:   "Failed to load more photos.",
-        },
-      }));
+    } catch {
+      setTab(prev => ({ ...prev, loading: false, error: "Failed to load more." }));
     }
-  }, [tabs, activeTab, resultId, token, API]);
+  }, [tab, resultId, token, API]);
 
-  // ─── IntersectionObserver on sentinel div ────────────────────────────────────
   useEffect(() => {
     observerRef.current?.disconnect();
     observerRef.current = new IntersectionObserver(
-      entries => { if (entries[0].isIntersecting) loadNextPage(); },
-      { rootMargin: "300px" },
+      e => { if (e[0].isIntersecting) loadNextPage(); }, { rootMargin: "400px" }
     );
     if (sentinelRef.current) observerRef.current.observe(sentinelRef.current);
     return () => observerRef.current?.disconnect();
   }, [loadNextPage]);
 
-  // ─── Drag & drop ────────────────────────────────────────────────────────────
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file?.type.startsWith("image/")) handleUpload(file);
+  /* ── Download All (Pro) ── */
+  const handleDownloadAll = async () => {
+    if (!resultId || dlAllLoading) return;
+    setDlAllLoading(true);
+    try {
+      const res = await fetch(
+        `${API}/public/events/${token}/search/${resultId}/download-all`
+      );
+      if (!res.ok) throw new Error("Download failed");
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = Object.assign(document.createElement("a"), {
+        href: url, download: `my-event-photos.zip`,
+      });
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { console.error(e); }
+    finally { setDlAllLoading(false); }
   };
 
-  // ─── Camera ─────────────────────────────────────────────────────────────────
+  /* ── Camera ── */
   const startCamera = async () => {
-    playClick();
     setCameraOpen(true);
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-    streamRef.current = stream;
-    if (videoRef.current) videoRef.current.srcObject = stream;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch { setCameraOpen(false); }
   };
-
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    setCameraOpen(false);
+    streamRef.current = null; setCameraOpen(false);
   };
-
   const capturePhoto = () => {
-    const v      = videoRef.current!;
-    const canvas = document.createElement("canvas");
-    canvas.width  = v.videoWidth;
-    canvas.height = v.videoHeight;
-    canvas.getContext("2d")!.drawImage(v, 0, 0);
-    canvas.toBlob(blob => { if (blob) handleUpload(new File([blob], "selfie.jpg")); });
+    const v = videoRef.current!;
+    const c = document.createElement("canvas");
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext("2d")!.drawImage(v, 0, 0);
+    c.toBlob(blob => { if (blob) handleUpload(new File([blob], "selfie.jpg")); });
     stopCamera();
   };
 
-  // ─── Download All — passes result_id so backend zips from cache ──────────────
-  const downloadAll = () => {
-    if (!resultId) return;
-    playClick();
-    window.location.href =
-      `${API}/public/events/${token}/download-zip?result_id=${resultId}&kind=${activeTab}`;
+  /* ── Contribute ── */
+  const addContribFiles = (fl: FileList | null) => {
+    if (!fl) return;
+    const valid = Array.from(fl).filter(f => f.type.startsWith("image/"))
+      .map(f => ({ file: f, preview: URL.createObjectURL(f), id: uid() }));
+    setContribFiles(prev => [...prev, ...valid].slice(0, 30));
+    setContribError(null);
+    if (valid.length) setUploadStep("preview");
+  };
+  const removeContribFile = (id: string) => {
+    setContribFiles(prev => {
+      const u = prev.filter(f => f.id !== id);
+      if (!u.length) setUploadStep("drop");
+      return u;
+    });
+  };
+  const submitContrib = async () => {
+    if (!contribFiles.length) return;
+    setUploadStep("submitting"); setContribError(null);
+    try {
+      const form = new FormData();
+      contribFiles.forEach(f => form.append("files", f.file));
+      if (contribName.trim()) form.append("contributor_name", contribName.trim());
+      if (contribMsg.trim())  form.append("message", contribMsg.trim());
+      const res = await fetch(`${API}/public/events/${token}/contribute`, { method: "POST", body: form });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setUploadCount(data.uploaded ?? contribFiles.length);
+      setContribFiles([]); setContribName(""); setContribMsg("");
+      setUploadStep("success");
+    } catch (err) {
+      setContribError(err instanceof Error ? err.message : "Upload failed");
+      setUploadStep("preview");
+    }
+  };
+  const resetContrib = () => {
+    setUploadStep("drop"); setContribFiles([]);
+    setContribName(""); setContribMsg(""); setContribError(null);
   };
 
-  // ─── Preview ────────────────────────────────────────────────────────────────
-  const currentItems = tabs[activeTab].items;
-  const openPreview  = (img: string, i: number) => { setPreviewImage(img); setPreviewIndex(i); };
-  const navPreview   = (dir: number) => {
-    const next = (previewIndex + dir + currentItems.length) % currentItems.length;
+  /* ── Preview nav ── */
+  const navPreview = (dir: number) => {
+    const next = Math.max(0, Math.min(previewIndex + dir, filteredItems.length - 1));
     setPreviewIndex(next);
-    setPreviewImage(nameOf(currentItems[next]));
+    setPreviewImage(nameOf(filteredItems[next]));
   };
 
-  // ─── Derived ─────────────────────────────────────────────────────────────────
-  const tab        = tabs[activeTab];
-  const hasResults = resultId !== null;
+  /* ── Grid cols ── */
+  const gridCols = {
+    comfortable: "repeat(auto-fill, minmax(220px, 1fr))",
+    compact:     "repeat(auto-fill, minmax(148px, 1fr))",
+    large:       "repeat(auto-fill, minmax(320px, 1fr))",
+  }[gridLayout];
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
+  /* ══════════════════════════════════════════════════════════════════════
+     RENDER
+  ══════════════════════════════════════════════════════════════════════ */
   return (
-    <div className="relative min-h-screen bg-zinc-950 text-zinc-100 antialiased overflow-x-hidden">
-      <audio ref={clickSound} src="/click.mp3" preload="auto" />
+    <div style={{ minHeight: "100vh", background: "#09090f", color: "#fff", fontFamily: "'Outfit', sans-serif" }}>
 
-      {/* Ambient top glow */}
-      <div className="pointer-events-none fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-64 rounded-full bg-blue-600/10 blur-[100px] z-0" />
+      {/* ── Global CSS ── */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap');
 
-      {/* ── PROCESSING OVERLAY ── */}
-      <AnimatePresence>
-        {processing && (
-          <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[999]"
-          >
-            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 flex flex-col items-center gap-4 w-72 text-center">
-              <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
-              <div>
-                <p className="text-sm font-semibold text-zinc-100">Analyzing your photo</p>
-                <p className="text-xs text-zinc-500 mt-1 leading-relaxed">AI is scanning event photos for matches</p>
-              </div>
-              <div className="flex gap-1.5">
-                {[0, 1, 2].map(i => (
-                  <div key={i} className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" style={{ animationDelay: `${i * 0.3}s` }} />
-                ))}
-              </div>
+        :root {
+          --gold:        #e8c97e;
+          --gold-l:      #f5e0a6;
+          --gold-dim:    rgba(232,201,126,0.13);
+          --gold-border: rgba(232,201,126,0.22);
+          --surf:        rgba(255,255,255,0.04);
+          --surf-h:      rgba(255,255,255,0.07);
+          --border:      rgba(255,255,255,0.07);
+          --muted:       rgba(255,255,255,0.35);
+          --dim:         rgba(255,255,255,0.55);
+          --jade:        #4ade80;
+          --jade-dim:    rgba(74,222,128,0.12);
+          --rose:        #f87171;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--gold-border); border-radius: 4px; }
+
+        .serif  { font-family: 'Playfair Display', Georgia, serif; }
+        .glass  { background: var(--surf); border: 1px solid var(--border); backdrop-filter: blur(20px); }
+        .g-gold { background: var(--gold-dim); border: 1px solid var(--gold-border); }
+        .g-jade { background: var(--jade-dim); border: 1px solid rgba(74,222,128,0.22); }
+
+        .btn-gold {
+          background: linear-gradient(135deg, #e8c97e, #c88c25);
+          color: #0a0808; font-weight: 700; letter-spacing: 0.015em;
+          border: none; cursor: pointer; transition: all 0.2s;
+          box-shadow: 0 4px 20px rgba(232,201,126,0.22);
+        }
+        .btn-gold:hover  { filter: brightness(1.06); transform: translateY(-1px); box-shadow: 0 8px 28px rgba(232,201,126,0.38); }
+        .btn-gold:active { transform: none; }
+        .btn-gold:disabled {
+          background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.2);
+          box-shadow: none; transform: none; filter: none; cursor: not-allowed;
+        }
+        .btn-ghost {
+          background: var(--surf); border: 1px solid var(--border);
+          color: var(--dim); font-weight: 600; cursor: pointer; transition: all 0.18s;
+        }
+        .btn-ghost:hover { background: var(--surf-h); color: #fff; border-color: rgba(255,255,255,0.12); }
+
+        /* Photo grid cards */
+        .photo-card {
+          cursor: pointer; overflow: hidden; border-radius: 12px; position: relative;
+          background: #111; border: 1px solid var(--border);
+          transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+        }
+        .photo-card:hover { transform: scale(1.028); box-shadow: 0 16px 48px rgba(0,0,0,0.65); border-color: var(--gold-border); z-index: 2; }
+        .photo-card:hover .photo-overlay { opacity: 1; }
+        .photo-overlay { opacity: 0; transition: opacity 0.2s; }
+
+        /* Drop zones */
+        .drop-zone { transition: all 0.22s ease; }
+        .drop-zone.over { border-color: var(--gold) !important; background: var(--gold-dim) !important; }
+
+        /* Contrib thumbnails */
+        .contrib-thumb:hover .thumb-ov { opacity: 1; }
+        .thumb-ov { opacity: 0; transition: opacity 0.18s; }
+
+        /* Scene filter pills */
+        .scene-pill {
+          display: inline-flex; align-items: center; gap: 5px;
+          padding: 5px 12px; border-radius: 99px; font-size: 12px; font-weight: 600;
+          cursor: pointer; border: 1px solid var(--border); background: var(--surf);
+          color: var(--dim); white-space: nowrap; transition: all 0.18s;
+          font-family: 'Outfit', sans-serif;
+        }
+        .scene-pill:hover { background: var(--surf-h); color: #fff; }
+        .scene-pill.active { background: var(--gold-dim); border-color: var(--gold-border); color: var(--gold); }
+
+        /* Grid layout toggle */
+        .layout-btn {
+          display: flex; align-items: center; justify-content: center;
+          width: 30px; height: 30px; border-radius: 7px; border: 1px solid transparent;
+          background: transparent; color: var(--muted); cursor: pointer; transition: all 0.15s;
+        }
+        .layout-btn.active { background: var(--gold-dim); border-color: var(--gold-border); color: var(--gold); }
+        .layout-btn:hover:not(.active) { background: var(--surf-h); color: var(--dim); }
+
+        /* Pulse animation for header logo */
+        @keyframes pulseRing {
+          0%   { box-shadow: 0 0 0 0 rgba(232,201,126,0.45); }
+          70%  { box-shadow: 0 0 0 14px rgba(232,201,126,0); }
+          100% { box-shadow: 0 0 0 0 rgba(232,201,126,0); }
+        }
+        .pulse-ring { animation: pulseRing 2.4s ease infinite; }
+
+        /* Shimmer headline */
+        @keyframes shimmer {
+          0%   { background-position: -200% center; }
+          100% { background-position:  200% center; }
+        }
+        .shimmer-text {
+          background: linear-gradient(90deg, var(--gold) 0%, var(--gold-l) 42%, var(--gold) 65%);
+          background-size: 200% auto;
+          -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+          animation: shimmer 4s linear infinite;
+        }
+      `}</style>
+
+      {/* Ambient glows */}
+      <div aria-hidden style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0 }}>
+        <div style={{ position: "absolute", top: "-15%", left: "25%", width: 700, height: 600, borderRadius: "50%", background: "radial-gradient(circle, rgba(232,201,126,0.055) 0%, transparent 68%)", filter: "blur(80px)" }} />
+        <div style={{ position: "absolute", bottom: "5%", right: "5%", width: 500, height: 500, borderRadius: "50%", background: "radial-gradient(circle, rgba(99,102,241,0.04) 0%, transparent 70%)", filter: "blur(90px)" }} />
+      </div>
+
+      {/* ══ HEADER ══ */}
+      <header style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 50, background: "rgba(9,9,15,0.88)", backdropFilter: "blur(28px)", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ maxWidth: 1300, margin: "0 auto", padding: "0 20px", height: 62, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div className="pulse-ring" style={{ width: 38, height: 38, borderRadius: 12, background: "linear-gradient(135deg, #e8c97e, #b86a12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Sparkles size={17} color="#0a0808" />
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ── NAVBAR ── */}
-      <header className="fixed top-0 inset-x-0 z-40 h-12 border-b border-zinc-800/60 bg-zinc-950/80 backdrop-blur-xl">
-        <div className="max-w-5xl mx-auto h-full px-5 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-md bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center flex-shrink-0">
-              <Scan size={12} className="text-white" />
+            <div>
+              <p className="serif" style={{ color: "#fff", fontSize: 17, fontWeight: 600, lineHeight: 1.15 }}>
+                {event?.name || "Event Photos"}
+              </p>
+              <p style={{ color: "var(--muted)", fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 1 }}>
+                AI · Face Recognition
+              </p>
             </div>
-            <span className="text-sm font-semibold tracking-tight">{APP_CONFIG.name}</span>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowInfo(true)}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-            >
-              <Info size={14} />
-            </button>
-            <Link
-              href="/"
-              className="text-xs text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 rounded-lg transition-colors"
-            >
-              Home
-            </Link>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {guestUpload && mode === "search" && (
+              <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+                onClick={() => setMode("contribute")} className="glass"
+                style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 14px", borderRadius: 10, cursor: "pointer", fontSize: 13, fontWeight: 600, color: "var(--gold)" }}>
+                <CloudUpload size={14} /> Share Photos
+              </motion.button>
+            )}
+            <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              onClick={() => setShowInfo(true)} className="glass"
+              style={{ width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--dim)" }}>
+              <Info size={16} />
+            </motion.button>
           </div>
         </div>
       </header>
 
-      {/* ── HERO + UPLOAD ── */}
-      <section className="relative z-10 pt-24 pb-12 px-5 flex flex-col items-center">
-        <motion.div
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45 }}
-          className="w-full max-w-md"
-        >
-          {event && (
-            <div className="text-center mb-8">
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-full mb-4">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                Live Event
-              </span>
-              <h1 className="text-2xl font-bold tracking-tight text-zinc-50">{event.event_name}</h1>
-              {event.date && <p className="text-xs text-zinc-500 mt-1.5">{event.date}</p>}
-            </div>
-          )}
+      {/* ══ MAIN ══ */}
+      <main style={{ paddingTop: 78, paddingBottom: 90, minHeight: "100vh", position: "relative", zIndex: 1 }}>
+        <AnimatePresence mode="wait">
 
-          {/* Upload card */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-            {/* Drop zone */}
-            <label
-              className={`flex flex-col items-center justify-center gap-3 p-10 cursor-pointer border-b border-zinc-800 transition-colors ${
-                dragOver ? "bg-blue-500/5" : "hover:bg-zinc-800/40"
-              }`}
-              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-            >
-              <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors ${
-                dragOver
-                  ? "bg-blue-500/20 border-blue-500/30 text-blue-400"
-                  : "bg-zinc-800 border-zinc-700 text-zinc-400"
-              }`}>
-                <Upload size={18} />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-medium text-zinc-200">
-                  {hasResults ? "Upload a different photo" : "Drop your photo here"}
-                </p>
-                <p className="text-xs text-zinc-500 mt-0.5">or click to browse · JPG, PNG, WEBP</p>
-              </div>
-              <input
-                type="file"
-                hidden
-                accept="image/*"
-                onChange={e => e.target.files?.[0] && handleUpload(e.target.files[0])}
-              />
-            </label>
+          {/* ════════════ SEARCH MODE ════════════ */}
+          {mode === "search" && (
+            <motion.div key="search" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, x: -20 }}>
 
-            {/* Divider */}
-            <div className="flex items-center gap-3 px-6 py-3.5">
-              <div className="flex-1 h-px bg-zinc-800" />
-              <span className="text-[11px] text-zinc-600">or use camera</span>
-              <div className="flex-1 h-px bg-zinc-800" />
-            </div>
+              {/* ─── Hero (no results yet) ─── */}
+              {!resultId && !processing && (
+                <motion.section variants={stagger} initial="hidden" animate="visible"
+                  style={{ maxWidth: 660, margin: "0 auto", padding: "64px 20px 40px", textAlign: "center" }}>
 
-            {/* Camera button */}
-            <div className="px-5 pb-5">
-              <button
-                onClick={startCamera}
-                className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 hover:border-zinc-600 text-sm font-medium text-zinc-200 transition-colors"
-              >
-                <Camera size={14} />
-                Open Camera
-              </button>
-            </div>
-          </div>
+                  {/* Icon with corner accents */}
+                  <motion.div variants={fadeUp} style={{ display: "inline-flex", marginBottom: 28, position: "relative" }}>
+                    <div className="g-gold" style={{ width: 92, height: 92, borderRadius: 28, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Scan size={44} color="var(--gold)" strokeWidth={1.4} />
+                    </div>
+                    {/* Corner decorations */}
+                    {[["top", "left"], ["top", "right"], ["bottom", "left"], ["bottom", "right"]].map(([v, h], i) => (
+                      <div key={i} style={{
+                        position: "absolute", [v]: -4, [h]: -4, width: 14, height: 14,
+                        borderTop: v === "top" ? "2px solid var(--gold)" : undefined,
+                        borderBottom: v === "bottom" ? "2px solid var(--gold)" : undefined,
+                        borderLeft: h === "left" ? "2px solid var(--gold)" : undefined,
+                        borderRight: h === "right" ? "2px solid var(--gold)" : undefined,
+                        borderRadius: v === "top" && h === "left" ? "4px 0 0 0" : v === "top" && h === "right" ? "0 4px 0 0" : v === "bottom" && h === "left" ? "0 0 0 4px" : "0 0 4px 0",
+                      }} />
+                    ))}
+                  </motion.div>
 
-          <p className="text-center text-[11px] text-zinc-600 mt-3">
-            AI-powered face matching · Your photo is never stored
-          </p>
-        </motion.div>
-      </section>
+                  <motion.h1 variants={fadeUp} className="serif shimmer-text"
+                    style={{ fontSize: "clamp(36px,6vw,60px)", fontWeight: 600, lineHeight: 1.08, marginBottom: 16 }}>
+                    Find Yourself<br />in Every Photo
+                  </motion.h1>
 
-      {/* ── RESULTS ── */}
-      <AnimatePresence>
-        {hasResults && (
-          <motion.section
-            id="results-section"
-            initial={{ opacity: 0, y: 24 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4 }}
-            className="relative z-10 max-w-5xl mx-auto px-5 pb-24"
-          >
-            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+                  <motion.p variants={fadeUp}
+                    style={{ color: "var(--dim)", fontSize: 16, lineHeight: 1.7, maxWidth: 430, margin: "0 auto 40px" }}>
+                    Upload a selfie — AI scans every event photo and finds your matches instantly.
+                  </motion.p>
 
-              {/* Tab bar */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-                <div className="flex gap-1">
-                  {(["you", "friends"] as const).map(t => (
-                    <button
-                      key={t}
-                      onClick={() => setActiveTab(t)}
-                      className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
-                        activeTab === t
-                          ? "bg-zinc-800 text-zinc-100"
-                          : "text-zinc-500 hover:text-zinc-300"
-                      }`}
-                    >
-                      {t === "you" ? "Your Photos" : "With Friends"}
-                      <span className="bg-zinc-700/80 text-zinc-400 text-[10px] px-1.5 py-0.5 rounded-md leading-none">
-                        {tabs[t].total}
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                  {/* CTA buttons */}
+                  <motion.div variants={fadeUp}
+                    style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 11, maxWidth: 430, margin: "0 auto 16px" }}>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                      onClick={startCamera} className="btn-gold"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "15px 20px", borderRadius: 14, fontSize: 15, cursor: "pointer" }}>
+                      <Camera size={18} /> Take Selfie
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                      onClick={() => fileInputRef.current?.click()} className="btn-ghost"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "15px 20px", borderRadius: 14, fontSize: 15, cursor: "pointer" }}>
+                      <Upload size={18} /> Upload Photo
+                    </motion.button>
+                    <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                      onChange={e => { if (e.target.files?.[0]) handleUpload(e.target.files[0]); e.target.value = ""; }} />
+                  </motion.div>
 
-                {/* Download All — uses result_id → backend zips from cache */}
-                {tab.items.length > 0 && (
-                  <button
-                    onClick={downloadAll}
-                    className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-                  >
-                    <Download size={12} />
-                    Download All ({tab.total})
-                  </button>
-                )}
-              </div>
+                  {/* Drag zone */}
+                  <motion.div variants={fadeUp}>
+                    <div className={`drop-zone ${dragOver ? "over" : ""}`}
+                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                      onDragLeave={() => setDragOver(false)}
+                      onDrop={e => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleUpload(f); }}
+                      style={{ border: "1.5px dashed var(--border)", borderRadius: 14, padding: "16px", color: "var(--muted)", fontSize: 13, maxWidth: 430, margin: "0 auto", textAlign: "center" }}>
+                      or drag & drop your selfie here
+                    </div>
+                  </motion.div>
 
-              {/* Gallery */}
-              <div className="p-4">
-                {tab.items.length > 0 ? (
-                  <>
-                    <motion.div
-                      key={activeTab}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ duration: 0.25 }}
-                      className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 gap-2"
-                    >
-                      {tab.items.map((item: any, i: number) => {
-                        const img = nameOf(item);
-                        return (
-                          <motion.div
-                            key={`${activeTab}-${i}`}
-                            initial={{ opacity: 0, scale: 0.95 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: Math.min(i * 0.02, 0.5), duration: 0.25 }}
-                            className="group relative rounded-xl overflow-hidden border border-zinc-800 hover:border-zinc-600 cursor-pointer transition-all hover:scale-[1.03] bg-zinc-800"
-                            onClick={() => openPreview(img, i)}
-                          >
-                            <img
-                              src={`${API}/public/events/${token}/thumbnail/${img}`}
-                              className="w-full aspect-[4/5] object-cover block"
-                              loading="lazy"
-                            />
-                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                              <a
-                                href={`${API}/public/events/${token}/download/${img}`}
-                                onClick={e => e.stopPropagation()}
-                                className="w-8 h-8 rounded-lg bg-white/10 backdrop-blur border border-white/20 flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                              >
-                                <Download size={13} />
-                              </a>
-                            </div>
-                          </motion.div>
-                        );
-                      })}
+                  {/* How it works steps */}
+                  <motion.div variants={stagger}
+                    style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginTop: 48, maxWidth: 480, margin: "48px auto 0" }}>
+                    {[
+                      { icon: Camera, label: "Snap a selfie",  n: "01" },
+                      { icon: Scan,   label: "AI scans photos", n: "02" },
+                      { icon: Download, label: "Download yours", n: "03" },
+                    ].map(step => {
+                      const Icon = step.icon;
+                      return (
+                        <motion.div key={step.n} variants={fadeUp} className="glass"
+                          style={{ borderRadius: 14, padding: "18px 12px", textAlign: "center" }}>
+                          <p style={{ color: "var(--gold)", fontSize: 9, fontWeight: 800, letterSpacing: "0.12em", marginBottom: 10 }}>{step.n}</p>
+                          <Icon size={20} color="var(--gold)" style={{ margin: "0 auto 10px", display: "block" }} />
+                          <p style={{ color: "rgba(255,255,255,0.68)", fontSize: 12, fontWeight: 500, lineHeight: 1.45 }}>{step.label}</p>
+                        </motion.div>
+                      );
+                    })}
+                  </motion.div>
+
+                  {/* Contribute CTA */}
+                  {guestUpload && (
+                    <motion.div variants={fadeUp} style={{ marginTop: 32 }}>
+                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                        onClick={() => setMode("contribute")}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px", borderRadius: 10, background: "var(--gold-dim)", border: "1px solid var(--gold-border)", color: "var(--gold)", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
+                        <ImagePlus size={15} /> Share your event photos <ArrowRight size={14} />
+                      </motion.button>
                     </motion.div>
+                  )}
+                </motion.section>
+              )}
 
-                    {/* ── INFINITE SCROLL SENTINEL ── */}
-                    <div ref={sentinelRef} className="mt-6 flex items-center justify-center min-h-[40px]">
-                      {tab.loading && (
-                        <div className="flex items-center gap-2 text-xs text-zinc-500">
-                          <div className="w-4 h-4 border border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
-                          Loading more…
-                        </div>
-                      )}
-                      {!tab.loading && !tab.has_more && tab.total > 30 && (
-                        <p className="text-xs text-zinc-600">
-                          All {tab.total} photos loaded
-                        </p>
-                      )}
-                      {tab.error && (
-                        <div className="flex items-center gap-2 text-xs text-red-400">
-                          {tab.error}
-                          <button
-                            onClick={loadNextPage}
-                            className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors ml-1"
-                          >
-                            <RefreshCw size={11} />
-                            Retry
-                          </button>
-                        </div>
-                      )}
+              {/* ─── Processing ─── */}
+              {processing && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  style={{ maxWidth: 460, margin: "72px auto 0", padding: "0 20px" }}>
+                  <div className="glass" style={{ borderRadius: 24, padding: "52px 32px", textAlign: "center" }}>
+                    <div style={{ position: "relative", width: 76, height: 76, margin: "0 auto 26px" }}>
+                      <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.6, repeat: Infinity, ease: "linear" }}
+                        style={{ position: "absolute", inset: 0, borderRadius: "50%", border: "2px solid transparent", borderTopColor: "var(--gold)", borderRightColor: "var(--gold-border)" }} />
+                      <div className="g-gold" style={{ position: "absolute", inset: 10, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <Scan size={22} color="var(--gold)" />
+                      </div>
                     </div>
-                  </>
-                ) : (
-                  /* Empty state */
-                  <div className="flex flex-col items-center justify-center py-16 gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-600">
-                      <ImageIcon size={20} />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-sm font-medium text-zinc-400">No photos found</p>
-                      <p className="text-xs text-zinc-600 mt-1 leading-relaxed max-w-[200px]">
-                        Try a clearer selfie with better lighting
-                      </p>
+                    <h3 className="serif" style={{ color: "#fff", fontSize: 24, marginBottom: 10 }}>Scanning Photos…</h3>
+                    <p style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1.65 }}>
+                      AI is finding your face across every event photo. This takes just a moment.
+                    </p>
+                    <div style={{ marginTop: 28, height: 2, borderRadius: 99, background: "var(--border)", overflow: "hidden" }}>
+                      <motion.div animate={{ x: ["-100%", "100%"] }} transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+                        style={{ height: "100%", width: "50%", background: "linear-gradient(90deg, transparent, var(--gold), transparent)", borderRadius: 99 }} />
                     </div>
                   </div>
-                )}
-              </div>
-            </div>
-          </motion.section>
-        )}
-      </AnimatePresence>
+                </motion.div>
+              )}
 
-      {/* ── CAMERA MODAL ── */}
+              {/* ─── Results ─── */}
+              {resultId && !processing && (
+                <motion.section id="results-section" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  style={{ maxWidth: 1300, margin: "0 auto", padding: "24px 20px 0" }}>
+
+                  {/* Results header row */}
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                        <h2 className="serif" style={{ fontSize: 22, fontWeight: 600, color: "#fff" }}>Your Photos</h2>
+                        {tab.total > 0 && (
+                          <span style={{ padding: "2px 9px", borderRadius: 99, background: "var(--gold-dim)", border: "1px solid var(--gold-border)", fontSize: 12, fontWeight: 700, color: "var(--gold)" }}>
+                            {tab.total}{tab.has_more ? "+" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <p style={{ color: "var(--muted)", fontSize: 13 }}>
+                        {activeScene !== "all"
+                          ? `Scene: ${activeScene} · ${filteredItems.length} photo${filteredItems.length !== 1 ? "s" : ""}`
+                          : `${tab.total} photo${tab.total !== 1 ? "s" : ""} found across the event`}
+                      </p>
+                    </div>
+
+                    {/* Action bar */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+
+                      {/* Grid layout toggle */}
+                      <div className="glass" style={{ display: "flex", gap: 2, padding: 3, borderRadius: 9 }}>
+                        {([
+                          { k: "large"       as GridLayout, icon: <Grid2X2 size={13} />,           title: "Large"       },
+                          { k: "comfortable" as GridLayout, icon: <LayoutGrid size={13} />,        title: "Comfortable" },
+                          { k: "compact"     as GridLayout, icon: <SlidersHorizontal size={13} />, title: "Compact"     },
+                        ]).map(({ k, icon, title }) => (
+                          <button key={k} title={title} onClick={() => setGridLayout(k)}
+                            className={`layout-btn${gridLayout === k ? " active" : ""}`}>
+                            {icon}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* ★ Download All — Pro only ★ */}
+                      {isPro && tab.total > 0 && (
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                          onClick={handleDownloadAll} disabled={dlAllLoading} className="btn-gold"
+                          style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 16px", borderRadius: 10, fontSize: 13, cursor: "pointer" }}>
+                          {dlAllLoading
+                            ? <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}><Loader2 size={14} /></motion.div> Preparing…</>
+                            : <><PackageOpen size={14} /> Download All ({tab.total})</>}
+                        </motion.button>
+                      )}
+
+                      {/* Free plan upsell pill */}
+                      {!isPro && tab.total > 1 && (
+                        <div className="g-gold" style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, fontSize: 12 }}>
+                          <Star size={12} style={{ color: "var(--gold)", flexShrink: 0 }} />
+                          <span style={{ color: "rgba(232,201,126,0.85)", fontWeight: 500 }}>
+                            Pro plan · download all {tab.total} photos as ZIP
+                          </span>
+                        </div>
+                      )}
+
+                      {/* New search */}
+                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                        onClick={() => { setResultId(null); setTab(emptyTab()); setActiveScene("all"); }}
+                        className="btn-ghost"
+                        style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 10, fontSize: 13, cursor: "pointer" }}>
+                        <RefreshCw size={13} /> New Search
+                      </motion.button>
+                    </div>
+                  </div>
+
+                  {/* ── Scene filter pills ── */}
+                  {hasScenes && (
+                    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+                      style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 20, paddingBottom: 18, borderBottom: "1px solid var(--border)" }}>
+                      <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", flexShrink: 0, marginRight: 2 }}>
+                        Scene
+                      </span>
+
+                      {/* All pill */}
+                      <button className={`scene-pill${activeScene === "all" ? " active" : ""}`}
+                        onClick={() => setActiveScene("all")}>
+                        All · {tab.total}
+                      </button>
+
+                      {/* Per-scene pills */}
+                      {sceneLabels.map(label => (
+                        <button key={label}
+                          className={`scene-pill${activeScene === label ? " active" : ""}`}
+                          onClick={() => setActiveScene(activeScene === label ? "all" : label)}
+                          style={{ textTransform: "capitalize" }}>
+                          {sceneIcon(label)}
+                          {label} · {sceneCounts[label]}
+                        </button>
+                      ))}
+                    </motion.div>
+                  )}
+
+                  {/* ── Photo grid ── */}
+                  {filteredItems.length > 0 ? (
+                    <>
+                      <motion.div variants={stagger} initial="hidden" animate="visible"
+                        style={{ display: "grid", gridTemplateColumns: gridCols, gap: 8 }}>
+                        {filteredItems.map((item, idx) => {
+                          const imgName = nameOf(item);
+                          const scene   = sceneOf(item);
+                          return (
+                            <motion.div key={`${imgName}-${idx}`} variants={fadeUp} custom={idx % 8}
+                              className="photo-card" style={{ aspectRatio: "1" }}
+                              onClick={() => { setPreviewIndex(idx); setPreviewImage(imgName); }}>
+                              <img
+                                src={`${API}/public/events/${token}/image/${imgName}`}
+                                alt="" loading="lazy"
+                                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+
+                              {/* Scene badge */}
+                              {scene && (
+                                <div style={{ position: "absolute", top: 8, left: 8, padding: "3px 8px", borderRadius: 6, background: "rgba(0,0,0,0.62)", backdropFilter: "blur(8px)", fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.85)", textTransform: "capitalize", letterSpacing: "0.04em", border: "1px solid rgba(255,255,255,0.1)" }}>
+                                  {scene}
+                                </div>
+                              )}
+
+                              {/* Hover overlay */}
+                              <div className="photo-overlay" style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,0.88) 0%, transparent 55%)" }}>
+                                <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                                  {/* Zoom icon */}
+                                  <div style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                    <ZoomIn size={15} color="#fff" />
+                                  </div>
+                                  {/* Quick download */}
+                                  <a href={`${API}/public/events/${token}/download/${imgName}`} download
+                                    onClick={e => e.stopPropagation()}
+                                    style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(232,201,126,0.9)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", border: "1px solid rgba(232,201,126,0.5)" }}>
+                                    <Download size={14} color="#0a0808" />
+                                  </a>
+                                </div>
+                                <span style={{ position: "absolute", top: 10, right: 10, fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600 }}>
+                                  {idx + 1}/{tab.total}{tab.has_more ? "+" : ""}
+                                </span>
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </motion.div>
+
+                      <div ref={sentinelRef} style={{ height: 4 }} />
+
+                      {/* Load state */}
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "36px 0" }}>
+                        {tab.loading && (
+                          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}>
+                            <Loader2 size={22} color="var(--gold)" />
+                          </motion.div>
+                        )}
+                        {!tab.loading && !tab.has_more && tab.total > 0 && (
+                          <p style={{ color: "var(--muted)", fontSize: 12 }}>All {tab.total} photos loaded ✓</p>
+                        )}
+                        {tab.error && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--rose)" }}>
+                            <AlertCircle size={14} /> {tab.error}
+                            <button onClick={loadNextPage} style={{ color: "var(--gold)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}>
+                              <RefreshCw size={12} /> Retry
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    /* Empty state — scene filtered vs truly empty */
+                    activeScene !== "all" ? (
+                      <div style={{ textAlign: "center", padding: "64px 20px" }}>
+                        <p style={{ color: "var(--muted)", fontSize: 14, marginBottom: 12 }}>No photos tagged "{activeScene}"</p>
+                        <button onClick={() => setActiveScene("all")}
+                          style={{ color: "var(--gold)", background: "none", border: "none", cursor: "pointer", fontSize: 13 }}>
+                          ← Show all photos
+                        </button>
+                      </div>
+                    ) : (
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                        style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 16, textAlign: "center" }}>
+                        <div className="glass" style={{ width: 72, height: 72, borderRadius: 22, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <ImageIcon size={28} color="var(--muted)" />
+                        </div>
+                        <div>
+                          <p style={{ color: "rgba(255,255,255,0.75)", fontWeight: 600, fontSize: 16, marginBottom: 8 }}>No matches found</p>
+                          <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.65, maxWidth: 270 }}>
+                            Try a clear, front-facing selfie with good lighting for the best results.
+                          </p>
+                        </div>
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                          onClick={() => { setResultId(null); setTab(emptyTab()); }} className="btn-gold"
+                          style={{ padding: "11px 22px", borderRadius: 11, fontSize: 14, cursor: "pointer" }}>
+                          Try Again
+                        </motion.button>
+                      </motion.div>
+                    )
+                  )}
+                </motion.section>
+              )}
+            </motion.div>
+          )}
+
+          {/* ════════════ CONTRIBUTE MODE ════════════ */}
+          {mode === "contribute" && (
+            <motion.div key="contribute" initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }}>
+              <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 20px" }}>
+
+                <motion.button initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  onClick={() => { setMode("search"); resetContrib(); }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 32, color: "var(--dim)", background: "none", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, padding: 0 }}>
+                  <ChevronLeft size={16} /> Back to search
+                </motion.button>
+
+                <AnimatePresence mode="wait">
+
+                  {/* ─── Success ─── */}
+                  {uploadStep === "success" && (
+                    <motion.div key="success" variants={scaleIn} initial="hidden" animate="visible"
+                      style={{ textAlign: "center", padding: "40px 20px" }}>
+                      <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200, damping: 15, delay: 0.1 }}
+                        className="g-jade" style={{ width: 96, height: 96, borderRadius: 32, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 28px" }}>
+                        <CheckCircle2 size={46} color="var(--jade)" />
+                      </motion.div>
+                      <motion.h2 initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
+                        className="serif" style={{ fontSize: 36, color: "#fff", marginBottom: 10 }}>
+                        Photos Submitted!
+                      </motion.h2>
+                      <motion.p initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }}
+                        style={{ color: "var(--dim)", fontSize: 15, lineHeight: 1.7, maxWidth: 400, margin: "0 auto 32px" }}>
+                        <strong style={{ color: "var(--jade)" }}>{uploadCount} photo{uploadCount !== 1 ? "s" : ""}</strong> pending organizer review. Once approved, they'll appear in the gallery.
+                      </motion.p>
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.45 }}
+                        style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+                        <button onClick={() => { setMode("search"); resetContrib(); }} className="btn-gold"
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 22px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>
+                          Find My Photos <ArrowRight size={15} />
+                        </button>
+                        <button onClick={resetContrib} className="btn-ghost"
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 22px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>
+                          <ImagePlus size={15} /> Upload More
+                        </button>
+                      </motion.div>
+                    </motion.div>
+                  )}
+
+                  {/* ─── Drop zone ─── */}
+                  {uploadStep === "drop" && (
+                    <motion.div key="drop" variants={stagger} initial="hidden" animate="visible" exit={{ opacity: 0 }}>
+                      <motion.div variants={fadeUp} style={{ marginBottom: 24 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 6 }}>
+                          <div className="g-gold" style={{ width: 52, height: 52, borderRadius: 16, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <CloudUpload size={26} color="var(--gold)" />
+                          </div>
+                          <div>
+                            <h2 className="serif" style={{ fontSize: 30, color: "#fff", lineHeight: 1.1 }}>Share Your Photos</h2>
+                            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>Contribute to the event gallery</p>
+                          </div>
+                        </div>
+                      </motion.div>
+
+                      <motion.label variants={fadeUp} htmlFor="contrib-upload" className="drop-zone"
+                        onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add("over"); }}
+                        onDragLeave={e => e.currentTarget.classList.remove("over")}
+                        onDrop={e => { e.preventDefault(); e.currentTarget.classList.remove("over"); addContribFiles(e.dataTransfer.files); }}
+                        style={{ display: "block", border: "2px dashed var(--border)", borderRadius: 20, padding: "60px 32px", textAlign: "center", cursor: "pointer", background: "rgba(255,255,255,0.015)" }}>
+                        <input id="contrib-upload" type="file" multiple accept="image/*" style={{ display: "none" }}
+                          onChange={e => addContribFiles(e.target.files)} />
+                        <motion.div animate={{ y: [0, -6, 0] }} transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+                          style={{ width: 68, height: 68, borderRadius: 20, background: "var(--gold-dim)", border: "1px solid var(--gold-border)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px" }}>
+                          <Upload size={30} color="var(--gold)" />
+                        </motion.div>
+                        <p style={{ color: "#fff", fontSize: 17, fontWeight: 600, marginBottom: 6 }}>Drag & drop your event photos</p>
+                        <p style={{ color: "var(--muted)", fontSize: 13, marginBottom: 18 }}>or click to browse your gallery</p>
+                        <div style={{ display: "inline-flex", gap: 7, flexWrap: "wrap", justifyContent: "center" }}>
+                          {["JPG", "PNG", "HEIC", "WebP", "Max 30"].map(f => (
+                            <span key={f} style={{ padding: "3px 10px", borderRadius: 6, background: "var(--surf)", border: "1px solid var(--border)", fontSize: 11, fontWeight: 600, color: "var(--muted)", letterSpacing: "0.04em" }}>{f}</span>
+                          ))}
+                        </div>
+                      </motion.label>
+
+                      {/* Tips */}
+                      <motion.div variants={fadeUp} style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                        {[
+                          { icon: Star,  text: "Clear, well-lit photos get approved faster" },
+                          { icon: Users, text: "Group shots and candids are always welcome" },
+                        ].map((tip, i) => {
+                          const Icon = tip.icon;
+                          return (
+                            <div key={i} className="glass" style={{ borderRadius: 12, padding: "13px 15px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                              <Icon size={14} color="var(--gold)" style={{ marginTop: 2, flexShrink: 0 }} />
+                              <p style={{ color: "var(--dim)", fontSize: 12, lineHeight: 1.5 }}>{tip.text}</p>
+                            </div>
+                          );
+                        })}
+                      </motion.div>
+                    </motion.div>
+                  )}
+
+                  {/* ─── Preview & submit ─── */}
+                  {(uploadStep === "preview" || uploadStep === "submitting") && (
+                    <motion.div key="preview" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+
+                      {/* Header row */}
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+                        <div>
+                          <h2 className="serif" style={{ fontSize: 26, color: "#fff" }}>
+                            {contribFiles.length} Photo{contribFiles.length !== 1 ? "s" : ""} Selected
+                          </h2>
+                          <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 3 }}>Review before submitting</p>
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <label htmlFor="add-more-c"
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, background: "var(--surf)", border: "1px solid var(--border)", color: "var(--dim)", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                            <input id="add-more-c" type="file" multiple accept="image/*" style={{ display: "none" }}
+                              onChange={e => addContribFiles(e.target.files)} />
+                            <ImagePlus size={14} /> Add more
+                          </label>
+                          <button onClick={() => { setContribFiles([]); setUploadStep("drop"); }}
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, background: "transparent", border: "1px solid rgba(248,113,113,0.28)", color: "var(--rose)", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                            <Trash2 size={14} /> Clear
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Thumbnail grid */}
+                      <motion.div variants={stagger} initial="hidden" animate="visible"
+                        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px,1fr))", gap: 8, marginBottom: 20 }}>
+                        {contribFiles.map((cf, idx) => (
+                          <motion.div key={cf.id} variants={fadeUp} custom={idx}
+                            className="contrib-thumb"
+                            style={{ aspectRatio: "1", borderRadius: 10, overflow: "hidden", position: "relative", background: "var(--surf)", border: "1px solid var(--border)" }}>
+                            <img src={cf.preview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                            <div className="thumb-ov" style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                              <button onClick={() => setSelectedPreview(cf)}
+                                style={{ width: 30, height: 30, borderRadius: 8, background: "rgba(255,255,255,0.14)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                <Eye size={14} color="#fff" />
+                              </button>
+                              <button onClick={() => removeContribFile(cf.id)}
+                                style={{ width: 30, height: 30, borderRadius: 8, background: "rgba(248,113,113,0.2)", border: "1px solid rgba(248,113,113,0.3)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                <X size={14} color="var(--rose)" />
+                              </button>
+                            </div>
+                            <div style={{ position: "absolute", bottom: 4, left: 4, background: "rgba(0,0,0,0.6)", borderRadius: 5, padding: "1px 5px", fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.55)" }}>
+                              {(cf.file.size / 1024 / 1024).toFixed(1)}MB
+                            </div>
+                          </motion.div>
+                        ))}
+                      </motion.div>
+
+                      {/* Optional form */}
+                      <div className="glass" style={{ borderRadius: 16, padding: 20, marginBottom: 16 }}>
+                        <h3 style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, fontWeight: 700, marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                          About You <span style={{ color: "var(--muted)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span>
+                        </h3>
+                        <div style={{ display: "grid", gap: 12 }}>
+                          <div>
+                            <label style={{ display: "block", color: "var(--muted)", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Your name</label>
+                            <input type="text" value={contribName} onChange={e => setContribName(e.target.value)}
+                              placeholder="e.g. Sarah M."
+                              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)", color: "#fff", fontSize: 14, outline: "none", transition: "border-color 0.2s", fontFamily: "inherit" }}
+                              onFocus={e => e.target.style.borderColor = "var(--gold-border)"}
+                              onBlur={e => e.target.style.borderColor = "var(--border)"} />
+                          </div>
+                          <div>
+                            <label style={{ display: "block", color: "var(--muted)", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Note to organizer</label>
+                            <textarea value={contribMsg} onChange={e => setContribMsg(e.target.value)}
+                              placeholder="e.g. Photos from the after-party!" rows={2}
+                              style={{ width: "100%", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)", color: "#fff", fontSize: 14, outline: "none", resize: "vertical", fontFamily: "inherit", transition: "border-color 0.2s" }}
+                              onFocus={e => e.target.style.borderColor = "var(--gold-border)"}
+                              onBlur={e => e.target.style.borderColor = "var(--border)"} />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Error */}
+                      <AnimatePresence>
+                        {contribError && (
+                          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                            style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 10, background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.22)", marginBottom: 16 }}>
+                            <AlertCircle size={15} color="var(--rose)" style={{ flexShrink: 0 }} />
+                            <p style={{ color: "var(--rose)", fontSize: 13 }}>{contribError}</p>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+
+                      {/* Submit row */}
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <button onClick={() => { setContribFiles([]); setUploadStep("drop"); }} className="btn-ghost"
+                          style={{ padding: "13px 20px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>
+                          Back
+                        </button>
+                        <motion.button
+                          whileHover={{ scale: uploadStep === "submitting" ? 1 : 1.01 }}
+                          whileTap={{ scale: uploadStep === "submitting" ? 1 : 0.98 }}
+                          onClick={submitContrib}
+                          disabled={uploadStep === "submitting" || !contribFiles.length}
+                          className="btn-gold"
+                          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "13px 20px", borderRadius: 12, fontSize: 15, cursor: uploadStep === "submitting" ? "not-allowed" : "pointer" }}>
+                          {uploadStep === "submitting" ? (
+                            <>
+                              <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+                                <Loader2 size={17} />
+                              </motion.div>
+                              Uploading {contribFiles.length} photo{contribFiles.length !== 1 ? "s" : ""}…
+                            </>
+                          ) : (
+                            <><CloudUpload size={17} /> Submit {contribFiles.length} Photo{contribFiles.length !== 1 ? "s" : ""}</>
+                          )}
+                        </motion.button>
+                      </div>
+                      <p style={{ textAlign: "center", color: "var(--muted)", fontSize: 11, marginTop: 14, lineHeight: 1.5 }}>
+                        Photos are reviewed by the organizer before being added to the gallery.
+                      </p>
+                    </motion.div>
+                  )}
+
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </main>
+
+      {/* ══ FOOTER ══ */}
+      <footer style={{ borderTop: "1px solid var(--border)", padding: "22px 20px", textAlign: "center", position: "relative", zIndex: 1 }}>
+        <p style={{ color: "var(--muted)", fontSize: 11 }}>
+          © {new Date().getFullYear()} {APP_CONFIG.name} · Powered by AI Face Recognition
+          {isPro && <span style={{ marginLeft: 10, color: "rgba(232,201,126,0.45)", fontSize: 10 }}>✦ Pro Plan</span>}
+        </p>
+      </footer>
+
+      {/* ══════════ MODALS ══════════ */}
+
+      {/* Camera */}
       <AnimatePresence>
         {cameraOpen && (
-          <motion.div
-            className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden w-full max-w-sm"
-            >
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800">
-                <span className="text-sm font-semibold">Take a Selfie</span>
-                <button
-                  onClick={stopCamera}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-                >
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.97)", backdropFilter: "blur(24px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <motion.div initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.92, opacity: 0 }}
+              className="glass" style={{ borderRadius: 24, overflow: "hidden", width: "100%", maxWidth: 380 }}>
+              <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444", animation: "pulseRing 1.5s ease infinite" }} />
+                  <span className="serif" style={{ color: "#fff", fontSize: 16 }}>Take Your Selfie</span>
+                </div>
+                <button onClick={stopCamera} style={{ width: 30, height: 30, borderRadius: 8, background: "var(--surf)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--muted)" }}>
                   <X size={14} />
                 </button>
               </div>
-              <div className="bg-zinc-950">
-                <video ref={videoRef} autoPlay playsInline muted className="w-full max-h-72 object-cover block" />
+              <div style={{ background: "#000", position: "relative" }}>
+                <video ref={videoRef} autoPlay playsInline muted
+                  style={{ width: "100%", maxHeight: 320, objectFit: "cover", display: "block" }} />
+                <div style={{ position: "absolute", inset: 20, border: "1.5px solid rgba(232,201,126,0.3)", borderRadius: 16, pointerEvents: "none" }} />
               </div>
-              <div className="p-4">
-                <button
-                  onClick={capturePhoto}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
-                >
-                  <Camera size={14} />
-                  Capture Photo
-                </button>
+              <div style={{ padding: 14, display: "flex", gap: 10 }}>
+                <button onClick={stopCamera} className="btn-ghost"
+                  style={{ flex: 1, padding: "12px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }} onClick={capturePhoto} className="btn-gold"
+                  style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>
+                  <Camera size={16} /> Capture
+                </motion.button>
               </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ── IMAGE PREVIEW MODAL ── */}
+      {/* Photo lightbox */}
       <AnimatePresence>
         {previewImage && (
-          <motion.div
-            className="fixed inset-0 bg-black/92 backdrop-blur-md flex items-center justify-center z-50 p-4"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={() => setPreviewImage(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.93, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.93, opacity: 0 }}
-              className="relative"
-              onClick={e => e.stopPropagation()}
-            >
-              <img
-                src={`${API}/public/events/${token}/image/${previewImage}`}
-                className="max-h-[82vh] max-w-[90vw] rounded-xl block"
-              />
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.97)", backdropFilter: "blur(28px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}
+            onClick={() => setPreviewImage(null)}>
+            <motion.div initial={{ scale: 0.91 }} animate={{ scale: 1 }} exit={{ scale: 0.91 }}
+              style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
+              <img src={`${API}/public/events/${token}/image/${previewImage}`} alt=""
+                style={{ maxHeight: "85vh", maxWidth: "88vw", borderRadius: 16, display: "block", boxShadow: "0 32px 80px rgba(0,0,0,0.8)" }} />
 
-              {/* Arrow navigation */}
-              {currentItems.length > 1 && (
+              {/* Scene label in lightbox */}
+              {sceneOf(filteredItems[previewIndex]) && (
+                <div style={{ position: "absolute", top: 12, left: 12, padding: "4px 10px", borderRadius: 7, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)", fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.85)", textTransform: "capitalize", letterSpacing: "0.05em", border: "1px solid rgba(255,255,255,0.1)" }}>
+                  {sceneOf(filteredItems[previewIndex])}
+                </div>
+              )}
+
+              {/* Nav arrows */}
+              {filteredItems.length > 1 && (
                 <>
-                  <button
-                    onClick={() => navPreview(-1)}
-                    className="absolute -left-12 top-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors"
-                  >
-                    <ChevronLeft size={16} />
+                  <button onClick={() => navPreview(-1)} className="glass"
+                    style={{ position: "absolute", left: -52, top: "50%", transform: "translateY(-50%)", width: 40, height: 40, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "rgba(255,255,255,0.7)" }}>
+                    <ChevronLeft size={18} />
                   </button>
-                  <button
-                    onClick={() => navPreview(1)}
-                    className="absolute -right-12 top-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-colors"
-                  >
-                    <ChevronRight size={16} />
+                  <button onClick={() => navPreview(1)} className="glass"
+                    style={{ position: "absolute", right: -52, top: "50%", transform: "translateY(-50%)", width: 40, height: 40, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "rgba(255,255,255,0.7)" }}>
+                    <ChevronRight size={18} />
                   </button>
                 </>
               )}
 
               {/* Bottom bar */}
-              <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent rounded-b-xl px-4 py-4 flex items-end justify-between">
-                <span className="text-xs text-white/40">
-                  {previewIndex + 1} / {currentItems.length}
-                  {tab.has_more && "+"}
+              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(to top, rgba(0,0,0,0.95), transparent)", borderRadius: "0 0 16px 16px", padding: "28px 16px 14px", display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
+                <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 12 }}>
+                  {previewIndex + 1} / {filteredItems.length}{tab.has_more ? "+" : ""}
                 </span>
-                <a
-                  href={`${API}/public/events/${token}/download/${previewImage}`}
-                  className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-                >
-                  <Download size={12} />
-                  Download
+                <a href={`${API}/public/events/${token}/download/${previewImage}`} className="btn-gold"
+                  style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 16px", borderRadius: 10, fontSize: 13, textDecoration: "none" }}>
+                  <Download size={14} /> Download
                 </a>
               </div>
 
-              {/* Close */}
-              <button
-                onClick={() => setPreviewImage(null)}
-                className="absolute top-2.5 right-2.5 w-7 h-7 flex items-center justify-center rounded-lg bg-black/60 border border-white/10 text-white hover:bg-black/80 transition-colors"
-              >
+              <button onClick={() => setPreviewImage(null)} className="glass"
+                style={{ position: "absolute", top: 10, right: 10, width: 34, height: 34, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "rgba(255,255,255,0.7)" }}>
+                <X size={14} />
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Contrib file preview */}
+      <AnimatePresence>
+        {selectedPreview && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.96)", backdropFilter: "blur(20px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}
+            onClick={() => setSelectedPreview(null)}>
+            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
+              onClick={e => e.stopPropagation()} style={{ position: "relative" }}>
+              <img src={selectedPreview.preview} alt=""
+                style={{ maxHeight: "82vh", maxWidth: "88vw", borderRadius: 14, display: "block", boxShadow: "0 32px 80px rgba(0,0,0,0.8)" }} />
+              <div className="glass" style={{ position: "absolute", bottom: 12, left: 12, right: 12, borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 12 }}>{selectedPreview.file.name}</span>
+                <button onClick={() => { removeContribFile(selectedPreview.id); setSelectedPreview(null); }}
+                  style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 7, background: "rgba(248,113,113,0.14)", border: "1px solid rgba(248,113,113,0.28)", color: "var(--rose)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                  <Trash2 size={12} /> Remove
+                </button>
+              </div>
+              <button onClick={() => setSelectedPreview(null)} className="glass"
+                style={{ position: "absolute", top: 10, right: 10, width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "rgba(255,255,255,0.7)" }}>
                 <X size={13} />
               </button>
             </motion.div>
@@ -628,71 +1109,59 @@ export default function PublicSelfiePage() {
         )}
       </AnimatePresence>
 
-      {/* ── INFO MODAL ── */}
+      {/* Info / How it works modal */}
       <AnimatePresence>
         {showInfo && (
-          <motion.div
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={() => setShowInfo(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0, y: 8 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 8 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-sm"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <h3 className="text-sm font-semibold">How it works</h3>
-                <button
-                  onClick={() => setShowInfo(false)}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-                >
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.87)", backdropFilter: "blur(16px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}
+            onClick={() => setShowInfo(false)}>
+            <motion.div initial={{ scale: 0.93, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.93, y: 16 }}
+              className="glass" style={{ borderRadius: 24, padding: 32, width: "100%", maxWidth: 380 }}
+              onClick={e => e.stopPropagation()}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
+                <h3 className="serif" style={{ fontSize: 24, color: "#fff" }}>How It Works</h3>
+                <button onClick={() => setShowInfo(false)}
+                  style={{ width: 30, height: 30, borderRadius: 8, background: "var(--surf)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--muted)" }}>
                   <X size={13} />
                 </button>
               </div>
-              <p className="text-xs text-zinc-500 mb-5">AI-powered face matching to find your event photos</p>
-
-              <div className="border-t border-zinc-800 divide-y divide-zinc-800">
+              <p style={{ color: "var(--muted)", fontSize: 13, marginBottom: 24, lineHeight: 1.65 }}>
+                Our AI uses facial recognition to find every photo where you appear — across the entire event gallery.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16, borderTop: "1px solid var(--border)", paddingTop: 24 }}>
                 {[
-                  { n: "1", title: "Upload your selfie",    desc: "Take or upload a clear photo of your face" },
-                  { n: "2", title: "AI scans the event",    desc: "Our model searches all event photos for matches" },
-                  { n: "3", title: "Scroll & download",     desc: "Photos load as you scroll — download any or all" },
-                ].map(step => (
-                  <div key={step.n} className="flex items-start gap-3 py-3.5">
-                    <div className="w-5 h-5 rounded-full bg-blue-500/15 border border-blue-500/25 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <span className="text-[10px] font-bold text-blue-400">{step.n}</span>
+                  { icon: Camera,           n: "01", title: "Upload your selfie",   desc: "A clear front-facing photo works best"              },
+                  { icon: Scan,             n: "02", title: "AI finds your face",   desc: "Every event photo is scanned instantly"             },
+                  { icon: SlidersHorizontal,n: "03", title: "Filter by scene",      desc: "Browse ceremony, dinner, party shots separately"    },
+                  { icon: Download,         n: "04", title: "Browse & download",    desc: "Scroll your matches, download any photo"            },
+                  ...(guestUpload ? [{ icon: CloudUpload, n: "05", title: "Share your photos", desc: "Contribute shots for organizer review" }] : []),
+                ].map(step => {
+                  const Icon = step.icon;
+                  return (
+                    <div key={step.n} style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+                      <div className="g-gold" style={{ width: 38, height: 38, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <Icon size={16} color="var(--gold)" />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <p style={{ color: "#fff", fontWeight: 600, fontSize: 14, marginBottom: 3 }}>{step.title}</p>
+                        <p style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.55 }}>{step.desc}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-xs font-medium text-zinc-200">{step.title}</p>
-                      <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">{step.desc}</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
-
-              <button
-                onClick={() => setShowInfo(false)}
-                className="w-full mt-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
-              >
+              <button onClick={() => setShowInfo(false)} className="btn-gold"
+                style={{ width: "100%", marginTop: 28, padding: "13px", borderRadius: 12, fontSize: 14, cursor: "pointer" }}>
                 Got it
               </button>
-
-              <p className="text-center text-[11px] text-zinc-600 mt-3 leading-relaxed">
-                Your selfie is processed in memory and never stored
+              <p style={{ textAlign: "center", color: "var(--muted)", fontSize: 11, marginTop: 14 }}>
+                Your selfie is never stored on our servers
               </p>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ── FOOTER ── */}
-      <footer className="border-t border-zinc-800/60 py-5 text-center">
-        <p className="text-xs text-zinc-600">
-          © {new Date().getFullYear()} {APP_CONFIG.name} · AI Face Matching
-        </p>
-      </footer>
     </div>
   );
 }

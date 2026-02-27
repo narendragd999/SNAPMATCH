@@ -18,3 +18,10 @@ passlib[bcrypt]
 bcrypt==3.2.0
 razorpay
 pydantic[email]
+alembic
+ultralytics
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+pyvips>=2.2.1

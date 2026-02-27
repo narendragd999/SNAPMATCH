@@ -123,7 +123,7 @@ def perform_search(event_id: int, embeddings, db: Session):
 
 
 # ------------------------------------------
-# PUBLIC SEARCH (With Friends Logic)
+# PUBLIC SEARCH
 # ------------------------------------------
 async def public_search_face(event_id: int, file, db: Session):
 
@@ -139,44 +139,8 @@ async def public_search_face(event_id: int, file, db: Session):
         db
     )
 
-    if not matched_photos:
-        return {
-            "matched_photos": [],
-            "friends_photos": [],
-            "matched_cluster_ids": []
-        }
-
-    # --------------------------------------
-    # Find friend photos
-    # --------------------------------------
-    user_images = set(
-        photo["image_name"] for photo in matched_photos
-    )
-
-    friend_images = set()
-
-    for image_name in user_images:
-
-        rows = db.query(Cluster).filter(
-            Cluster.event_id == event_id,
-            Cluster.image_name == image_name
-        ).all()
-
-        for r in rows:
-            if r.cluster_id not in matched_cluster_ids:
-                friend_images.add(image_name)
-
-
-    
-    clean_matched_photos = matched_photos
-
-    friend_images = list(friend_images)
-
-    
-
     return {
-        "matched_photos": clean_matched_photos,
-        "friends_photos": friend_images,
+        "matched_photos": matched_photos,
         "matched_cluster_ids": matched_cluster_ids
     }
 

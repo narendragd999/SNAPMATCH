@@ -12,9 +12,6 @@ import json
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 
-# ------------------------------------------------
-# Database Dependency
-# ------------------------------------------------
 def get_db():
     db = SessionLocal()
     try:
@@ -29,16 +26,11 @@ def get_db():
 @router.post("/create-order")
 def create_order(
     plan: str,
-    user_id: int = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
     if plan == "pro":
-        amount = 49900  # ₹499
+        amount = 49900   # ₹499
     elif plan == "enterprise":
         amount = 199900  # ₹1999
     else:
@@ -51,7 +43,7 @@ def create_order(
         "currency": "INR",
         "payment_capture": 1,
         "notes": {
-            "user_id": str(user.id),
+            "user_id": str(current_user.id),
             "plan": plan
         }
     })
@@ -66,19 +58,15 @@ def create_order(
 
 
 # ------------------------------------------------
-# Webhook (DEV + PROD SAFE)
+# Webhook — FIXED: correct hmac.new() signature
 # ------------------------------------------------
 @router.post("/webhook")
 async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     env = os.getenv("ENV", "prod")
 
-    # ---------------------------
-    # DEV MODE (Swagger Testing)
-    # ---------------------------
     if env == "dev":
-        print("⚠ DEV MODE: Using auto test payload")
-
+        # Dev mode: skip signature check, use test payload
         payload = {
             "event": "payment.captured",
             "payload": {
@@ -93,9 +81,6 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             }
         }
 
-    # ---------------------------
-    # PRODUCTION MODE (Secure)
-    # ---------------------------
     else:
         body = await request.body()
 
@@ -111,8 +96,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         if not webhook_secret:
             raise HTTPException(status_code=500, detail="Webhook secret not configured")
 
+        # FIX: was hmac.new() — correct signature is hmac.new(key, msg, digestmod)
         expected_signature = hmac.new(
-            webhook_secret.encode(),
+            webhook_secret.encode("utf-8"),
             body,
             hashlib.sha256
         ).hexdigest()
@@ -125,11 +111,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # ------------------------------------------------
     # Handle payment.captured
-    # ------------------------------------------------
     if payload.get("event") == "payment.captured":
-
         payment = payload["payload"]["payment"]["entity"]
         notes = payment.get("notes", {})
 
@@ -152,12 +135,11 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 # ------------------------------------------------
-# Payment Status Checker
+# Payment Status
 # ------------------------------------------------
 @router.get("/payment-status/{payment_id}")
 def payment_status(payment_id: str):
     client = get_razorpay_client()
-
     try:
         payment = client.payment.fetch(payment_id)
         return payment
@@ -166,12 +148,13 @@ def payment_status(payment_id: str):
 
 
 # ------------------------------------------------
-# Manual Verify (Alternative to Webhook)
+# Manual Verify
 # ------------------------------------------------
 @router.post("/verify-payment")
 def verify_payment(
     payment_id: str,
-    db: Session = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     client = get_razorpay_client()
 
@@ -188,7 +171,6 @@ def verify_payment(
                 if user:
                     user.plan_type = plan
                     db.commit()
-
                     return {
                         "status": "success",
                         "message": f"User {user_id} upgraded to {plan}"

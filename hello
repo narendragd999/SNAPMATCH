@@ -77,3 +77,199 @@ Add recurring subscription
 Add payment failure handling
 
 Add background expiry cron
+
+
+==================================================================phases
+
+19 production-ready files across 6 phases:
+Pre-Phase (do first): 4 bug fixes — the critical hmac.new() Razorpay webhook fix, duplicate SQLAlchemy engine removal, secure cookie flag, and CORS from env var.
+
+Phase 1 — Photo Metadata: New photos table with per-photo status tracking. Includes migration SQL you can run directly in psql. Foundation for all future phases.
+
+Phase 2 — Incremental Processing: Rewrites tasks.py to only process photos with status='uploaded'. Appends to existing FAISS indexes instead of rebuilding. Fixes the process_count bug (now increments only on /process, not on upload). Safe to run multiple times.
+
+Phase 3 — AI Enrichment: Places365 scene detection + YOLOv8n object detection running on a separate ai_enrichment Celery queue. Both models auto-download on first use. Stores results in photos.scene_label and photos.objects_detected.
+
+Phase 4 — Approval Workflow: 5 new moderation endpoints. Public routes now filter all queries through approval_status='approved'. Activation requires changing the default in upload_routes.py from 'approved' to 'pending'.
+
+Phase 5 — OTP + Redis: Guest phone verification via Fast2SMS/MSG91/Twilio. Guest JWT separate from owner JWT. In-memory cache replaced with Redis TTL keys that survive restarts. guest_sessions table tracks verified guests across sessions.
+
+
+==================phase 4- AI_ENRichment==================
+Now I have a complete picture of both pages. Let me give you the accurate, grounded plan.
+
+---
+
+## What I Now Know — The Real Architecture
+
+### Public Selfie Page (`public_selfie_page.tsx`)
+- **Two modes:** `"search"` and `"contribute"` — entirely separate UIs
+- **Search mode has 3 states:** hero (no results) → processing spinner → results grid
+- **Results have two tabs:** `"you"` (Your Photos) and `"friends"` (Friends Nearby) — each is a `TabState` with infinite scroll via `IntersectionObserver`
+- Each photo item is just `image_name` (string) — **no scene_label or objects on the item at all**
+- The photo grid is `auto-fill minmax(200px, 1fr)` — images fill the whole space, no sidebar
+
+### Owner Event Detail Page (`page_-_EventDetail.tsx`)
+- **4 tabs:** `overview` | `clusters` | `search` | `guest_uploads`
+- **Clusters tab:** collapsible accordion rows per cluster (`setExpanded`). Each row shows: preview thumbnail, `#cluster_id`, photo count, strip of 6 thumbnail previews, download button. Expanded: image grid with lightbox + download
+- **Search tab (owner):** POST to `/events/{eventId}/search` (different from public) — returns `SearchResult { total_matches, matches: [{image_name, cluster_id, similarity}] }`. No pagination, no tabs
+- **Current `ClusterItem` interface:** `{cluster_id, image_count, preview_image, images[]}` — **no scene_label**
+
+---
+
+## Corrected, Page-by-Page Implementation Plan
+
+---
+
+### Feature 1: Filter by Scene
+
+**Owner Event Detail — Clusters Tab**
+
+The clusters tab renders an accordion list. Adding scene filtering here is natural.
+
+**What to add:**
+- Add `scene_label?: string` to the `ClusterItem` interface
+- After the cluster list header (`{clusters.total_clusters} Face Clusters`), add a horizontal scene filter pill bar:
+  - Pills are fetched from a new `GET /events/{eventId}/scenes` endpoint on tab load alongside `loadClusters()`
+  - State: `const [sceneFilter, setSceneFilter] = useState<string | null>(null)`
+  - Filter the rendered list client-side: `clusters.clusters.filter(c => !sceneFilter || c.scene_label === sceneFilter)`
+  - Each cluster row header gets a small scene badge next to the cluster name: `🌿 Outdoor` in a tiny pill
+
+**No new tab needed — it's a filter row inside the existing Clusters tab.**
+
+**Public Selfie Page**
+
+There is no browse-all gallery on the public page. Scene filtering **cannot** go here in a meaningful way. The public page is entirely selfie-search-driven — you get *your* results, not the full gallery.
+
+**However:** on the results grid (after face search), we can add a secondary filter strip above the photo grid to filter the returned results by scene — e.g. "Show only outdoor photos from your matches." This requires `scene_label` to be included in the search result items.
+
+**What to add:**
+- Backend: include `scene_label` in each item returned from the face search cache
+- Frontend: after the `"you"` / `"friends"` tab switcher row (line ~478), add a thin scene chip row: `All | 🌿 Outdoor | 🏠 Indoor | ...`
+- Client-side filter on `currentItems` — no re-fetch needed since results are already cached
+- State: `const [sceneFilter, setSceneFilter] = useState<string | null>(null)` — reset on new search
+
+---
+
+### Feature 2: Search by Object
+
+**Owner Event Detail — Search Tab**
+
+The owner search tab currently shows results with `similarity` badge and `cluster_id`. After a search, each matched photo has `image_name`, `cluster_id`, `similarity`.
+
+**What to add:**
+- Backend: include `objects_detected` (parsed array of names) in each match item from `POST /events/{eventId}/search`
+- Frontend: below the "X Matches Found" header, add an object chip filter strip populated from the union of all objects across the matched photos — computed client-side from the result
+- State: `const [objectFilter, setObjectFilter] = useState<string | null>(null)`
+- Filter `searchResult.matches` client-side: `matches.filter(m => !objectFilter || m.objects?.includes(objectFilter))`
+- Each photo card in the results grid can optionally show tiny object tags on hover overlay
+
+**Public Selfie Page**
+
+Same approach as above — object chips appear in the results section, below the tab switcher.
+
+- After the scene filter row (Feature 1), add an object filter row: top-5 objects detected across current tab's items
+- Client-side filter on `currentItems` — `nameOf(item)` is the image_name, and the item would now carry `objects` array
+- Chips styled with the existing `glass` / `glass-gold` CSS variables
+
+**Key:** Both pages need backend to return enriched items. The change is in `api_public_routes.py` → `_store_result()` and the search response builder.
+
+---
+
+### Feature 3: Scene Badges on Clusters
+
+**Owner Event Detail — Clusters Tab**
+
+The cluster accordion row (lines ~994–1044) currently shows:
+```
+[preview thumbnail] | #id  "Cluster N"  | N photos | [image strip] | [download] | [chevron]
+```
+
+**Add a scene badge between the cluster name and photo count:**
+```
+[preview thumbnail] | #id  "Cluster N"  🌿 Outdoor | N photos | [image strip] | ...
+```
+
+The badge is a `<span>` with color keyed to scene: green=outdoor, blue=indoor, amber=dining/food, teal=nature. Requires `scene_label` on `ClusterItem` from backend.
+
+**Public Selfie Page**
+
+The public page has **no cluster browsing UI at all** — it's selfie-search only. There's nowhere to show cluster badges. This feature **does not apply to the public selfie page**.
+
+---
+
+### Exact Change Map
+
+| What | File | Where exactly |
+|---|---|---|
+| `scene_label` on clusters response | `api_event_routes.py` → `get_event_clusters()` | JOIN Cluster→Photo, compute dominant scene per cluster_id |
+| `GET /events/{eventId}/scenes` (owner) | `api_event_routes.py` | New endpoint, distinct scene_labels + cluster counts |
+| `scene_label` + `objects` on owner search results | `api_event_routes.py` → `search_face_in_event()` | Add fields to each match dict |
+| `scene_label` + `objects` on public search items | `api_public_routes.py` → `_store_result()` | Enrich `matched_photos` and `friends_photos` items when caching |
+| `GET /public/events/{token}/scenes` | `api_public_routes.py` | New endpoint, returns scene counts scoped to event |
+| **Owner detail: `ClusterItem` type** | `page_-_EventDetail.tsx` line 37 | Add `scene_label?: string` |
+| **Owner detail: scene filter pills** | `page_-_EventDetail.tsx` ~line 972 | Above cluster list, after the header div |
+| **Owner detail: scene badge in row** | `page_-_EventDetail.tsx` ~line 1003 | Inside cluster header button, next to cluster name |
+| **Owner detail: object filter after search** | `page_-_EventDetail.tsx` ~line 1173 | Below "X Matches Found" header |
+| **Public: scene + object filters** | `public_selfie_page.tsx` ~line 476 | Between tab switcher and photo grid |
+| **Public: enrich item type** | `public_selfie_page.tsx` line 36+ | `nameOf()` still works; add `scene_label`, `objects` to item shape |
+
+---
+
+### One Constraint to Resolve First
+
+The `Cluster` model stores `image_name` (filename string). `Photo` stores `optimized_filename`. **Confirm these match exactly** — same filename, same extension. If they differ (e.g. cluster stores `raw_abc.jpg`, photo stores `opt_abc.webp`), you need a normalization step in the JOIN before writing any backend code. This is the single dependency everything else hangs on.
+
+======================================================================
+
+What Was Fixed & How
+1. 🔢 Cluster Flood (400 clusters for 102 photos) — tasks.py + clustering_service.py
+Root cause: The clustering threshold was 0.62 — too loose. Every face even slightly different got its own cluster. With group photos where the same person appears at different angles, lighting or partially occluded, you get explosive cluster counts.
+Fix: Raised threshold from 0.62 → 0.72 in tasks.py. At this level, ArcFace embeddings reliably merge the same person across varied shots. Also improved the search to check top-3 nearest neighbours instead of just top-1, making merging more robust. For 100 photos you should now see 20–60 clusters instead of 400.
+
+2. 👥 Friends Tab Same as Your Photos — search_service.py
+Root cause: The old logic was broken — it found images in matching clusters, then added to friend_images but never excluded photos where the user appears. Result: same photos in both tabs.
+Fix — complete rewrite of friends logic:
+
+user_image_names = all photos where YOU appear
+For each of your matched cluster_ids, find ALL photos containing that cluster's face
+From those, exclude any image where you appear
+The remainder = truly different photos, same co-attendees → Friends Nearby
+
+The two tabs are now guaranteed disjoint — no photo can appear in both.
+
+3. 🎬 Scene Labels — Normalized & Deduplicated — event_routes.py
+Root cause: Raw Places365 labels like office, office_cubicles, cafeteria, restaurant were all showing as separate filter chips. Plus irrelevant labels like parking_lot, butchers_shop, nursing_home appeared.
+Fix:
+
+HIDDEN_SCENE_LABELS — 30+ noisy labels never shown
+SCENE_CANONICAL — maps similar raw labels to one canonical name (e.g., office + office_cubicles both → "Office")
+/events/{id}/scenes endpoint now deduplicates by canonical name and caps at 12 chips
+/events/{id}/clusters?scene= endpoint added — proper server-side scene filtering with pagination
+
+
+4. 🎭 AI Enrichment — Event Detail Page — page-eventDetail.tsx
+
+Cluster cards show Sparkles icon + scene + object tags from AI enrichment
+Overview tab shows an AI enrichment callout card (only after processing)
+Face search results now show scene_display + scene_emoji badges
+Cluster count badge in tab label for quick glance
+
+
+5. 🔍 Scene Filters & Reset — Both Pages
+
+Event Detail: Scene filter lives in a bordered container. Selecting a scene correctly passes ?scene=raw_label to the backend (server-side filtered). Reset clears both activeScene and resets page → 1.
+Public Selfie: Scene deduplication by canonical name — cafeteria and restaurant both show as one "🍽️ Restaurant" chip. Each tab (You / Friends) has its own independent scene filter state. Reset button works correctly for both tabs.
+
+
+6. 🎨 Friends Tab Visual Differentiation — page-public_selfie.tsx
+
+Your Photos tab uses gold accent (tab-you-active class)
+Friends tab uses indigo/purple accent (tab-friends-active class, --indigo CSS var)
+Friends badge on photo cards is now indigo-colored (previously same gold as sim badge)
+Context callout for Friends is indigo-styled (distinct from Your Photos gold callout)
+Clearer explanation: "photos where your co-attendees appear but you are not in frame"
+
+
+
+You want to merge clusters that belong to the same person — clusters that look similar are likely the same face split across multiple cluster IDs during processing. This is a post-processing merge step on the backend using the face embeddings you already have.

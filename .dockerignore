@@ -15,4 +15,7 @@ npm-debug.log
 yarn.lock
 *.log
 .env
-
+uploads
+storage
+indexes
+frontend/node_modules
