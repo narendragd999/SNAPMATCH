@@ -156,6 +156,38 @@ def serve_photo(
         return RedirectResponse(url=url)
 
 
+# ── Serve Image (thumbnail-first, used by public selfie grid) ────────────────
+
+@router.get("/events/{public_token}/image/{image_name}")
+def serve_image(
+    public_token: str,
+    image_name:   str,
+    db: Session = Depends(get_db),
+):
+    """Serve thumbnail for grid display; falls back to full photo if thumb missing."""
+    event     = validate_public_event(public_token, db)
+    safe_name = Path(image_name).name
+    base_name = os.path.splitext(safe_name)[0]
+    thumb_filename = f"{base_name}.webp"
+
+    if STORAGE_BACKEND == "local":
+        from app.core.config import STORAGE_PATH
+        thumb_path = os.path.join(STORAGE_PATH, str(event.id), "thumbnails", thumb_filename)
+        if os.path.exists(thumb_path):
+            return FileResponse(thumb_path, media_type="image/webp")
+        photo_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
+        if os.path.exists(photo_path):
+            return FileResponse(photo_path)
+        raise HTTPException(status_code=404, detail="Image not found")
+    else:
+        try:
+            url = storage_service.get_thumbnail_url(event.id, thumb_filename)
+            return RedirectResponse(url=url)
+        except Exception:
+            url = storage_service.get_file_url(event.id, safe_name)
+            return RedirectResponse(url=url)
+
+
 # ── Public Selfie Search ───────────────────────────────────────────────────────
 
 @router.post("/events/{public_token}/search")
@@ -166,23 +198,11 @@ async def public_search(
 ):
     event = validate_public_event(public_token, db)
 
-    raw_bytes = await file.read()
-
-    # Write selfie to a temp file for face detection
-    tmp_dir  = f"/tmp/snapfind_search"
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, f"selfie_{uuid.uuid4().hex}.jpg")
-
-    try:
-        with open(tmp_path, "wb") as f:
-            f.write(raw_bytes)
-        raw_result = await public_search_face(event.id, tmp_path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    raw_result = await public_search_face(event.id, file, db)
 
     if not raw_result or (not raw_result.get("matched_photos") and not raw_result.get("friends_photos")):
-        return {"result_id": None, "total_matched": 0, "total_friends": 0, "page": 1, "pages": 0, "matched_photos": [], "friends_photos": []}
+        empty_page = {"result_id": None, "page": 1, "page_size": PAGE_SIZE, "total": 0, "total_pages": 0, "has_more": False, "items": []}
+        return {"result_id": None, "you": empty_page, "friends": empty_page}
 
     result_id = _store_result(raw_result, event.id, db)
 
@@ -193,13 +213,25 @@ async def public_search(
     total_friends = len(entry["friends_photos"])
 
     return {
-        "result_id":     result_id,
-        "total_matched": total_matched,
-        "total_friends": total_friends,
-        "page":          1,
-        "pages":         max(1, -(-total_matched // PAGE_SIZE)),
-        "matched_photos": entry["matched_photos"][:PAGE_SIZE],
-        "friends_photos": entry["friends_photos"][:PAGE_SIZE],
+        "result_id": result_id,
+        "you": {
+            "result_id":   result_id,
+            "page":        1,
+            "page_size":   PAGE_SIZE,
+            "total":       total_matched,
+            "total_pages": max(1, -(-total_matched // PAGE_SIZE)),
+            "has_more":    total_matched > PAGE_SIZE,
+            "items":       entry["matched_photos"][:PAGE_SIZE],
+        },
+        "friends": {
+            "result_id":   result_id,
+            "page":        1,
+            "page_size":   PAGE_SIZE,
+            "total":       total_friends,
+            "total_pages": max(1, -(-total_friends // PAGE_SIZE)),
+            "has_more":    total_friends > PAGE_SIZE,
+            "items":       entry["friends_photos"][:PAGE_SIZE],
+        },
     }
 
 
@@ -222,17 +254,19 @@ def get_search_page(
     if not entry:
         raise HTTPException(status_code=404, detail="Search result expired. Please search again.")
 
-    all_items = entry["matched_photos"] if kind == "matched" else entry["friends_photos"]
+    all_items = entry["matched_photos"] if kind in ("matched", "you") else entry["friends_photos"]
     start = (page - 1) * PAGE_SIZE
     page_items = all_items[start : start + PAGE_SIZE]
     total = len(all_items)
 
     return {
-        "result_id": result_id,
-        "total":     total,
-        "page":      page,
-        "pages":     max(1, -(-total // PAGE_SIZE)),
-        "items":     page_items,
+        "result_id":   result_id,
+        "page":        page,
+        "page_size":   PAGE_SIZE,
+        "total":       total,
+        "total_pages": max(1, -(-total // PAGE_SIZE)),
+        "has_more":    (page * PAGE_SIZE) < total,
+        "items":       page_items,
     }
 
 
