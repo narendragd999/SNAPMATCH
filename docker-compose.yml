@@ -1,116 +1,118 @@
+version: "3.9"
+
+# ============================================================
+# SnapFind AI — Docker Compose
+# Includes MinIO for local object storage.
+# For Cloudflare R2: remove the minio service and update
+# the STORAGE_BACKEND env vars in all services.
+# ============================================================
+
 services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:15
+    image: postgres:15-alpine
     container_name: event_postgres
     environment:
-      POSTGRES_USER: postgres
+      POSTGRES_USER:     postgres
       POSTGRES_PASSWORD: admin123
-      POSTGRES_DB: event_ai
-    ports:
-      - "5432:5432"
+      POSTGRES_DB:       event_ai
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d event_ai"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
+  # ── Redis ────────────────────────────────────────────────────────────────────
   redis:
-    image: redis:7
+    image: redis:7-alpine
     container_name: event_redis
     ports:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
+  # ── MinIO (S3-compatible object storage) ─────────────────────────────────────
+  # Access console at: http://localhost:9001
+  # Username: minioadmin / Password: minioadmin
+  #
+  # To use Cloudflare R2 instead:
+  #   1. Remove this service
+  #   2. Change STORAGE_BACKEND=r2 in all services below
+  #   3. Update MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / MINIO_PUBLIC_URL
+  minio:
+    image: minio/minio:latest
+    container_name: event_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Backend ──────────────────────────────────────────────────────────────────
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
     container_name: event_backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./indexes:/app/indexes       # FAISS index files (always local)
+      - insightface_models:/root/.insightface
+      - ./storage:/app/storage
     ports:
       - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      - ./storage:/app/storage
-      - ./indexes:/app/indexes
-      - ./models:/app/models
-      - ./alembic:/app/alembic
-      - ./alembic.ini:/app/alembic.ini
-      - insightface_models:/root/.insightface
-      - ./models:/root/.cache
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
-      - MAX_PHOTO_SIZE_MB=20
-      - YOLO_MODEL_PATH=yolov8n.pt
-    # TODO: remove --reload before going to production
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # ── ORCHESTRATOR WORKER ────────────────────────────────────────────────────
-  # Queue:  photo_processing  (also handles process_event dispatch tasks)
-  # Role:   Receives process_event(), fans out N × process_single_photo tasks,
-  #         wires the chord callback.  Lightweight — no model loading.
-  # Pool:   prefork — safe for fan-out, no heavy model state held here.
-  # Note:   This worker ALSO handles process_single_photo tasks alongside the
-  #         dedicated photo workers below.  All share the same queue.
-  celery_orchestrator:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    container_name: event_celery_orchestrator
-    command: >
-      celery -A app.workers.celery_worker worker
-      -Q photo_processing
-      --concurrency=2
-      --pool=prefork
-      --loglevel=info
-      --time-limit=600
-      --soft-time-limit=540
-      --without-mingle
-      --without-gossip
-    volumes:
-      - ./storage:/app/storage
-      - ./indexes:/app/indexes
-      - insightface_models:/root/.insightface
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
+      minio:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
-    mem_limit: 2g
+      - ALLOWED_ORIGINS=http://localhost:3000
+      - SECRET_KEY=change-me-in-production
+      - ENV=prod
+      # ── Storage ──
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=snapfind
+      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      # ── Payments ──
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
     restart: unless-stopped
 
-  # ── PHOTO WORKER 1 ─────────────────────────────────────────────────────────
-  # Queue:  photo_processing
-  # Role:   Executes process_single_photo tasks — optimize + face detect.
-  #         Each worker loads InsightFace once at first task; subsequent tasks
-  #         reuse the loaded model (warm worker pattern).
-  # Pool:   prefork — each forked process has its own InsightFace instance,
-  #         no shared model state, no GIL contention.
-  # Concurrency: 2 per worker container = 2 photos processed simultaneously.
-  #         With 2 worker containers → 4 photos in parallel total.
-  #         Tune up if you have more cores; tune down if RAM is tight
-  #         (each InsightFace instance costs ~400–600 MB).
-  celery_photo_1:
+  # ── Photo Worker ─────────────────────────────────────────────────────────────
+  celery_photo:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: event_celery_photo_1
+    container_name: event_celery_photo
     command: >
       celery -A app.workers.celery_worker worker
       -Q photo_processing
@@ -122,7 +124,6 @@ services:
       --without-mingle
       --without-gossip
     volumes:
-      - ./storage:/app/storage
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
     depends_on:
@@ -130,55 +131,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
-    # Each prefork process loads InsightFace: ~500 MB × 2 = ~1 GB + overhead
-    mem_limit: 4g
-    restart: unless-stopped
-
-  # ── PHOTO WORKER 2 ─────────────────────────────────────────────────────────
-  # Identical to photo_1 — scale horizontally by duplicating this block.
-  # To add more parallelism: copy as photo_3, photo_4, etc.
-  # On a machine with 8 cores / 16 GB RAM: 3–4 workers × concurrency=2 is safe.
-  celery_photo_2:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    container_name: event_celery_photo_2
-    command: >
-      celery -A app.workers.celery_worker worker
-      -Q photo_processing
-      --concurrency=3
-      --pool=prefork
-      --loglevel=info
-      --time-limit=120
-      --soft-time-limit=100
-      --without-mingle
-      --without-gossip
-    volumes:
-      - ./storage:/app/storage
-      - ./indexes:/app/indexes
-      - insightface_models:/root/.insightface
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
+      minio:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=snapfind
+      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
     mem_limit: 4g
     restart: unless-stopped
 
-  # ── FINALIZER WORKER ───────────────────────────────────────────────────────
-  # Queue:  event_finalize
-  # Role:   Runs finalize_event() — clustering, merge pass, FAISS rebuild.
-  #         Must be concurrency=1 to prevent two events racing through the
-  #         clustering logic simultaneously and corrupting the FAISS index.
-  # Pool:   solo — single-threaded, lowest overhead, perfectly safe at c=1.
-  # Time limit: generous (3600s) — a 5000-photo event can take a while to
-  #         cluster and rebuild FAISS.
+  # ── Finalizer Worker ─────────────────────────────────────────────────────────
   celery_finalize:
     build:
       context: .
@@ -195,7 +162,6 @@ services:
       --without-mingle
       --without-gossip
     volumes:
-      - ./storage:/app/storage
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
     depends_on:
@@ -203,18 +169,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
-    # Clustering loads all embeddings into RAM; 6 GB covers ~50k face rows
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=snapfind
+      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
     mem_limit: 6g
     restart: unless-stopped
 
-  # ── AI ENRICHMENT WORKER ──────────────────────────────────────────────────
-  # Queue:  ai_enrichment
-  # Role:   Places365 scene classification + YOLO object detection per photo.
-  #         Both models are CPU-bound and heavy; concurrency=1 is correct —
-  #         running 2 concurrently doubles RAM for no real throughput gain.
+  # ── AI Enrichment Worker ──────────────────────────────────────────────────────
   celery_ai:
     build:
       context: .
@@ -230,26 +199,29 @@ services:
       --without-mingle
       --without-gossip
     volumes:
-      - ./storage:/app/storage
       - ./models:/app/models
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=snapfind
+      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
       - PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
-      - MAX_PHOTO_SIZE_MB=20
       - YOLO_MODEL_PATH=yolov8n.pt
     mem_limit: 4g
     restart: unless-stopped
 
-  # ── DEFAULT WORKER ────────────────────────────────────────────────────────
-  # Queue:  default
-  # Role:   cleanup_expired_events beat task + any unrouted tasks.
-  #         Lightweight — no model loading.
+  # ── Default Worker ────────────────────────────────────────────────────────────
   celery_default:
     build:
       context: .
@@ -265,7 +237,6 @@ services:
       --without-mingle
       --without-gossip
     volumes:
-      - ./storage:/app/storage
       - insightface_models:/root/.insightface
     depends_on:
       postgres:
@@ -275,19 +246,21 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=snapfind
+      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
     restart: unless-stopped
 
-  # ── BEAT SCHEDULER ────────────────────────────────────────────────────────
-  # Runs the daily cleanup_expired_events cron.
-  # Must run as a separate process — never co-locate beat with a worker.
+  # ── Beat Scheduler ────────────────────────────────────────────────────────────
   celery_beat:
     build:
       context: .
       dockerfile: Dockerfile.backend
     container_name: event_celery_beat
-    command: >
-      celery -A app.workers.celery_worker beat
-      --loglevel=info
+    command: celery -A app.workers.celery_worker beat --loglevel=info
     depends_on:
       postgres:
         condition: service_healthy
@@ -298,6 +271,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
     restart: unless-stopped
 
+  # ── Frontend ──────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -309,7 +283,12 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # When using MinIO/R2, the frontend should build image URLs using
+      # NEXT_PUBLIC_STORAGE_URL (set to MINIO_PUBLIC_URL value)
+      - NEXT_PUBLIC_STORAGE_URL=http://localhost:9000/snapfind
+      - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
 volumes:
   postgres_data:
+  minio_data:
   insightface_models:

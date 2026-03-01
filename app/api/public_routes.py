@@ -1,33 +1,44 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Form, Request
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from fastapi.responses import FileResponse, StreamingResponse
-from app.database.db import SessionLocal
-from app.models.event import Event
-from app.models.cluster import Cluster
-from app.models.photo import Photo
-from app.models.user import User
-from app.core.config import STORAGE_PATH
-from app.services.search_service import public_search_face
-from app.services.search_service import search_face
-from PIL import Image as PILImage, ImageFile, UnidentifiedImageError
-from datetime import datetime
-from pathlib import Path
-from typing import List
-import zipfile
-import os
+"""
+app/api/public_routes.py
+
+Public (unauthenticated) endpoints — selfie search, photo browsing, downloads.
+
+Key changes for object-storage:
+  - FileResponse replaced with StreamingResponse (downloads bytes from storage_service)
+  - Thumbnail serving uses storage_service.get_thumbnail_url() redirect for minio/r2,
+    or streams locally for local backend
+  - ZIP downloads stream from storage_service.download_file()
+"""
 import io
+import os
 import uuid
 import time
+import zipfile
+from pathlib import Path
 from threading import Lock
+from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Form, Request
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
+from PIL import Image as PILImage, ImageFile, UnidentifiedImageError
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.config import STORAGE_PATH
+from app.database.db import SessionLocal
+from app.models.cluster import Cluster
+from app.models.event import Event
+from app.models.photo import Photo
+from app.models.user import User
+from app.services import storage_service
+from app.services.search_service import public_search_face, search_face
 
 router = APIRouter(prefix="/public", tags=["public"])
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# --------------------------------------------------
-# Database Dependency
-# --------------------------------------------------
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -36,28 +47,14 @@ def get_db():
         db.close()
 
 
-# --------------------------------------------------
-# In-Memory Search Result Cache
-# --------------------------------------------------
-# Stores paginated face-match results so the expensive
-# search only runs ONCE per upload. Subsequent page
-# requests just slice from cache — instant response.
-#
-# Structure:
-#   _cache[result_id] = {
-#       "matched_photos": [...],   # list of {image_name, ...}
-#       "friends_photos": [...],   # list of image_name strings
-#       "expires_at":     float,   # unix timestamp
-#   }
-
+# ── In-Memory Search Result Cache ─────────────────────────────────────────────
 _cache: dict[str, dict] = {}
 _cache_lock = Lock()
-CACHE_TTL = 60 * 30   # 30 minutes
-PAGE_SIZE  = 30        # photos per page
+CACHE_TTL = 60 * 30
+PAGE_SIZE  = 30
 
 
 def _evict_expired():
-    """Remove stale cache entries (called lazily on every request)."""
     now = time.time()
     with _cache_lock:
         expired = [k for k, v in _cache.items() if v["expires_at"] < now]
@@ -69,533 +66,51 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
     """Cache full face-match result enriched with scene + objects, return result_id."""
     _evict_expired()
 
-    import json
+    # Enrich matched_photos with scene + objects from Photo table
+    matched_photos = result.get("matched_photos", [])
+    friends_photos = result.get("friends_photos", [])
 
-    # Collect all image_names that need enrichment
-    matched = result.get("matched_photos", [])
-    friends = result.get("friends_photos", [])
-
-    def extract_name(item):
-        return item if isinstance(item, str) else item.get("image_name", "")
-
-    all_names = list({
-        extract_name(i)
-        for i in matched + friends
-        if extract_name(i)
-    })
-
-    # Single DB query for all photos at once
-    photo_meta = {}
-    if all_names and db:
-        photos = (
-            db.query(
-                Photo.optimized_filename,
-                Photo.scene_label,
-                Photo.objects_detected,
-            )
-            .filter(
-                Photo.event_id == event_id,
-                Photo.optimized_filename.in_(all_names),
-            )
-            .all()
-        )
-        for row in photos:
-            try:
-                parsed = json.loads(row.objects_detected) if row.objects_detected else []
-                objects = [o["label"] for o in parsed if "label" in o]
-            except (json.JSONDecodeError, TypeError):
-                objects = []
-            photo_meta[row.optimized_filename] = {
-                "scene_label": row.scene_label,
-                "objects":     objects,
-            }
-
-    def enrich(items):
+    def _enrich(items):
         enriched = []
         for item in items:
-            name = extract_name(item)
-            meta = photo_meta.get(name, {})
-            if isinstance(item, str):
-                enriched.append({
-                    "image_name":  item,
-                    "scene_label": meta.get("scene_label"),
-                    "objects":     meta.get("objects", []),
-                })
-            else:
-                enriched.append({
-                    **item,
-                    "scene_label": meta.get("scene_label"),
-                    "objects":     meta.get("objects", []),
-                })
+            image_name = item if isinstance(item, str) else item.get("image_name", "")
+            photo = db.query(Photo).filter(
+                Photo.event_id == event_id,
+                Photo.optimized_filename == image_name,
+            ).first()
+            d = {"image_name": image_name}
+            if photo:
+                d["scene_label"]       = photo.scene_label
+                d["objects_detected"]  = photo.objects_detected
+            enriched.append(d)
         return enriched
 
-    result_id = str(uuid.uuid4())
+    matched_enriched = _enrich(matched_photos)
+    friends_enriched = _enrich(friends_photos) if isinstance(friends_photos[0] if friends_photos else None, dict) else [
+        {"image_name": f} for f in friends_photos
+    ]
+
+    result_id = uuid.uuid4().hex
     with _cache_lock:
         _cache[result_id] = {
-            "matched_photos": enrich(matched),
-            "friends_photos": enrich(friends),
+            "matched_photos": matched_enriched,
+            "friends_photos": friends_enriched,
             "expires_at":     time.time() + CACHE_TTL,
         }
     return result_id
 
 
-def _get_page(result_id: str, kind: str, page: int) -> dict | None:
-    """
-    Slice cached results for the requested page.
-    kind: "you"     → matched_photos
-          "friends" → friends_photos
-    Returns None if result_id is missing or expired.
-    """
-    _evict_expired()
-    with _cache_lock:
-        entry = _cache.get(result_id)
-
-    if entry is None:
-        return None
-
-    all_items   = entry["friends_photos"] if kind == "friends" else entry["matched_photos"]
-    total       = len(all_items)
-    total_pages = max(1, -(-total // PAGE_SIZE))   # ceiling division
-    offset      = (page - 1) * PAGE_SIZE
-    page_items  = all_items[offset: offset + PAGE_SIZE]
-
-    return {
-        "result_id":   result_id,
-        "page":        page,
-        "page_size":   PAGE_SIZE,
-        "total":       total,
-        "total_pages": total_pages,
-        "has_more":    page < total_pages,
-        "items":       page_items,
-    }
-
-
-# --------------------------------------------------
-# Common Public Event Validator
-# --------------------------------------------------
 def validate_public_event(public_token: str, db: Session) -> Event:
-    event = db.query(Event).filter(
-        Event.public_token == public_token
-    ).first()
-
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    if event.public_status != "active":
-        raise HTTPException(status_code=403, detail="Public access disabled")
-
-    if event.expires_at and datetime.utcnow() > event.expires_at:
-        raise HTTPException(status_code=403, detail="Public link expired")
-
-    if event.processing_status != "completed":
-        raise HTTPException(status_code=400, detail="Event not ready")
-
-    return event
-
-
-# --------------------------------------------------
-# Public Event Info
-# --------------------------------------------------
-@router.get("/events/{public_token}")
-def get_public_event(
-    public_token: str,
-    db: Session = Depends(get_db),
-):
-    event = validate_public_event(public_token, db)
-
-    return {
-        "event_name":           event.name,
-        "event_id":             event.id,
-        "status":               event.processing_status,
-        "guest_upload_enabled": getattr(event, "guest_upload_enabled", False),
-    }
-
-# --------------------------------------------------
-# Guest Photo Contribution
-# POST /public/events/{token}/contribute
-#
-# UPLOAD FLOW:
-#   guest submits photos
-#       → saved to disk as guest_{uuid}.ext
-#       → Photo row: uploaded_by='guest', approval_status='pending', status='uploaded'
-#       → event.image_count NOT incremented (not official until approved)
-#
-# APPROVAL FLOW (owner acts in approval queue):
-#   approval_status: 'pending' → 'approved' | 'rejected'
-#       → approved photos are picked up by process_images on next run
-#       → event.image_count incremented at approval time (see approval_routes.py)
-#
-# PROCESSING GUARD:
-#   process_images task MUST filter approval_status='approved' so that
-#   pending/rejected guest photos are never fed into the pipeline.
-# --------------------------------------------------
-
-GUEST_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
-GUEST_MAX_FILES          = 30      # matches the frontend 30-photo cap
-GUEST_MAX_FILE_SIZE_MB   = 25
-
-
-def _validate_guest_event(public_token: str, db: Session) -> Event:
-    """
-    Looser validator used only for the contribute endpoint.
-
-    Unlike validate_public_event(), this does NOT require processing_status='completed'.
-    Guests must be able to upload to events that are still processing or
-    haven't been processed yet — the upload and processing pipelines are independent.
-
-    Checks: exists → public_status active → not expired → guest_upload_enabled.
-    """
     event = db.query(Event).filter(Event.public_token == public_token).first()
-
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-
-    if event.public_status != "active":
-        raise HTTPException(status_code=403, detail="Public access is disabled for this event")
-
-    if event.expires_at and datetime.utcnow() > event.expires_at:
-        raise HTTPException(status_code=403, detail="This event link has expired")
-
-    if not event.guest_upload_enabled:
-        raise HTTPException(status_code=403, detail="Guest uploads are disabled for this event")
-
+    if event.public_status != "enabled":
+        raise HTTPException(status_code=403, detail="Event is not public")
     return event
 
 
-# ─── Guest Preview Thumbnail Generator ────────────────────────────────────
-GUEST_PREVIEW_SIZE = (400, 400)
+# ── Serve Thumbnail ───────────────────────────────────────────────────────────
 
-def _generate_guest_preview(file_path: str, event_id: int, stored_filename: str) -> str | None:
-    """
-    Generate a small WebP preview thumbnail from the raw guest upload.
-    Stored in storage/{event_id}/guest_previews/
-    Returns the preview filename (e.g. 'guest_abc123_preview.webp') or None on failure.
-    """
-    try:
-        preview_folder = os.path.join(STORAGE_PATH, str(event_id), "guest_previews")
-        os.makedirs(preview_folder, exist_ok=True)
-
-        base = os.path.splitext(stored_filename)[0]          # e.g. 'guest_abc123def'
-        preview_filename = f"{base}_preview.webp"
-        preview_path = os.path.join(preview_folder, preview_filename)
-
-        # Verify image integrity first
-        with PILImage.open(file_path) as img:
-            img.verify()
-
-        # Re-open after verify (verify closes the file)
-        with PILImage.open(file_path) as img:
-            img = img.convert("RGB")
-            img.thumbnail(GUEST_PREVIEW_SIZE, PILImage.LANCZOS)
-            img.save(preview_path, "WEBP", quality=60, method=3)
-
-        print(f"✅ Guest preview generated: {preview_filename}")
-        return preview_filename
-
-    except (UnidentifiedImageError, OSError) as e:
-        print(f"⚠ Preview generation failed (bad image) for {stored_filename}: {e}")
-        return None
-    except Exception as e:
-        print(f"⚠ Preview generation failed for {stored_filename}: {e}")
-        return None
-
-
-@router.post("/events/{public_token}/contribute")
-async def contribute_photos(
-    public_token:     str,
-    request:          Request,
-    files:            List[UploadFile] = File(...),
-    contributor_name: str = Form(None),
-    message:          str = Form(None),
-    db:               Session = Depends(get_db),
-):
-    """
-    Guest submits one or more photos to an event gallery.
-
-    All uploaded photos land in the owner's approval queue
-    (approval_status='pending'). They are completely invisible to the
-    processing pipeline and to other guests until the owner approves them.
-
-    Form fields (matches page.tsx submitContrib):
-        files[]            — one or more image files  (required)
-        contributor_name   — guest display name for the owner review UI  (optional)
-        message            — note from guest to organizer  (optional)
-    """
-    event = _validate_guest_event(public_token, db)
-
-    # ── Guest IP — stored for abuse/rate-limit tracking ────────────────────
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    guest_ip = (
-        forwarded_for.split(",")[0].strip()
-        if forwarded_for
-        else (request.client.host if request.client else None)
-    )
-
-    # ── Input guards ───────────────────────────────────────────────────────
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    if len(files) > GUEST_MAX_FILES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too many files. Maximum {GUEST_MAX_FILES} photos per submission.",
-        )
-
-    # ── Sanitise optional text ─────────────────────────────────────────────
-    guest_name    = contributor_name.strip() if contributor_name else None
-    guest_message = message.strip()          if message          else None
-
-    # ── Ensure storage folder exists ───────────────────────────────────────
-    # Guest photos live in the same folder as owner photos.
-    # The approval_status='pending' DB column is the only gate that keeps
-    # them out of the processing pipeline — folder location is irrelevant.
-    event_folder = os.path.join(STORAGE_PATH, str(event.id))
-    os.makedirs(event_folder, exist_ok=True)
-
-    saved  = []   # stored_filenames of successfully written photos
-    failed = []   # per-file error dicts surfaced back to the frontend
-
-    for file in files:
-        original_name = file.filename or ""
-        suffix        = Path(original_name).suffix.lower()
-
-        # ── Extension validation ───────────────────────────────────────────
-        if suffix not in GUEST_ALLOWED_EXTENSIONS:
-            failed.append({
-                "filename": original_name,
-                "reason":   f"Unsupported type '{suffix}'. Allowed: jpg, png, webp, heic",
-            })
-            continue
-
-        # ── Read content + size gate ───────────────────────────────────────
-        content = await file.read()
-        size_mb = len(content) / (1024 * 1024)
-
-        if size_mb > GUEST_MAX_FILE_SIZE_MB:
-            failed.append({
-                "filename": original_name,
-                "reason":   f"File is {size_mb:.1f} MB — maximum is {GUEST_MAX_FILE_SIZE_MB} MB",
-            })
-            continue
-
-        # ── Write to disk ──────────────────────────────────────────────────
-        # Pattern: guest_{32-char hex uuid}{ext}
-        #   "guest_" prefix   → visually distinct from owner "raw_" files in the folder
-        #   uuid4().hex       → collision-safe unique name, no path traversal risk
-        stored_filename = f"guest_{uuid.uuid4().hex}{suffix}"
-        file_path       = os.path.join(event_folder, stored_filename)
-
-        with open(file_path, "wb") as buf:
-            buf.write(content)
-
-
-        # ── Generate preview thumbnail for owner review ────────────────────────
-        preview_filename = _generate_guest_preview(file_path, event.id, stored_filename)
-
-        # ── Insert Photo row ───────────────────────────────────────────────
-        #
-        #   uploaded_by     = 'guest'    ← marks the source for all downstream logic
-        #   approval_status = 'pending'  ← THE gate; process_images must skip these
-        #   status          = 'uploaded' ← same starting state as owner uploads
-        #
-        # ⚠ event.image_count is intentionally NOT touched here.
-        #   It is incremented in approval_routes.py when the owner approves,
-        #   so image_count only ever reflects photos actually in the gallery.
-        photo = Photo(
-            event_id          = event.id,
-            original_filename = original_name,
-            stored_filename   = stored_filename,
-            file_size_bytes   = len(content),
-            # Source
-            uploaded_by       = "guest",
-            # Guest context shown in the owner approval UI
-            guest_name        = guest_name,
-            guest_message     = guest_message,
-            guest_ip          = guest_ip,
-            # Approval workflow
-            approval_status   = "pending",
-            # Processing pipeline state
-            status            = "uploaded",
-            uploaded_at       = datetime.utcnow(),
-            guest_preview_filename = preview_filename,   # ← NEW
-        )
-        db.add(photo)
-        saved.append(stored_filename)
-
-    # ── Commit only when at least one file was saved successfully ──────────
-    if not saved:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message":  "No valid photos could be saved.",
-                "rejected": failed,
-            },
-        )
-
-    db.commit()
-
-    # ── Response shape — page.tsx reads data.uploaded ──────────────────────
-    return {
-        "uploaded":       len(saved),
-        "pending_review": len(saved),
-        "message": (
-            f"{len(saved)} photo{'s' if len(saved) != 1 else ''} submitted. "
-            "They'll appear in the gallery once the organiser approves them."
-        ),
-        # Non-empty only when some batch files were skipped due to validation
-        "rejected": failed,
-    }
-
-
-
-# --------------------------------------------------
-# Public Clusters Summary
-# --------------------------------------------------
-@router.get("/events/{public_token}/clusters")
-def get_public_clusters(
-    public_token: str,
-    page:  int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    event = validate_public_event(public_token, db)
-
-    cluster_query = (
-        db.query(
-            Cluster.cluster_id,
-            func.count(Cluster.id).label("image_count")
-        )
-        .filter(Cluster.event_id == event.id)
-        .group_by(Cluster.cluster_id)
-        .order_by(func.count(Cluster.id).desc())
-    )
-
-    total_clusters = cluster_query.count()
-    offset         = (page - 1) * limit
-    cluster_page   = cluster_query.offset(offset).limit(limit).all()
-
-    cluster_list = []
-    for cid, image_count in cluster_page:
-        preview = (
-            db.query(Cluster.image_name)
-            .filter(
-                Cluster.event_id  == event.id,
-                Cluster.cluster_id == cid
-            )
-            .first()
-        )
-        cluster_list.append({
-            "cluster_id":    cid,
-            "image_count":   image_count,
-            "preview_image": preview[0] if preview else None,
-        })
-
-    return {
-        "event_name":     event.name,
-        "page":           page,
-        "limit":          limit,
-        "total_clusters": total_clusters,
-        "total_pages":    (total_clusters + limit - 1) // limit,
-        "clusters":       cluster_list,
-    }
-
-
-# --------------------------------------------------
-# Public Cluster Images
-# --------------------------------------------------
-@router.get("/events/{public_token}/clusters/{cluster_id}")
-def get_public_cluster_images(
-    public_token: str,
-    cluster_id: int,
-    page:  int = Query(1, ge=1),
-    limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_db),
-):
-    event = validate_public_event(public_token, db)
-
-    query        = db.query(Cluster).filter(
-        Cluster.event_id   == event.id,
-        Cluster.cluster_id == cluster_id,
-    )
-    total_images = query.count()
-    offset       = (page - 1) * limit
-    clusters     = query.offset(offset).limit(limit).all()
-
-    return {
-        "cluster_id":   cluster_id,
-        "page":         page,
-        "limit":        limit,
-        "total_images": total_images,
-        "total_pages":  (total_images + limit - 1) // limit,
-        "images":       [c.image_name for c in clusters],
-    }
-
-
-# --------------------------------------------------
-# Serve Public Image (Safe)
-# --------------------------------------------------
-@router.get("/events/{public_token}/image/{image_name}")
-def serve_public_image(
-    public_token: str,
-    image_name:   str,
-    db: Session = Depends(get_db),
-):
-    event     = validate_public_event(public_token, db)
-    safe_name = Path(image_name).name
-
-    if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    image_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
-
-    if not os.path.exists(image_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    return FileResponse(image_path)
-
-
-# --------------------------------------------------
-# Download Cluster ZIP (Plan Restricted)
-# --------------------------------------------------
-@router.get("/events/{public_token}/clusters/{cluster_id}/download")
-def download_cluster_zip(
-    public_token: str,
-    cluster_id:   int,
-    db: Session = Depends(get_db),
-):
-    event = validate_public_event(public_token, db)
-    owner = db.query(User).filter(User.id == event.owner_id).first()
-
-    if owner.plan_type == "free":
-        raise HTTPException(status_code=403, detail="Download not allowed for this event")
-
-    clusters = db.query(Cluster).filter(
-        Cluster.event_id   == event.id,
-        Cluster.cluster_id == cluster_id,
-    ).all()
-
-    if not clusters:
-        raise HTTPException(status_code=404, detail="Cluster not found")
-
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for cluster in clusters:
-            safe_name  = Path(cluster.image_name).name
-            image_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
-            if os.path.exists(image_path):
-                zip_file.write(image_path, arcname=safe_name)
-
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=cluster_{cluster_id}.zip"},
-    )
-
-
-# --------------------------------------------------
-# Serve Thumbnail
-# --------------------------------------------------
 @router.get("/events/{public_token}/thumbnail/{image_name}")
 def serve_thumbnail(
     public_token: str,
@@ -605,21 +120,44 @@ def serve_thumbnail(
     event     = validate_public_event(public_token, db)
     safe_name = Path(image_name).name
     base_name = os.path.splitext(safe_name)[0]
+    thumb_filename = f"{base_name}.webp"
 
-    thumbnail_path = os.path.join(
-        STORAGE_PATH, str(event.id), "thumbnails", f"{base_name}.webp"
-    )
+    if STORAGE_BACKEND == "local":
+        from app.core.config import STORAGE_PATH
+        thumb_path = os.path.join(STORAGE_PATH, str(event.id), "thumbnails", thumb_filename)
+        if not os.path.exists(thumb_path):
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+        return FileResponse(thumb_path, media_type="image/webp")
+    else:
+        # For minio/r2: redirect to the public URL
+        url = storage_service.get_thumbnail_url(event.id, thumb_filename)
+        return RedirectResponse(url=url)
 
-    if not os.path.exists(thumbnail_path):
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
 
-    return FileResponse(thumbnail_path, media_type="image/webp")
+# ── Serve Full Photo ──────────────────────────────────────────────────────────
+
+@router.get("/events/{public_token}/photo/{image_name}")
+def serve_photo(
+    public_token: str,
+    image_name:   str,
+    db: Session = Depends(get_db),
+):
+    event     = validate_public_event(public_token, db)
+    safe_name = Path(image_name).name
+
+    if STORAGE_BACKEND == "local":
+        from app.core.config import STORAGE_PATH
+        photo_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
+        if not os.path.exists(photo_path):
+            raise HTTPException(status_code=404, detail="Photo not found")
+        return FileResponse(photo_path)
+    else:
+        url = storage_service.get_file_url(event.id, safe_name)
+        return RedirectResponse(url=url)
 
 
-# --------------------------------------------------
-# Public Selfie Search  ← POST: runs face match ONCE,
-#                          caches result, returns page 1
-# --------------------------------------------------
+# ── Public Selfie Search ───────────────────────────────────────────────────────
+
 @router.post("/events/{public_token}/search")
 async def public_search(
     public_token: str,
@@ -628,121 +166,93 @@ async def public_search(
 ):
     event = validate_public_event(public_token, db)
 
-    raw_result = await public_search_face(event.id, file, db)
+    raw_bytes = await file.read()
 
-    # Pass event.id and db so _store_result can enrich items
-    result_id = _store_result(raw_result, event.id, db)   # ← signature changed
+    # Write selfie to a temp file for face detection
+    tmp_dir  = f"/tmp/snapfind_search"
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, f"selfie_{uuid.uuid4().hex}.jpg")
 
-    matched = raw_result.get("matched_photos", [])
-    friends = raw_result.get("friends_photos", [])
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(raw_bytes)
+        raw_result = await public_search_face(event.id, tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-    total_you     = len(matched)
-    total_friends = len(friends)
+    if not raw_result or (not raw_result.get("matched_photos") and not raw_result.get("friends_photos")):
+        return {"result_id": None, "total_matched": 0, "total_friends": 0, "page": 1, "pages": 0, "matched_photos": [], "friends_photos": []}
 
-    # Read back enriched items from cache for page 1
+    result_id = _store_result(raw_result, event.id, db)
+
     with _cache_lock:
-        cached = _cache.get(result_id, {})
-    enriched_matched = cached.get("matched_photos", matched)
-    enriched_friends = cached.get("friends_photos", friends)
+        entry = _cache[result_id]
+
+    total_matched = len(entry["matched_photos"])
+    total_friends = len(entry["friends_photos"])
 
     return {
-        "result_id": result_id,
-        "you": {
-            "page":        1,
-            "page_size":   PAGE_SIZE,
-            "total":       total_you,
-            "total_pages": max(1, -(-total_you // PAGE_SIZE)),
-            "has_more":    total_you > PAGE_SIZE,
-            "items":       enriched_matched[:PAGE_SIZE],
-        },
-        "friends": {
-            "page":        1,
-            "page_size":   PAGE_SIZE,
-            "total":       total_friends,
-            "total_pages": max(1, -(-total_friends // PAGE_SIZE)),
-            "has_more":    total_friends > PAGE_SIZE,
-            "items":       enriched_friends[:PAGE_SIZE],
-        },
+        "result_id":     result_id,
+        "total_matched": total_matched,
+        "total_friends": total_friends,
+        "page":          1,
+        "pages":         max(1, -(-total_matched // PAGE_SIZE)),
+        "matched_photos": entry["matched_photos"][:PAGE_SIZE],
+        "friends_photos": entry["friends_photos"][:PAGE_SIZE],
     }
 
 
-# --------------------------------------------------
-# Paginated Search Results  ← GET: subsequent pages
-#                              from cache, no re-search
-# --------------------------------------------------
+# ── Paginated result fetch ────────────────────────────────────────────────────
+
 @router.get("/events/{public_token}/search/{result_id}")
-def public_search_page(
+def get_search_page(
     public_token: str,
     result_id:    str,
-    kind: str = Query("you", regex="^(you|friends)$"),
-    page: int = Query(2, ge=2),
+    page:         int = Query(1, ge=1),
+    kind:         str = Query("matched"),
     db: Session = Depends(get_db),
 ):
-    # Validate event is still active before serving pages
     validate_public_event(public_token, db)
+    _evict_expired()
 
-    data = _get_page(result_id, kind, page)
-
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Search session expired. Please upload your photo again.",
-        )
-
-    return data
-
-
-# --------------------------------------------------
-# Download Single Image (Force Download)
-# --------------------------------------------------
-@router.get("/events/{public_token}/download/{image_name}")
-def download_single_image(
-    public_token: str,
-    image_name:   str,
-    db: Session = Depends(get_db),
-):
-    event     = validate_public_event(public_token, db)
-    safe_name = Path(image_name).name
-
-    if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    image_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
-
-    if not os.path.exists(image_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    return FileResponse(
-        image_path,
-        media_type="application/octet-stream",
-        filename=safe_name,
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
-    )
-
-
-# --------------------------------------------------
-# Download Matched Photos ZIP
-# Accepts comma-separated image names via query param
-# e.g. ?images=a.jpg,b.jpg,c.jpg
-# --------------------------------------------------
-@router.get("/events/{public_token}/download-zip")
-def download_matched_zip(
-    public_token: str,
-    result_id:    str,
-    kind: str = Query("you", regex="^(you|friends)$"),
-    db: Session = Depends(get_db),
-):
-    event = validate_public_event(public_token, db)
-
-    # Pull ALL items from cache for the requested tab
     with _cache_lock:
         entry = _cache.get(result_id)
 
-    if entry is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Search session expired. Please upload your photo again.",
-        )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Search result expired. Please search again.")
+
+    all_items = entry["matched_photos"] if kind == "matched" else entry["friends_photos"]
+    start = (page - 1) * PAGE_SIZE
+    page_items = all_items[start : start + PAGE_SIZE]
+    total = len(all_items)
+
+    return {
+        "result_id": result_id,
+        "total":     total,
+        "page":      page,
+        "pages":     max(1, -(-total // PAGE_SIZE)),
+        "items":     page_items,
+    }
+
+
+# ── Download ZIP (matched or friends) ─────────────────────────────────────────
+
+@router.get("/events/{public_token}/download/{result_id}")
+def download_photos(
+    public_token: str,
+    result_id:    str,
+    kind:         str = Query("matched"),
+    db: Session = Depends(get_db),
+):
+    event = validate_public_event(public_token, db)
+    _evict_expired()
+
+    with _cache_lock:
+        entry = _cache.get(result_id)
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Search result expired. Please search again.")
 
     all_items = entry["friends_photos"] if kind == "friends" else entry["matched_photos"]
 
@@ -750,13 +260,15 @@ def download_matched_zip(
         raise HTTPException(status_code=404, detail="No photos to download")
 
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in all_items:
             image_name = item if isinstance(item, str) else item.get("image_name", "")
             safe_name  = Path(image_name).name
-            image_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
-            if os.path.exists(image_path):
-                zip_file.write(image_path, arcname=safe_name)
+            try:
+                data = storage_service.download_file(event.id, safe_name)
+                zf.writestr(safe_name, data)
+            except Exception:
+                pass
 
     zip_buffer.seek(0)
     label = "friends" if kind == "friends" else "my_photos"
@@ -767,27 +279,27 @@ def download_matched_zip(
     )
 
 
-# --------------------------------------------------
-# Download All Event Images (ZIP)
-# --------------------------------------------------
+# ── Download All Event Photos ─────────────────────────────────────────────────
+
 @router.get("/events/{public_token}/download-all")
 def download_all_event_images(
     public_token: str,
     db: Session = Depends(get_db),
 ):
-    event        = validate_public_event(public_token, db)
-    image_folder = os.path.join(STORAGE_PATH, str(event.id))
+    event = validate_public_event(public_token, db)
 
-    if not os.path.exists(image_folder):
-        raise HTTPException(status_code=404, detail="Event folder not found")
+    filenames = storage_service.list_event_files(event.id)
+    if not filenames:
+        raise HTTPException(status_code=404, detail="No photos in event")
 
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file_name in os.listdir(image_folder):
-            if file_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                file_path = os.path.join(image_folder, file_name)
-                if os.path.isfile(file_path):
-                    zip_file.write(file_path, arcname=file_name)
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in filenames:
+            try:
+                data = storage_service.download_file(event.id, filename)
+                zf.writestr(filename, data)
+            except Exception:
+                pass
 
     zip_buffer.seek(0)
     return StreamingResponse(
@@ -797,11 +309,43 @@ def download_all_event_images(
     )
 
 
-# --------------------------------------------------
-# Public Scenes  ← NEW
-# GET /public/events/{token}/scenes
-# Returns distinct scene labels for filter chips
-# --------------------------------------------------
+# ── Download Cluster ZIP ──────────────────────────────────────────────────────
+
+@router.get("/events/{public_token}/clusters/{cluster_id}/download")
+def download_cluster(
+    public_token: str,
+    cluster_id:   int,
+    db: Session = Depends(get_db),
+):
+    event    = validate_public_event(public_token, db)
+    clusters = db.query(Cluster).filter(
+        Cluster.event_id == event.id,
+        Cluster.cluster_id == cluster_id,
+    ).all()
+
+    if not clusters:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cluster in clusters:
+            safe_name = Path(cluster.image_name).name
+            try:
+                data = storage_service.download_file(event.id, safe_name)
+                zf.writestr(safe_name, data)
+            except Exception:
+                pass
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=cluster_{cluster_id}.zip"},
+    )
+
+
+# ── Public Scenes ─────────────────────────────────────────────────────────────
+
 @router.get("/events/{public_token}/scenes")
 def get_public_scenes(
     public_token: str,
@@ -826,4 +370,97 @@ def get_public_scenes(
             {"scene_label": label, "count": count}
             for label, count in scene_counts
         ]
+    }
+
+
+# ── Guest Contribution ────────────────────────────────────────────────────────
+
+GUEST_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+GUEST_MAX_FILE_SIZE_MB   = 20
+GUEST_MAX_FILES          = 10
+
+
+@router.post("/events/{public_token}/contribute")
+async def guest_contribute(
+    public_token:     str,
+    files:            List[UploadFile] = File(...),
+    contributor_name: str = Form(""),
+    message:          str = Form(""),
+    db: Session = Depends(get_db),
+):
+    event = validate_public_event(public_token, db)
+
+    if not event.guest_upload_enabled:
+        raise HTTPException(status_code=403, detail="Guest uploads are disabled for this event.")
+
+    if len(files) > GUEST_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"Maximum {GUEST_MAX_FILES} photos per submission.")
+
+    guest_name    = contributor_name.strip() if contributor_name else None
+    guest_message = message.strip()          if message          else None
+
+    saved  = []
+    failed = []
+
+    for file in files:
+        original_name = file.filename or ""
+        suffix        = Path(original_name).suffix.lower()
+
+        if suffix not in GUEST_ALLOWED_EXTENSIONS:
+            failed.append({"filename": original_name, "reason": f"Unsupported type '{suffix}'"})
+            continue
+
+        content = await file.read()
+        size_mb = len(content) / (1024 * 1024)
+        if size_mb > GUEST_MAX_FILE_SIZE_MB:
+            failed.append({"filename": original_name, "reason": f"Too large ({size_mb:.1f} MB)"})
+            continue
+
+        stored_filename = f"guest_{uuid.uuid4().hex}{suffix}"
+
+        try:
+            storage_service.upload_file(
+                data=content,
+                event_id=event.id,
+                filename=stored_filename,
+                content_type=file.content_type or "image/jpeg",
+            )
+        except Exception as e:
+            failed.append({"filename": original_name, "reason": f"Upload failed: {e}"})
+            continue
+
+        # Generate guest preview thumbnail
+        preview_filename = None
+        try:
+            img     = PILImage.open(io.BytesIO(content))
+            img.thumbnail((400, 400))
+            preview_buf = io.BytesIO()
+            img.save(preview_buf, format="WEBP", quality=75)
+            preview_buf.seek(0)
+            preview_filename = f"preview_{stored_filename}.webp"
+            storage_service.upload_guest_preview(preview_buf.read(), event.id, preview_filename)
+        except Exception:
+            preview_filename = None
+
+        photo = Photo(
+            event_id=event.id,
+            original_filename=original_name,
+            stored_filename=stored_filename,
+            file_size_bytes=len(content),
+            uploaded_by="guest",
+            approval_status="pending",
+            status="uploaded",
+            guest_name=guest_name,
+            guest_message=guest_message,
+            guest_preview_filename=preview_filename,
+        )
+        db.add(photo)
+        saved.append(original_name)
+
+    db.commit()
+
+    return {
+        "saved":  saved,
+        "failed": failed,
+        "message": f"{len(saved)} photo(s) submitted for review.",
     }

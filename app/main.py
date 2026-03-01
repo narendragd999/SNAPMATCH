@@ -1,26 +1,37 @@
+"""
+app/main.py
+
+FastAPI application entry point.
+
+Static file serving:
+  - STORAGE_BACKEND=local  → FastAPI serves /storage/** from the local ./storage folder
+  - STORAGE_BACKEND=minio  → Files served directly from MinIO (no StaticFiles mount needed)
+  - STORAGE_BACKEND=r2     → Files served from Cloudflare R2 / custom domain
+"""
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database.db import Base, engine
-from app.models import event, cluster
-from app.api.auth_routes import router as auth_router
-from app.api.event_routes import router as event_router
-from app.api.upload_routes import router as upload_router
-from app.api.public_routes import router as public_router
-from app.api.billing_routes import router as billing_router
-from app.api.task_routes import router as task_router
-from app.api.approval_routes import router as approval_router
-from app.api.admin_routes import router as admin_router
-from app.api.guest_upload_routes import router as guest_upload_router
-from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-import os
 
 load_dotenv(dotenv_path=".env")
 
+from app.database.db import Base, engine
+from app.models import event, cluster
+from app.api.auth_routes        import router as auth_router
+from app.api.event_routes        import router as event_router
+from app.api.upload_routes       import router as upload_router
+from app.api.bulk_upload_routes  import router as bulk_upload_router
+from app.api.public_routes       import router as public_router
+from app.api.billing_routes      import router as billing_router
+from app.api.task_routes         import router as task_router
+from app.api.approval_routes     import router as approval_router
+from app.api.admin_routes        import router as admin_router
+from app.api.guest_upload_routes import router as guest_upload_router
+
 app = FastAPI(title="SnapFind AI")
 
-# FIX: CORS origins from environment variable (not hardcoded)
-raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+# ── CORS ──────────────────────────────────────────────────────────────────────
+raw_origins     = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 allowed_origins = [o.strip() for o in raw_origins.split(",")]
 
 app.add_middleware(
@@ -31,16 +42,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
+# ── Static file serving (local backend only) ──────────────────────────────────
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
 
+if STORAGE_BACKEND == "local":
+    from fastapi.staticfiles import StaticFiles
+    from app.core.config import STORAGE_PATH
+    # Mount the entire storage root at /storage
+    # URL pattern: /storage/events/{event_id}/{filename}
+    #              /storage/events/{event_id}/thumbnails/{filename}
+    #              /storage/covers/{filename}
+    app.mount("/storage", StaticFiles(directory=STORAGE_PATH), name="storage")
+
+# ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(event_router)
 app.include_router(upload_router)
+app.include_router(bulk_upload_router)
 app.include_router(public_router)
 app.include_router(billing_router)
 app.include_router(task_router)
 app.include_router(approval_router)
 app.include_router(admin_router)
-app.include_router(guest_upload_router)   # Phase 4: guest contributions
+app.include_router(guest_upload_router)
 
 Base.metadata.create_all(bind=engine)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "storage_backend": STORAGE_BACKEND}

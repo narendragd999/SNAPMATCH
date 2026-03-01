@@ -44,7 +44,7 @@ interface ClusterItem {
 }
 
 interface ClustersMeta {
-  event_id: number;
+  event_id?: number;
   total_clusters: number;
   total_images: number;
   has_more: boolean;

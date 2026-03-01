@@ -45,7 +45,7 @@ const fadeUp = {
   hidden:  { opacity: 0, y: 20 },
   visible: (i = 0) => ({
     opacity: 1, y: 0,
-    transition: { delay: i * 0.055, duration: 0.48, ease: [0.22, 1, 0.36, 1] },
+    transition: { delay: i * 0.055, duration: 0.48, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] },
   }),
 };
 const stagger = {
@@ -54,7 +54,7 @@ const stagger = {
 };
 const scaleIn = {
   hidden:  { opacity: 0, scale: 0.9 },
-  visible: { opacity: 1, scale: 1, transition: { duration: 0.42, ease: [0.22, 1, 0.36, 1] } },
+  visible: { opacity: 1, scale: 1, transition: { duration: 0.42, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] } },
 };
 
 /* ─── Scene icon map ──────────────────────────────────────────────────────── */
