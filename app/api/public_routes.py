@@ -104,7 +104,7 @@ def validate_public_event(public_token: str, db: Session) -> Event:
     event = db.query(Event).filter(Event.public_token == public_token).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    if event.public_status != "enabled":
+    if event.public_status != "active":
         raise HTTPException(status_code=403, detail="Event is not public")
     return event
 

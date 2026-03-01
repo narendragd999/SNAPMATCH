@@ -138,7 +138,7 @@ def create_event(
         owner_id=current_user.id,
         expires_at=expires_at,
         processing_status="pending",
-        public_status="disabled",
+        public_status="active",
     )
     db.add(event)
     db.commit()

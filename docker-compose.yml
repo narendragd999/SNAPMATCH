@@ -5,6 +5,11 @@ version: "3.9"
 # Includes MinIO for local object storage.
 # For Cloudflare R2: remove the minio service and update
 # the STORAGE_BACKEND env vars in all services.
+#
+# OPTIMIZATION: All celery workers share one built image
+# (snapfind-backend:latest) — saves 4-5x disk space.
+# Only 'backend' has the build block; others reuse the image.
+# Deploy with: .\deploy.ps1
 # ============================================================
 
 services:
@@ -44,11 +49,6 @@ services:
   # ── MinIO (S3-compatible object storage) ─────────────────────────────────────
   # Access console at: http://localhost:9001
   # Username: minioadmin / Password: minioadmin
-  #
-  # To use Cloudflare R2 instead:
-  #   1. Remove this service
-  #   2. Change STORAGE_BACKEND=r2 in all services below
-  #   3. Update MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / MINIO_PUBLIC_URL
   minio:
     image: minio/minio:latest
     container_name: event_minio
@@ -69,14 +69,17 @@ services:
     restart: unless-stopped
 
   # ── Backend ──────────────────────────────────────────────────────────────────
+  # This is the ONLY service that builds the image.
+  # All celery workers below reuse snapfind-backend:latest.
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest
     container_name: event_backend
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ./indexes:/app/indexes       # FAISS index files (always local)
+      - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
       - ./storage:/app/storage
     ports:
@@ -109,9 +112,7 @@ services:
 
   # ── Photo Worker ─────────────────────────────────────────────────────────────
   celery_photo:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest   # reuses backend image — no rebuild
     container_name: event_celery_photo
     command: >
       celery -A app.workers.celery_worker worker
@@ -147,9 +148,7 @@ services:
 
   # ── Finalizer Worker ─────────────────────────────────────────────────────────
   celery_finalize:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest   # reuses backend image — no rebuild
     container_name: event_celery_finalize
     command: >
       celery -A app.workers.celery_worker worker
@@ -185,9 +184,7 @@ services:
 
   # ── AI Enrichment Worker ──────────────────────────────────────────────────────
   celery_ai:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest   # reuses backend image — no rebuild
     container_name: event_celery_ai
     command: >
       celery -A app.workers.celery_worker worker
@@ -223,9 +220,7 @@ services:
 
   # ── Default Worker ────────────────────────────────────────────────────────────
   celery_default:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest   # reuses backend image — no rebuild
     container_name: event_celery_default
     command: >
       celery -A app.workers.celery_worker worker
@@ -256,9 +251,7 @@ services:
 
   # ── Beat Scheduler ────────────────────────────────────────────────────────────
   celery_beat:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
+    image: snapfind-backend:latest   # reuses backend image — no rebuild
     container_name: event_celery_beat
     command: celery -A app.workers.celery_worker beat --loglevel=info
     depends_on:
@@ -276,6 +269,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: snapfind-frontend:latest
     container_name: event_frontend
     ports:
       - "3000:3000"
@@ -283,8 +277,6 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
-      # When using MinIO/R2, the frontend should build image URLs using
-      # NEXT_PUBLIC_STORAGE_URL (set to MINIO_PUBLIC_URL value)
       - NEXT_PUBLIC_STORAGE_URL=http://localhost:9000/snapfind
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 

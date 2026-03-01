@@ -111,7 +111,7 @@ def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int):
     2. Run InsightFace face detection
     3. Return result dict (no DB writes here)
     """
-    from app.services.face_service import detect_faces_insightface
+    from app.services.face_service import process_single_image
 
     t_start = time.time()
 
@@ -125,18 +125,13 @@ def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int):
         t_opt = time.time() - t_start
 
         # ── Face detection ────────────────────────────────────────────────────
-        if face_np is None:
-            # Pipeline couldn't build numpy array — load from storage
-            tmp_path = storage_service.get_local_temp_path(event_id, optimized_name)
-            import cv2
-            face_np = cv2.imread(tmp_path)
-            if face_np is None:
-                return _photo_result(photo_id, "unreadable", optimized_name, t_opt=t_opt)
-
-        faces = detect_faces_insightface(face_np)
+        # process_single_image(event_id, file, face_np) returns:
+        #   list of (filename, normalised_embedding) tuples.
+        # Pass face_np when available to skip the disk read inside the service.
+        face_results = process_single_image(event_id, optimized_name, face_np)
 
         serialised_faces = []
-        for emb in faces:
+        for _filename, emb in face_results:
             serialised_faces.append({
                 "image_name":    optimized_name,
                 "embedding_b64": base64.b64encode(pickle.dumps(emb)).decode(),
@@ -201,7 +196,7 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
         print(f"\n📸 {total_optimized}/{total_new} optimized, {len(new_faces)} faces")
 
         if not new_faces:
-            _finalize_complete(db, event_id, total_new, 0, event_start)
+            _finalize_complete(db, event_id, total_new, 0, 0, event_start)
             _redis_cleanup(event_id)
             _release_lock(event_id)
             return {"status": "completed_no_new_faces"}
@@ -258,7 +253,6 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
                 cluster_id=assigned,
                 image_name=image_name,
                 embedding=pickle.dumps(emb),
-                photo_id=photo_id,
             ))
 
         _db_update_event(db, event_id, processing_progress=83)
@@ -279,7 +273,10 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
             Cluster.event_id == event_id
         ).distinct().count()
 
-        _finalize_complete(db, event_id, total_new, total_clusters, event_start)
+        # ── FIX: sum face counts across all processed photos for the event ──
+        total_faces = sum(len(r.get("faces") or []) for r in photo_results)
+
+        _finalize_complete(db, event_id, total_new, total_clusters, total_faces, event_start)
 
         # Queue AI enrichment
         enrich_event_photos.apply_async(args=[event_id], queue=AI_QUEUE)
@@ -409,6 +406,8 @@ def _bulk_update_photos(db, photo_results):
         m = {"id": r["photo_id"], "status": "processed" if r["status"] == "ok" else "failed"}
         if r.get("optimized_name"):
             m["optimized_filename"] = r["optimized_name"]
+        # ── FIX: persist face count so the UI "Faces" stat is populated ──────
+        m["faces_detected"] = len(r.get("faces") or [])
         mappings.append(m)
     db.bulk_update_mappings(Photo, mappings)
     db.commit()
@@ -499,16 +498,18 @@ def _rebuild_faiss(db, event_id):
     FaissManager.reload_index(event_id)
 
 
-def _finalize_complete(db, event_id, total_new, total_clusters, event_start):
+def _finalize_complete(db, event_id, total_new, total_clusters, total_faces, event_start):
     elapsed = time.time() - event_start
     db.query(Event).filter(Event.id == event_id).update({
-        "processing_status":    "completed",
-        "processing_progress":  100,
+        "processing_status":       "completed",
+        "processing_progress":     100,
         "processing_completed_at": datetime.utcnow(),
-        "total_clusters":       total_clusters,
+        "total_clusters":          total_clusters,
+        # ── FIX: persist total face count so UI "Faces" stat is populated ──
+        "total_faces":             total_faces,
     })
     db.commit()
-    print(f"✅ Event {event_id} complete in {elapsed:.1f}s — {total_clusters} clusters")
+    print(f"✅ Event {event_id} complete in {elapsed:.1f}s — {total_clusters} clusters, {total_faces} faces")
 
 
 def _redis_cleanup(event_id):

@@ -17,6 +17,7 @@ interface Event {
   name:           string;
   created_at?:    string;
   cover_image?:   string;
+  cover_image_url: string | null;      // ← full URL from storage_service
   public_status?: string;
   public_token?:  string;
 }
@@ -201,9 +202,9 @@ export default function EventsPage() {
                 className="relative cursor-pointer overflow-hidden flex-shrink-0"
                 onClick={() => router.push(`/events/${event.id}`)}
               >
-                {event.cover_image ? (
+                {event.cover_image_url ? (
                   <img
-                    src={`${API_URL}/storage/covers/${event.cover_image}`}
+                    src={event.cover_image_url!}
                     className="w-full h-36 object-cover group-hover:scale-[1.03] transition-transform duration-300"
                     alt={event.name}
                   />

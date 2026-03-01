@@ -31,6 +31,7 @@ interface EventDetail {
   total_clusters: number;
   description: string | null;
   cover_image: string | null;
+  cover_image_url: string | null;      // ← full URL from storage_service
   public_status: "active" | "disabled";
   plan_type: string;
 }
@@ -1084,9 +1085,7 @@ export default function OwnerEventDetailPage() {
     ? `${window.location.origin}/public/${event?.public_token ?? ""}`
     : `/public/${event?.public_token ?? ""}`;
 
-  const coverImageUrl = event?.cover_image
-    ? `${API}/storage/covers/${event.cover_image}`
-    : null;
+  const coverImageUrl = event?.cover_image_url ?? null;
 
   const isFree      = event?.plan_type === "free";
   const canDownload = !isFree;
