@@ -9,8 +9,8 @@ from app.services.face_model import face_app
 # ------------------------------------------
 # Tuned Similarity Levels
 # ------------------------------------------
-STRICT_THRESHOLD = 0.62
-NORMAL_THRESHOLD = 0.55
+STRICT_THRESHOLD = 0.68
+NORMAL_THRESHOLD = 0.58
 FALLBACK_THRESHOLD = 0.48
 
 MAX_RESULTS = 50

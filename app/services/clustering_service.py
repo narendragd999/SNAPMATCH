@@ -18,7 +18,7 @@ def cluster_embeddings(embeddings):
     #
     # min_samples=1: every face gets assigned — no outliers discarded.
     clustering = DBSCAN(
-        eps=0.28,
+        eps=0.30,
         min_samples=1,
         metric="cosine"
     ).fit(embeddings)

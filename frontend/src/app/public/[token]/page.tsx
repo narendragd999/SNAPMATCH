@@ -196,7 +196,7 @@ export default function PublicSelfiePage() {
     setDlAllLoading(true);
     try {
       const res = await fetch(
-        `${API}/public/events/${token}/search/${resultId}/download-all`
+        `${API}/public/events/${token}/download/${resultId}?kind=you`
       );
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();

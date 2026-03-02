@@ -34,7 +34,7 @@ def process_image(raw_filename: str, event_id: int) -> tuple[str | None, np.ndar
     raw_filename:  e.g. "raw_abc123.jpg"  (stored in object store or local disk)
     Returns: (optimized_filename, face_np)
     """
-    base_name = os.path.splitext(raw_filename)[0].removeprefix("raw_")
+    base_name = os.path.splitext(raw_filename)[0].removeprefix("raw_").removeprefix("guest_")
 
     # ── Get a local path the pipeline can read from ────────────────────────────
     raw_local_path = storage_service.get_local_temp_path(event_id, raw_filename)

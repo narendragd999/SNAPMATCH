@@ -304,34 +304,9 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
 
 @celery.task(bind=True, queue=AI_QUEUE)
 def enrich_event_photos(self, event_id: int):
-    """Run Places365 + YOLO on all approved photos."""
-    from app.services.ai_enrichment_service import enrich_photo
-
-    db = SessionLocal()
-    try:
-        photos = db.query(Photo).filter(
-            Photo.event_id == event_id,
-            Photo.approval_status == "approved",
-            Photo.scene_label.is_(None),
-        ).all()
-
-        for photo in photos:
-            filename = photo.optimized_filename or photo.stored_filename
-            if not filename:
-                continue
-            try:
-                local_path = storage_service.get_local_temp_path(event_id, filename)
-                result = enrich_photo(local_path)
-                photo.scene_label       = result.get("scene_label")
-                photo.objects_detected  = result.get("objects_detected")
-                db.commit()
-            except Exception as e:
-                print(f"⚠ Enrichment failed for {filename}: {e}")
-            finally:
-                storage_service.release_local_temp_path(event_id, filename)
-
-    finally:
-        db.close()
+    """Run Places365 + YOLO on all approved photos — delegates to ai_enrichment_task."""
+    from app.workers.ai_enrichment_task import ai_enrich_event
+    ai_enrich_event.apply_async(args=[event_id], queue=AI_QUEUE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

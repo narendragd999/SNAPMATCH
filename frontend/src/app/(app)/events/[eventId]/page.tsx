@@ -1079,7 +1079,8 @@ export default function OwnerEventDetailPage() {
   const thumbUrl     = (n: string)   => `${API}/events/${eventId}/thumbnail/${n}?token=${jwtToken()}`;
   const imgUrl       = (n: string)   => `${API}/events/${eventId}/image/${n}?token=${jwtToken()}`;
   const dlUrl        = (n: string)   => `${API}/events/${eventId}/download/${n}`;
-  const clusterDlUrl = (cid: number) => `${API}/events/${eventId}/clusters/${cid}/download`;
+  const clusterDlUrl = (cid: number) =>
+  `${API}/events/${eventId}/clusters/${cid}/download?token=${jwtToken()}`;
 
   const publicPageUrl = typeof window !== "undefined"
     ? `${window.location.origin}/public/${event?.public_token ?? ""}`
