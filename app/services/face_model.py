@@ -18,4 +18,4 @@ ctx = 0 if USE_GPU else -1
 # accuracy loss for faces ≥ 80px in the optimized image (our MAX_DIM=800 ensures this).
 # Benchmark: 7-face group photo 8-10s → ~2.5-3.5s.
 # Raise back to (640,640) only if you start missing small/distant faces.
-face_app.prepare(ctx_id=ctx, det_size=(256, 256))
+face_app.prepare(ctx_id=ctx, det_size=(640, 640))

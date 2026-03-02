@@ -91,7 +91,7 @@ type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 
-const BATCH_SIZE  = 20;
+const BATCH_SIZE  = 40;
 const MAX_RETRIES = 2;
 const ACCEPTED_EXT = /\.(jpe?g|png|webp)$/i;
 

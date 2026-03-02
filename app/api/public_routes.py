@@ -71,17 +71,54 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
     friends_photos = result.get("friends_photos", [])
 
     def _enrich(items):
+        if not items:
+            return []
+
+        # Collect all image names for bulk query (faster than N individual queries)
+        image_names = []
+        for item in items:
+            name = item if isinstance(item, str) else item.get("image_name", "")
+            image_names.append(name)
+
+        # Bulk fetch photo metadata — match on optimized_filename OR stored_filename
+        photos_by_name: dict = {}
+        if image_names:
+            # Try optimized_filename first (primary match)
+            rows = db.query(Photo).filter(
+                Photo.event_id == event_id,
+                Photo.optimized_filename.in_(image_names),
+            ).all()
+            for p in rows:
+                photos_by_name[p.optimized_filename] = p
+
+            # For any unmatched, try stored_filename fallback
+            unmatched = [n for n in image_names if n not in photos_by_name]
+            if unmatched:
+                rows2 = db.query(Photo).filter(
+                    Photo.event_id == event_id,
+                    Photo.stored_filename.in_(unmatched),
+                ).all()
+                for p in rows2:
+                    photos_by_name[p.stored_filename] = p
+
+        import json
         enriched = []
         for item in items:
             image_name = item if isinstance(item, str) else item.get("image_name", "")
-            photo = db.query(Photo).filter(
-                Photo.event_id == event_id,
-                Photo.optimized_filename == image_name,
-            ).first()
+            photo = photos_by_name.get(image_name)
             d = {"image_name": image_name}
             if photo:
-                d["scene_label"]       = photo.scene_label
-                d["objects_detected"]  = photo.objects_detected
+                d["scene_label"] = photo.scene_label
+                # Parse objects_detected JSON → list of label strings
+                try:
+                    raw = photo.objects_detected
+                    parsed = json.loads(raw) if raw else []
+                    d["objects"] = [o.get("label", o) if isinstance(o, dict) else o for o in parsed]
+                except Exception:
+                    d["objects"] = []
+            else:
+                d["scene_label"] = None
+                d["objects"]     = []
             enriched.append(d)
         return enriched
 
@@ -107,6 +144,37 @@ def validate_public_event(public_token: str, db: Session) -> Event:
     if event.public_status != "active":
         raise HTTPException(status_code=403, detail="Event is not public")
     return event
+
+
+# ── Get Public Event Info (used by frontend on page load) ────────────────────
+
+@router.get("/events/{public_token}")
+def get_public_event(
+    public_token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns event info for the public selfie page.
+    Frontend calls this on load to get event name, cover, status etc.
+    """
+    event = db.query(Event).filter(Event.public_token == public_token).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.public_status != "active":
+        raise HTTPException(status_code=403, detail="Event is not public")
+
+    return {
+        "id":                 event.id,
+        "name":               event.name,
+        "description":        event.description,
+        "public_token":       event.public_token,
+        "public_status":      event.public_status,
+        "image_count":        event.image_count,
+        "processing_status":  event.processing_status,
+        "guest_upload_enabled": event.guest_upload_enabled,
+        "cover_image_url":    storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
+        "expires_at":         event.expires_at,
+    }
 
 
 # ── Serve Thumbnail ───────────────────────────────────────────────────────────
@@ -164,7 +232,7 @@ def serve_image(
     image_name:   str,
     db: Session = Depends(get_db),
 ):
-    """Serve thumbnail for grid display; falls back to full photo if thumb missing."""
+    """Serves thumbnail for grid; falls back to full photo if thumbnail missing."""
     event     = validate_public_event(public_token, db)
     safe_name = Path(image_name).name
     base_name = os.path.splitext(safe_name)[0]
@@ -198,10 +266,22 @@ async def public_search(
 ):
     event = validate_public_event(public_token, db)
 
-    raw_result = await public_search_face(event.id, file, db)
+    empty_page = {
+        "result_id": None, "page": 1, "page_size": PAGE_SIZE,
+        "total": 0, "total_pages": 0, "has_more": False, "items": [],
+    }
+
+    try:
+        raw_result = await public_search_face(event.id, file, db)
+    except Exception as e:
+        print(f"❌ public_search_face error: {e}")
+        return {"result_id": None, "you": empty_page, "friends": empty_page}
 
     if not raw_result or (not raw_result.get("matched_photos") and not raw_result.get("friends_photos")):
-        empty_page = {"result_id": None, "page": 1, "page_size": PAGE_SIZE, "total": 0, "total_pages": 0, "has_more": False, "items": []}
+        return {"result_id": None, "you": empty_page, "friends": empty_page}
+
+    # Handle "no face detected" response from search service
+    if raw_result.get("error"):
         return {"result_id": None, "you": empty_page, "friends": empty_page}
 
     result_id = _store_result(raw_result, event.id, db)
@@ -270,16 +350,50 @@ def get_search_page(
     }
 
 
-# ── Download ZIP (matched or friends) ─────────────────────────────────────────
+# ── Download — smart endpoint handles both single photo and ZIP result ─────────
+# Frontend uses two patterns:
+#   1. /download/{image_name.jpg}  → per-photo download button (no cache needed)
+#   2. /download/{result_uuid}     → ZIP of all matched photos (from cache)
+# We detect which case by checking if the path param has a file extension.
 
-@router.get("/events/{public_token}/download/{result_id}")
-def download_photos(
-    public_token: str,
-    result_id:    str,
-    kind:         str = Query("matched"),
+@router.get("/events/{public_token}/download/{file_or_result}")
+def download_file_or_result(
+    public_token:   str,
+    file_or_result: str,
+    kind:           str = Query("matched"),
     db: Session = Depends(get_db),
 ):
     event = validate_public_event(public_token, db)
+
+    # ── Case 1: Single photo download (param has a file extension) ────────────
+    if "." in file_or_result:
+        safe_name = Path(file_or_result).name
+
+        if STORAGE_BACKEND == "local":
+            from app.core.config import STORAGE_PATH
+            photo_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
+            if not os.path.exists(photo_path):
+                raise HTTPException(status_code=404, detail="Photo not found")
+            return FileResponse(
+                photo_path,
+                media_type="application/octet-stream",
+                filename=safe_name,
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+            )
+        else:
+            try:
+                data = storage_service.download_file(event.id, safe_name)
+                return StreamingResponse(
+                    iter([data]),
+                    media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+                )
+            except Exception:
+                url = storage_service.get_file_url(event.id, safe_name)
+                return RedirectResponse(url=url)
+
+    # ── Case 2: ZIP download from search result cache ─────────────────────────
+    result_id = file_or_result
     _evict_expired()
 
     with _cache_lock:
@@ -311,6 +425,7 @@ def download_photos(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{event.name}_{label}.zip"'},
     )
+
 
 
 # ── Download All Event Photos ─────────────────────────────────────────────────
