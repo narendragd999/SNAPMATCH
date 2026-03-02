@@ -443,7 +443,7 @@ def _merge_clusters(db, event_id, dim):
     idx.add(mat)
 
     merge_map: dict[int, int] = {}
-    MERGE_THRESH = 0.72
+    MERGE_THRESH = 0.82
 
     for i, cid in enumerate(cids):
         if cid in merge_map:
