@@ -190,13 +190,33 @@ export default function PublicSelfiePage() {
     return () => observerRef.current?.disconnect();
   }, [loadNextPage]);
 
-  /* ── Download All (Pro) ── */
+
+  /* ── Download Single (ALL) ── */  
+  const downloadSinglePhoto = async (imageName: string) => {
+    try {
+      const res = await fetch(`${API}/public/events/${token}/photo/${imageName}`);
+      if (!res.ok) throw new Error("Download failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = imageName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Download failed:", e);
+    }
+  };
+
+  /* ── Download All (Pro) ── */  
   const handleDownloadAll = async () => {
     if (!resultId || dlAllLoading) return;
     setDlAllLoading(true);
     try {
       const res = await fetch(
-        `${API}/public/events/${token}/download/${resultId}?kind=you`
+        `${API}/public/events/${token}/download/${resultId}?kind=matched`  // ← was "you"
       );
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();
@@ -614,15 +634,24 @@ export default function PublicSelfiePage() {
                         </motion.button>
                       )}
 
-                      {/* Free plan upsell pill */}
-                      {!isPro && tab.total > 1 && (
-                        <div className="g-gold" style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, fontSize: 12 }}>
-                          <Star size={12} style={{ color: "var(--gold)", flexShrink: 0 }} />
-                          <span style={{ color: "rgba(232,201,126,0.85)", fontWeight: 500 }}>
-                            Pro plan · download all {tab.total} photos as ZIP
-                          </span>
-                        </div>
-                      )}
+                      {/* Free plan upsell pill — now clickable */}
+                        {!isPro && tab.total > 1 && (
+                          <motion.button
+                            whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                            onClick={handleDownloadAll}
+                            disabled={dlAllLoading}
+                            className="g-gold"
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, fontSize: 12, cursor: dlAllLoading ? "not-allowed" : "pointer", border: "none", background: "transparent" }}
+                          >
+                            {dlAllLoading
+                              ? <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}><Loader2 size={12} /></motion.div> Preparing…</>
+                              : <><Star size={12} style={{ color: "var(--gold)", flexShrink: 0 }} />
+                                  <span style={{ color: "rgba(232,201,126,0.85)", fontWeight: 500 }}>
+                                    Download all {tab.total} photos as ZIP
+                                  </span></>
+                            }
+                          </motion.button>
+                        )}
 
                       {/* New search */}
                       <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
@@ -692,12 +721,12 @@ export default function PublicSelfiePage() {
                                   <div style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                                     <ZoomIn size={15} color="#fff" />
                                   </div>
-                                  {/* Quick download */}
-                                  <a href={`${API}/public/events/${token}/download/${imgName}`} download
-                                    onClick={e => e.stopPropagation()}
-                                    style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(232,201,126,0.9)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", border: "1px solid rgba(232,201,126,0.5)" }}>
-                                    <Download size={14} color="#0a0808" />
-                                  </a>
+                                  {/* Quick download // ✅ CORRECT — blob download, no page navigation */}                                  
+                                  <button
+                                    onClick={e => { e.stopPropagation(); downloadSinglePhoto(nameOf(item)); }}
+                                    style={{ /* keep existing styles */ }}>
+                                    <Download size={14} />
+                                  </button>
                                 </div>
                                 <span style={{ position: "absolute", top: 10, right: 10, fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600 }}>
                                   {idx + 1}/{tab.total}{tab.has_more ? "+" : ""}

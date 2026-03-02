@@ -15,6 +15,7 @@ import {
   FileImage,
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
+import PeopleGallery from "@/components/PeopleGallery";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -968,6 +969,7 @@ export default function OwnerEventDetailPage() {
       if (!res.ok) throw new Error();
       showToast("✓ Photo approved & queued for processing");
       await loadGuestUploads();
+      await loadEvent();
     } catch { showToast("Failed to approve photo"); }
     finally { setApprovingId(null); }
   };
@@ -995,6 +997,7 @@ export default function OwnerEventDetailPage() {
       if (!res.ok) throw new Error();
       showToast(`✓ All ${guestUploads.pending.length} photos approved & queued`);
       await loadGuestUploads();
+      await loadEvent();
     } catch { showToast("Bulk approve failed"); }
     finally { setBulkActioning(false); }
   };
@@ -1117,7 +1120,10 @@ export default function OwnerEventDetailPage() {
   );
 
   const isCompleted      = event.processing_status === "completed";
-  const hasPendingImages = uploadSuccess && event.image_count > 0 && event.processing_status !== "processing";
+  //const hasPendingImages = uploadSuccess && event.image_count > 0 && event.processing_status !== "processing";
+  const hasPendingImages = ((event as any).has_new_photos || uploadSuccess) 
+                        && event.processing_status !== "processing";
+
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
@@ -1524,194 +1530,20 @@ export default function OwnerEventDetailPage() {
               <motion.div key="clusters"
                 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-
-                {clustersLoading ? (
-                  <div className="flex items-center justify-center py-24 gap-3 text-zinc-500">
-                    <Loader2 size={18} className="animate-spin" />
-                    <span className="text-sm">Loading clusters…</span>
-                  </div>
-
-                ) : !clustersMeta || clustersMeta.total_clusters === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-24 gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-                      <Layers size={20} className="text-zinc-600" />
-                    </div>
-                    <p className="text-sm text-zinc-400">No clusters found</p>
-                    <p className="text-xs text-zinc-600">Process the event to generate face clusters</p>
-                  </div>
-
-                ) : (
-                  <>
-                    <div className="mb-5">
-                      <div className="flex items-center justify-between mb-3">
-                        <div>
-                          <p className="text-sm font-semibold">{clustersMeta!.total_clusters} Face Clusters</p>
-                          <p className="text-xs text-zinc-500 mt-0.5">
-                            {clustersMeta!.total_images.toLocaleString()} photos grouped by identity · sorted largest first
-                          </p>
-                        </div>
-                        {isFree && (
-                          <div className="flex items-center gap-1.5 text-xs text-amber-500/80 bg-amber-500/8 border border-amber-500/20 px-3 py-1.5 rounded-lg">
-                            <Lock size={11} />Upgrade to Pro to download
-                          </div>
-                        )}
-                      </div>
-
-                      {scenes.length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                          <button onClick={() => setSceneFilter(null)}
-                            className={`text-[11px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
-                              sceneFilter === null
-                                ? "bg-blue-500/20 border-blue-500/30 text-blue-300"
-                                : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700"
-                            }`}>All</button>
-                          {scenes.map(s => (
-                            <button key={s.scene_label}
-                              onClick={() => setSceneFilter(sceneFilter === s.scene_label ? null : s.scene_label)}
-                              className={`text-[11px] font-medium px-3 py-1.5 rounded-full border transition-colors capitalize ${
-                                sceneFilter === s.scene_label
-                                  ? "bg-blue-500/20 border-blue-500/30 text-blue-300"
-                                  : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700"
-                              }`}>
-                              {s.scene_label}
-                              <span className="ml-1.5 opacity-50">{s.count}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-2">
-                      {(() => {
-                        const filtered = sceneFilter ? clusters.filter(c => c.scene_label === sceneFilter) : clusters;
-                        return (
-                          <>
-                            {filtered.map(cluster => (
-                              <div key={cluster.cluster_id} className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-                                <button
-                                  onClick={() => setExpanded(expanded === cluster.cluster_id ? null : cluster.cluster_id)}
-                                  className="w-full flex items-center gap-4 px-4 py-3.5 hover:bg-zinc-800/40 transition-colors text-left">
-                                  <img src={thumbUrl(cluster.preview_image)}
-                                    className="w-11 h-11 rounded-lg object-cover border border-zinc-700 flex-shrink-0"
-                                    onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-[10px] font-mono text-zinc-600">#{cluster.cluster_id}</span>
-                                      <span className="text-sm font-medium">Cluster {cluster.cluster_id}</span>
-                                      {cluster.scene_label && (
-                                        <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 capitalize">
-                                          {cluster.scene_label}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <p className="text-xs text-zinc-500 mt-0.5">
-                                      {cluster.image_count} photo{cluster.image_count !== 1 ? "s" : ""}
-                                    </p>
-                                  </div>
-                                  <div className="hidden sm:flex items-center gap-1 flex-shrink-0">
-                                    {cluster.images.slice(0, 6).map((img, i) => (
-                                      <img key={i} src={thumbUrl(img)}
-                                        className="w-7 h-7 rounded-md object-cover border border-zinc-700"
-                                        onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                                    ))}
-                                    {cluster.image_count > 6 && (
-                                      <div className="w-7 h-7 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center">
-                                        <span className="text-[9px] text-zinc-500">+{cluster.image_count - 6}</span>
-                                      </div>
-                                    )}
-                                  </div>
-                                  {isFree ? (
-                                    <div title="Upgrade to Pro to download"
-                                      className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-700 cursor-not-allowed flex-shrink-0">
-                                      <Lock size={13} />
-                                    </div>
-                                  ) : (
-                                    <button
-                                      onClick={e => { e.stopPropagation(); handleDownload(clusterDlUrl(cluster.cluster_id), `cluster_${cluster.cluster_id}.zip`); }}
-                                      title="Download cluster ZIP"
-                                      className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors flex-shrink-0">
-                                      <Download size={13} />
-                                    </button>
-                                  )}
-                                  <ChevronDown size={13}
-                                    className={`text-zinc-600 flex-shrink-0 transition-transform duration-200 ${
-                                      expanded === cluster.cluster_id ? "rotate-180" : ""
-                                    }`} />
-                                </button>
-
-                                <AnimatePresence>
-                                  {expanded === cluster.cluster_id && (
-                                    <motion.div
-                                      initial={{ height: 0, opacity: 0 }}
-                                      animate={{ height: "auto", opacity: 1 }}
-                                      exit={{ height: 0, opacity: 0 }}
-                                      transition={{ duration: 0.2 }}
-                                      className="overflow-hidden">
-                                      <div className="border-t border-zinc-800 p-4">
-                                        <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
-                                          {cluster.images.map((img, i) => (
-                                            <motion.div key={img}
-                                              initial={{ opacity: 0, scale: 0.9 }}
-                                              animate={{ opacity: 1, scale: 1 }}
-                                              transition={{ delay: Math.min(i * 0.012, 0.35) }}
-                                              className="group relative rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 cursor-pointer transition-all hover:scale-[1.04] bg-zinc-800 aspect-[4/5]"
-                                              onClick={() => openPreview(img, cluster.images, i)}>
-                                              <img src={thumbUrl(img)} className="w-full h-full object-cover block" loading="lazy" />
-                                              <div className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
-                                                <button onClick={e => { e.stopPropagation(); openPreview(img, cluster.images, i); }}
-                                                  className="w-7 h-7 rounded-md bg-white/10 backdrop-blur border border-white/20 flex items-center justify-center text-white hover:bg-white/20 transition-colors">
-                                                  <ZoomIn size={11} />
-                                                </button>
-                                                {canDownload && (
-                                                  <button onClick={e => { e.stopPropagation(); handleDownload(dlUrl(img), img); }}
-                                                    className="w-7 h-7 rounded-md bg-white/10 backdrop-blur border border-white/20 flex items-center justify-center text-white hover:bg-white/20 transition-colors">
-                                                    <Download size={11} />
-                                                  </button>
-                                                )}
-                                              </div>
-                                            </motion.div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    </motion.div>
-                                  )}
-                                </AnimatePresence>
-                              </div>
-                            ))}
-
-                            {filtered.length === 0 && (
-                              <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
-                                <p className="text-sm text-zinc-400">No clusters match the selected scene</p>
-                                <button onClick={() => setSceneFilter(null)} className="text-xs text-blue-400 hover:underline">
-                                  Clear filter
-                                </button>
-                              </div>
-                            )}
-
-                            <div ref={clusterSentinelRef} className="h-1" />
-
-                            {clustersLoadingMore ? (
-                              <div className="flex items-center justify-center py-4 gap-2 text-zinc-500">
-                                <Loader2 size={14} className="animate-spin" />
-                                <span className="text-xs">Loading more clusters…</span>
-                              </div>
-                            ) : clustersMeta?.has_more ? (
-                              <button onClick={() => loadClusters(clustersPage + 1)}
-                                className="w-full py-3 text-xs font-medium text-zinc-400 hover:text-zinc-200 bg-zinc-900 border border-zinc-800 rounded-xl hover:bg-zinc-800/60 transition-colors flex items-center justify-center gap-2">
-                                <ChevronDown size={13} />
-                                Load more clusters ({clustersMeta.total_clusters - clusters.length} remaining)
-                              </button>
-                            ) : clusters.length > 0 && (
-                              <p className="text-center text-xs text-zinc-700 py-3">
-                                All {clustersMeta?.total_clusters} clusters loaded
-                              </p>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </>
-                )}
+                <PeopleGallery
+                  clusters={clusters}
+                  clustersMeta={clustersMeta}
+                  clustersLoading={clustersLoading}
+                  clustersLoadingMore={clustersLoadingMore}
+                  scenes={scenes}
+                  isFree={isFree}
+                  thumbUrl={thumbUrl}
+                  clusterDlUrl={clusterDlUrl}
+                  authH={authH}
+                  showToast={showToast}
+                  onLoadMore={() => loadClusters(clustersPage + 1)}
+                  sentinelRef={clusterSentinelRef}
+                />
               </motion.div>
             )}
 

@@ -32,6 +32,7 @@ from app.models.photo import Photo
 from app.models.user import User
 from app.services import storage_service
 from app.services.search_service import public_search_face, search_face
+import json as _json
 
 router = APIRouter(prefix="/public", tags=["public"])
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -66,29 +67,55 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
     """Cache full face-match result enriched with scene + objects, return result_id."""
     _evict_expired()
 
-    # Enrich matched_photos with scene + objects from Photo table
     matched_photos = result.get("matched_photos", [])
     friends_photos = result.get("friends_photos", [])
+
+    # Batch-load all photo metadata (2 queries instead of N×1)
+    def _collect_names(items):
+        return [item if isinstance(item, str) else item.get("image_name", "") for item in items]
+
+    all_names = list(set(_collect_names(matched_photos) + _collect_names(friends_photos)))
+    all_names = [n for n in all_names if n]
+
+    photo_rows = db.query(
+        Photo.optimized_filename,
+        Photo.scene_label,
+        Photo.objects_detected,
+    ).filter(
+        Photo.event_id == event_id,
+        Photo.optimized_filename.in_(all_names),
+    ).all() if all_names else []
+
+    photo_meta = {}
+    for row in photo_rows:
+        try:
+            raw_objs = row.objects_detected
+            parsed = _json.loads(raw_objs) if raw_objs else []
+            objects = [o["label"] for o in parsed if isinstance(o, dict) and "label" in o]
+        except (TypeError, ValueError, KeyError):
+            objects = []
+        photo_meta[row.optimized_filename] = {
+            "scene_label": row.scene_label,
+            "objects":     objects,
+        }
 
     def _enrich(items):
         enriched = []
         for item in items:
             image_name = item if isinstance(item, str) else item.get("image_name", "")
-            photo = db.query(Photo).filter(
-                Photo.event_id == event_id,
-                Photo.optimized_filename == image_name,
-            ).first()
-            d = {"image_name": image_name}
-            if photo:
-                d["scene_label"]       = photo.scene_label
-                d["objects_detected"]  = photo.objects_detected
+            meta = photo_meta.get(image_name, {})
+            d = {
+                "image_name":  image_name,
+                "scene_label": meta.get("scene_label"),
+                "objects":     meta.get("objects", []),
+            }
+            if isinstance(item, dict) and "similarity" in item:
+                d["similarity"] = item["similarity"]
             enriched.append(d)
         return enriched
 
     matched_enriched = _enrich(matched_photos)
-    friends_enriched = _enrich(friends_photos) if isinstance(friends_photos[0] if friends_photos else None, dict) else [
-        {"image_name": f} for f in friends_photos
-    ]
+    friends_enriched = _enrich(friends_photos)
 
     result_id = uuid.uuid4().hex
     with _cache_lock:

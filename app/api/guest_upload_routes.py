@@ -18,6 +18,8 @@ from typing import Optional, List
 from datetime import datetime
 import os
 from app.core.config import STORAGE_PATH
+from app.services import storage_service  # add this import at the top if not present
+
 
 router = APIRouter(prefix="/events", tags=["guest_uploads"])
 
@@ -25,20 +27,27 @@ router = APIRouter(prefix="/events", tags=["guest_uploads"])
 def _photo_dict(photo: Photo, include_guest_info=False):
     """Convert Photo to dict for API responses"""
 
-    # Build preview URL
+    # ✅ FIXED — use storage_service to build correct URLs for all backends
     if photo.guest_preview_filename:
-        preview_url = f"/storage/{photo.event_id}/guest_previews/{photo.guest_preview_filename}"
+        preview_url = storage_service.get_guest_preview_url(
+            photo.event_id, photo.guest_preview_filename
+        )
+    elif photo.optimized_filename:
+        # Use optimized thumbnail if available
+        base = photo.optimized_filename.rsplit(".", 1)[0]
+        thumb_name = f"{base}.webp"
+        preview_url = storage_service.get_thumbnail_url(photo.event_id, thumb_name)
     else:
-        # Fallback to raw file — always exists on disk
-        preview_url = f"/storage/{photo.event_id}/{photo.stored_filename}"
+        # Fallback to raw stored file
+        preview_url = storage_service.get_file_url(photo.event_id, photo.stored_filename)
 
     data = {
         "id":                photo.id,
         "event_id":          photo.event_id,
         "original_filename": photo.original_filename,
         "stored_filename":   photo.stored_filename,
-        "thumbnail_url":     preview_url,           # ← frontend reads this field
-        "status":            photo.approval_status, # ← frontend reads "status", not "approval_status"
+        "thumbnail_url":     preview_url,
+        "status":            photo.approval_status,
         "approval_status":   photo.approval_status,
         "uploaded_by":       photo.uploaded_by,
         "faces_detected":    photo.faces_detected,
@@ -48,10 +57,10 @@ def _photo_dict(photo: Photo, include_guest_info=False):
 
     if include_guest_info and photo.uploaded_by == "guest":
         data.update({
-            "contributor_name": photo.guest_name,    # ← frontend reads "contributor_name"
+            "contributor_name": photo.guest_name,
             "guest_name":       photo.guest_name,
             "guest_email":      photo.guest_email,
-            "message":          photo.guest_message, # ← frontend reads "message"
+            "message":          photo.guest_message,
             "guest_message":    photo.guest_message,
             "guest_ip":         photo.guest_ip,
         })
@@ -164,7 +173,9 @@ def bulk_approve_guest_uploads(
 
     # Single process_images job covers all newly approved photos in one run
     #process_images.apply_async(args=[event_id], queue="face_processing")
-    process_event.apply_async(args=[event_id], queue="photo_processing")
+    #process_event.apply_async(args=[event_id], queue="photo_processing")
+    process_event.apply_async(args=[event_id], queue="default")
+
 
     return {
         "success": True,
@@ -309,7 +320,8 @@ def approve_guest_upload(
     #delete_guest_preview(photo)
 
     #process_images.apply_async(args=[event_id], queue="face_processing")
-    process_event.apply_async(args=[event_id], queue="photo_processing")
+    #process_event.apply_async(args=[event_id], queue="photo_processing")
+    process_event.apply_async(args=[event_id], queue="default")
 
 
     return {
@@ -424,7 +436,8 @@ def re_approve_guest_upload(
     # (it was rejected before processing completed, so status is still 'uploaded')
     # Note: image_count is NOT incremented again — it was counted at first approval
     #process_images.apply_async(args=[event_id], queue="face_processing")
-    process_event.apply_async(args=[event_id], queue="photo_processing")
+    #process_event.apply_async(args=[event_id], queue="photo_processing")
+    process_event.apply_async(args=[event_id], queue="default")
 
 
     return {
