@@ -273,119 +273,15 @@ const WatermarkedCardImage: React.FC<WatermarkedCardImageProps> = memo(({
   watermarkConfig,
   opacity = 1,
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [processed, setProcessed] = useState(!watermarkConfig?.enabled);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    if (!src) return;
-
-    // If watermark not enabled, skip processing
-    if (!watermarkConfig?.enabled) {
-      return;
-    }
-
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-
-    img.onload = async () => {
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        setProcessed(true);
-        return;
-      }
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        setProcessed(true);
-        return;
-      }
-
-      // Set canvas dimensions (use thumbnail size for grid cards)
-      const maxSize = 400;
-      let width = img.naturalWidth;
-      let height = img.naturalHeight;
-
-      if (width > maxSize || height > maxSize) {
-        const ratio = Math.min(maxSize / width, maxSize / height);
-        width = Math.round(width * ratio);
-        height = Math.round(height * ratio);
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-
-      // Draw original image
-      ctx.drawImage(img, 0, 0, width, height);
-
-      // Apply watermark
-      try {
-        await applyWatermarkToCanvas(canvas, {
-          ...watermarkConfig,
-          padding: Math.round((watermarkConfig.padding / img.naturalWidth) * width),
-        });
-      } catch (err) {
-        console.error('Watermark failed:', err);
-      }
-
-      setProcessed(true);
-    };
-
-    img.onerror = () => {
-      setError(true);
-      setProcessed(true);
-    };
-
-    img.src = src;
-
-    return () => {
-      img.onload = null;
-      img.onerror = null;
-    };
-  }, [src, watermarkConfig]);
-
-  // If watermark not enabled or not processed, show original image
-  if (!watermarkConfig?.enabled || !processed) {
-    return (
-      <img
-        src={src}
-        alt=""
-        loading="lazy"
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          display: 'block',
-          opacity,
-          transition: 'opacity 0.2s',
-        }}
-      />
-    );
-  }
-
-  // Error fallback
-  if (error) {
-    return (
-      <img
-        src={src}
-        alt=""
-        loading="lazy"
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          display: 'block',
-          opacity,
-          transition: 'opacity 0.2s',
-        }}
-      />
-    );
-  }
-
-  // Render watermarked canvas
+  // For grid thumbnails, we skip watermarking to avoid CORS issues with redirected URLs
+  // Watermarking will be applied only when downloading the full-resolution image
+  // This ensures thumbnails always display correctly
+  
   return (
-    <canvas
-      ref={canvasRef}
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
       style={{
         width: '100%',
         height: '100%',
@@ -421,6 +317,7 @@ interface SelectablePhotoCardProps {
 
 export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
   imageId,
+  imageUrl,
   thumbnailUrl,
   isSelected,
   selectionIndex,
@@ -441,6 +338,10 @@ export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
       onClick();
     }
   }, [isSelectMode, onToggle, onClick]);
+
+  // Use imageUrl which has better fallback (thumbnail -> full photo)
+  // instead of thumbnailUrl which may return 404 if no thumbnail exists
+  const displayUrl = imageUrl || thumbnailUrl;
 
   return (
     <motion.div
@@ -476,7 +377,7 @@ export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
     >
       {/* Image with optional watermark */}
       <WatermarkedCardImage
-        src={thumbnailUrl}
+        src={displayUrl}
         watermarkConfig={watermarkConfig}
         opacity={isSelectMode && !isSelected ? 0.7 : 1}
       />

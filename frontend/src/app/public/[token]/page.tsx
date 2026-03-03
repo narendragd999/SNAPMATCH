@@ -1155,10 +1155,7 @@ export default function EnhancedPublicSelfiePage() {
                   {/* ── Photo grid ── */}
                   {filteredItems.length > 0 ? (
                     <>
-                      <motion.div
-                        variants={stagger}
-                        initial="hidden"
-                        animate="visible"
+                      <div
                         style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 8 }}
                       >
                         {filteredItems.map((item, idx) => {
@@ -1190,7 +1187,7 @@ export default function EnhancedPublicSelfiePage() {
                             />
                           );
                         })}
-                      </motion.div>
+                      </div>
 
                       <div ref={sentinelRef} style={{ height: 4 }} />
 
