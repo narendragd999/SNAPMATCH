@@ -138,6 +138,29 @@ def validate_public_event(public_token: str, db: Session) -> Event:
     return event
 
 
+# ── Get Event Info (for public page) ─────────────────────────────────────────
+
+@router.get("/events/{public_token}")
+def get_public_event(
+    public_token: str,
+    db: Session = Depends(get_db),
+):
+    """Get public event info including watermark config."""
+    event = validate_public_event(public_token, db)
+    
+    return {
+        "name": event.name,
+        "description": event.description,
+        "image_count": event.image_count,
+        "cover_image_url": storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
+        "guest_upload_enabled": event.guest_upload_enabled,
+        "processing_status": event.processing_status,
+        # 🎨 Watermark configuration
+        "watermark_enabled": event.watermark_enabled,
+        "watermark_config": event.get_watermark_config() if event.watermark_enabled else None,
+    }
+
+
 # ── Serve Thumbnail ───────────────────────────────────────────────────────────
 
 @router.get("/events/{public_token}/thumbnail/{image_name}")

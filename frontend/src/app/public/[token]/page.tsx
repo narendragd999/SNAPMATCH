@@ -34,6 +34,13 @@ import {
 import { 
   ConfidenceSlider, CameraWithEnhancements
 } from '@/components/snapmatch/CameraEnhancements';
+import {
+  WatermarkConfig,
+  DEFAULT_WATERMARK_CONFIG,
+  applyWatermarkToImageUrl,
+  applyWatermarkToCanvas,
+} from '@/lib/snapmatch/watermark';
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +80,8 @@ interface TabState {
 interface EventData {
   name: string;
   plan_type?: string;
+  watermark_enabled?: boolean;
+  watermark_config?: WatermarkConfig;
 }
 
 type Mode = 'search' | 'contribute';
@@ -122,6 +131,7 @@ export default function EnhancedPublicSelfiePage() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
+
   const [dragOver, setDragOver] = useState(false);
 
   // Enhanced features state
@@ -142,6 +152,9 @@ export default function EnhancedPublicSelfiePage() {
 
   // Multi-select state
   const multiSelect = useMultiSelect(tab.items);
+
+  // Watermark state - loaded from event API
+  const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
 
   // Refs
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -200,9 +213,39 @@ export default function EnhancedPublicSelfiePage() {
     if (!token) return;
     fetch(`${API}/public/events/${token}`)
       .then(r => r.json())
-      .then(setEvent)
-      .catch(() => {});
-  }, [token, API]);
+      .then((data: EventData) => {
+        setEvent(data);
+
+        // ═══════════════════════════════════════════════════════════════
+        // 🎨 WATERMARK CONFIGURATION FROM BACKEND
+        // ═══════════════════════════════════════════════════════════════
+        
+        // Backend returns:
+        // - watermark_enabled: boolean
+        // - watermark_config: { enabled, type, text, textSize, ... }
+        
+        if (data.watermark_enabled && data.watermark_config) {
+          // API returns full watermark config - use it
+          console.log('🎨 Watermark loaded from API:', data.watermark_config);
+          setWatermarkConfig({
+            ...DEFAULT_WATERMARK_CONFIG,
+            ...data.watermark_config,
+            enabled: true,  // Ensure enabled matches watermark_enabled
+          });
+        } else if (data.watermark_enabled) {
+          // Watermark enabled but no config - use defaults
+          console.log('🎨 Watermark enabled with default config');
+          setWatermarkConfig({ ...DEFAULT_WATERMARK_CONFIG, enabled: true });
+        } else {
+          // Watermark disabled
+          console.log('🎨 Watermark disabled');
+          setWatermarkConfig({ ...DEFAULT_WATERMARK_CONFIG, enabled: false });
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load event:', err);
+      });
+  }, [token]);
 
   // ── Reset filters when mode changes ──
   useEffect(() => {
@@ -312,21 +355,74 @@ export default function EnhancedPublicSelfiePage() {
     return () => observerRef.current?.disconnect();
   }, [loadNextPage]);
 
-  // ── Download Single ──
+  // ── Download Single with Watermark ──
   const downloadSinglePhoto = useCallback(async (imageName: string) => {
     try {
+      // Fetch the image
       const res = await fetch(`${API}/public/events/${token}/photo/${imageName}`);
       if (!res.ok) throw new Error('Download failed');
 
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = imageName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+
+      // Apply watermark if enabled
+      if (watermarkConfig.enabled) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('Failed to load image'));
+          img.src = URL.createObjectURL(blob);
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          await applyWatermarkToCanvas(canvas, watermarkConfig);
+
+          const watermarkedBlob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob(
+              (b) => b ? resolve(b) : reject(new Error('Failed to create blob')),
+              'image/jpeg',
+              0.95
+            );
+          });
+
+          const url = URL.createObjectURL(watermarkedBlob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = imageName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          URL.revokeObjectURL(img.src);
+        } else {
+          // Fallback without watermark
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = imageName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+      } else {
+        // No watermark, download directly
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = imageName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
 
       hapticFeedback('success');
       Analytics.photoDownloaded(imageName, false);
@@ -334,7 +430,7 @@ export default function EnhancedPublicSelfiePage() {
       console.error('Download failed:', e);
       hapticFeedback('error');
     }
-  }, [token, API]);
+  }, [token, API, watermarkConfig]);
 
   // ── Download All (ZIP) ──
   const handleDownloadAll = useCallback(async () => {
@@ -1077,7 +1173,8 @@ export default function EnhancedPublicSelfiePage() {
                               item={item}
                               imageId={imgName}
                               imageUrl={`${API}/public/events/${token}/image/${imgName}`}
-                              thumbnailUrl={`${API}/public/events/${token}/image/${imgName}`}
+                              //thumbnailUrl={`${API}/public/events/${token}/image/${imgName}`}
+                              thumbnailUrl={`${API}/public/events/${token}/thumbnail/${imgName}`}  // Optimized thumbnail
                               isSelected={isSelected}
                               selectionIndex={multiSelect.getSelectionIndex(imgName)}
                               isSelectMode={multiSelect.isSelectMode}
@@ -1089,6 +1186,7 @@ export default function EnhancedPublicSelfiePage() {
                               scene={scene}
                               confidence={confidence}
                               showConfidence={showConfidence}
+                              watermarkConfig={watermarkConfig}
                             />
                           );
                         })}
@@ -1475,6 +1573,7 @@ export default function EnhancedPublicSelfiePage() {
             showConfidence={showConfidence}
             showScene={true}
             onDownload={downloadSinglePhoto}
+            watermarkConfig={watermarkConfig}
           />
         )}
       </AnimatePresence>

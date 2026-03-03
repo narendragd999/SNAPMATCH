@@ -53,6 +53,7 @@ from app.core.plans import PLANS
 import uuid
 import secrets
 import os
+import json
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -195,6 +196,7 @@ def get_event(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Get single event details (owner view)."""
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -233,7 +235,6 @@ def get_event(
         "total_clusters":       event.total_clusters,
         "description":          event.description,
         "cover_image":          event.cover_image,
-        # ── STORAGE: full URL for frontend to render cover ──────────────────
         "cover_image_url":      storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
         "public_status":        event.public_status,
         "plan_type":            current_user.plan_type,
@@ -241,7 +242,10 @@ def get_event(
         "unprocessed_count":    unprocessed,
         "has_new_photos":       unprocessed > 0,
         "pending_guest_uploads": pending_guest_uploads,
-        "guest_upload_enabled": getattr(event, "guest_upload_enabled", True),
+        "guest_upload_enabled": event.guest_upload_enabled,
+        # 🎨 Watermark settings
+        "watermark_enabled":    event.watermark_enabled,
+        "watermark_config":     event.get_watermark_config(),
     }
 
 
@@ -258,6 +262,7 @@ def update_event(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Update event details."""
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -272,14 +277,12 @@ def update_event(
         event.guest_upload_enabled = guest_upload_enabled
 
     if cover_image and cover_image.filename:
-        # Delete old cover first
         if event.cover_image:
             storage_service.delete_cover(event.cover_image)
 
         ext = Path(cover_image.filename).suffix.lower() or ".jpg"
         unique_name = f"{uuid.uuid4()}{ext}"
         content = cover_image.file.read()
-        # ── STORAGE: upload new cover ────────────────────────────────────────
         storage_service.upload_cover(content, unique_name)
         event.cover_image = unique_name
 
@@ -293,7 +296,10 @@ def update_event(
         "cover_image":     event.cover_image,
         "cover_image_url": storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
         "guest_upload_enabled": event.guest_upload_enabled,
+        "watermark_enabled": event.watermark_enabled,
     }
+
+
 
 
 # --------------------------------------------------
@@ -874,4 +880,280 @@ def get_dashboard_stats(
         "max_events":            plan.get("max_events", 0),
         "max_images_per_event":  plan.get("max_images_per_event", 0),
         "unprocessed_photos":    unprocessed_count,
+    }
+
+# ═══════════════════════════════════════════════════════════════
+# 🎨 WATERMARK ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WATERMARK API ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WATERMARK_POSITIONS = [
+    "top-left", "top-center", "top-right",
+    "center-left", "center", "center-right",
+    "bottom-left", "bottom-center", "bottom-right"
+]
+
+DEFAULT_WATERMARK_CONFIG = {
+    "enabled": False,
+    "type": "text",
+    "text": "© Event Photos",
+    "textSize": 3,
+    "textOpacity": 60,
+    "textPosition": "bottom-center",
+    "textColor": "#ffffff",
+    "textFont": "Arial, sans-serif",
+    "padding": 20,
+    "rotation": 0,
+    "tile": False,
+}
+
+
+@router.get("/{event_id}/watermark")
+def get_watermark_config(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get watermark configuration for an event.
+    
+    Returns:
+        - enabled: bool
+        - type: "text" | "logo"
+        - text config (if type=text)
+        - logo config (if type=logo)
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Check plan - watermark is Pro feature
+    plan = PLANS.get(current_user.plan_type, PLANS["free"])
+    is_pro = current_user.plan_type not in ["free", None]
+
+    config = event.get_watermark_config()
+
+    return {
+        "event_id": event_id,
+        "plan_type": current_user.plan_type,
+        "is_pro": is_pro,
+        "watermark_enabled": event.watermark_enabled,
+        "watermark_config": config,
+        "available_positions": WATERMARK_POSITIONS,
+    }
+
+
+@router.put("/{event_id}/watermark")
+def update_watermark_config(
+    event_id: int,
+    enabled: bool = Form(False),
+    type: str = Form("text"),
+    # Text watermark options
+    text: str = Form(None),
+    textSize: float = Form(None),
+    textOpacity: int = Form(None),
+    textPosition: str = Form(None),
+    textColor: str = Form(None),
+    textFont: str = Form(None),
+    # Logo watermark options
+    logoUrl: str = Form(None),
+    logoSize: float = Form(None),
+    logoOpacity: int = Form(None),
+    logoPosition: str = Form(None),
+    # Advanced options
+    padding: int = Form(None),
+    rotation: int = Form(None),
+    tile: bool = Form(False),
+    # Database
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update watermark configuration for an event.
+    
+    This is a PRO feature. Free plan users will receive 403.
+    
+    Form Parameters:
+        - enabled: Enable/disable watermark (bool)
+        - type: "text" or "logo"
+        
+    For text watermark:
+        - text: Watermark text (e.g., "© John Doe Photography")
+        - textSize: Size as % of image width (1-8)
+        - textOpacity: Opacity 0-100
+        - textPosition: Position on image
+        - textColor: Hex color (#ffffff)
+        
+    For logo watermark:
+        - logoUrl: URL to logo image
+        - logoSize: Size as % of image width (5-40)
+        - logoOpacity: Opacity 0-100
+        - logoPosition: Position on image
+        
+    Advanced:
+        - padding: Pixels from edge (0-100)
+        - rotation: Rotation angle (-180 to 180)
+        - tile: Repeat watermark across image
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Check plan - watermark is Pro feature
+    if current_user.plan_type == "free" or current_user.plan_type is None:
+        raise HTTPException(
+            status_code=403, 
+            detail="Watermark is a Pro feature. Please upgrade your plan."
+        )
+
+    # Validate type
+    if type not in ["text", "logo"]:
+        raise HTTPException(status_code=400, detail="Type must be 'text' or 'logo'")
+
+    # Validate position
+    position = textPosition or logoPosition
+    if position and position not in WATERMARK_POSITIONS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid position. Must be one of: {', '.join(WATERMARK_POSITIONS)}"
+        )
+
+    # Validate opacity
+    opacity = textOpacity or logoOpacity
+    if opacity is not None and (opacity < 20 or opacity > 100):
+        raise HTTPException(status_code=400, detail="Opacity must be between 20 and 100")
+
+    # Validate size
+    size = textSize or logoSize
+    if size is not None:
+        if type == "text" and (size < 1 or size > 8):
+            raise HTTPException(status_code=400, detail="Text size must be between 1 and 8")
+        if type == "logo" and (size < 5 or size > 40):
+            raise HTTPException(status_code=400, detail="Logo size must be between 5 and 40")
+
+    # Build config object
+    config = DEFAULT_WATERMARK_CONFIG.copy()
+    config["enabled"] = enabled
+    config["type"] = type
+    
+    # Text options
+    if type == "text":
+        if text:
+            config["text"] = text
+        if textSize is not None:
+            config["textSize"] = textSize
+        if textOpacity is not None:
+            config["textOpacity"] = textOpacity
+        if textPosition:
+            config["textPosition"] = textPosition
+        if textColor:
+            config["textColor"] = textColor
+        if textFont:
+            config["textFont"] = textFont
+    
+    # Logo options
+    if type == "logo":
+        if logoUrl:
+            config["logoUrl"] = logoUrl
+        if logoSize is not None:
+            config["logoSize"] = logoSize
+        if logoOpacity is not None:
+            config["logoOpacity"] = logoOpacity
+        if logoPosition:
+            config["logoPosition"] = logoPosition
+    
+    # Advanced options
+    if padding is not None:
+        config["padding"] = max(0, min(100, padding))
+    if rotation is not None:
+        config["rotation"] = max(-180, min(180, rotation))
+    config["tile"] = tile
+
+    # Update event
+    event.watermark_enabled = enabled
+    event.watermark_config = json.dumps(config)
+    db.commit()
+    db.refresh(event)
+
+    return {
+        "success": True,
+        "event_id": event_id,
+        "watermark_enabled": event.watermark_enabled,
+        "watermark_config": config,
+        "message": "Watermark settings updated successfully"
+    }
+
+
+@router.post("/{event_id}/watermark/toggle")
+def toggle_watermark(
+    event_id: int,
+    enabled: bool = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Quick toggle watermark on/off.
+    
+    This is a PRO feature.
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Check plan
+    if current_user.plan_type == "free" or current_user.plan_type is None:
+        raise HTTPException(
+            status_code=403, 
+            detail="Watermark is a Pro feature. Please upgrade your plan."
+        )
+
+    event.watermark_enabled = enabled
+    
+    # Update config enabled flag too
+    if event.watermark_config:
+        config = json.loads(event.watermark_config)
+        config["enabled"] = enabled
+        event.watermark_config = json.dumps(config)
+    
+    db.commit()
+
+    return {
+        "success": True,
+        "watermark_enabled": event.watermark_enabled,
+        "message": f"Watermark {'enabled' if enabled else 'disabled'}"
+    }
+
+
+@router.post("/{event_id}/watermark/reset")
+def reset_watermark_config(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Reset watermark config to defaults.
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    event.watermark_enabled = False
+    event.watermark_config = json.dumps(DEFAULT_WATERMARK_CONFIG)
+    db.commit()
+
+    return {
+        "success": True,
+        "watermark_config": DEFAULT_WATERMARK_CONFIG,
+        "message": "Watermark settings reset to defaults"
     }

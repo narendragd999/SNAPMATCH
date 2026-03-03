@@ -258,3 +258,218 @@ export const debounce = <T extends (...args: unknown[]) => unknown>(
     timeoutId = setTimeout(() => fn(...args), delay);
   };
 };
+
+// ─── QR Code Utilities ────────────────────────────────────────────────────────
+
+export interface QRCodeOptions {
+  size?: number;
+  errorLevel?: 'L' | 'M' | 'Q' | 'H';
+  bgColor?: string;
+  fgColor?: string;
+  includeMargin?: boolean;
+  eventName?: string;
+  eventDate?: string;
+}
+
+/**
+ * Generate event URL from token
+ */
+export const getEventUrl = (token: string): string => {
+  if (typeof window === 'undefined') return '';
+  const baseUrl = window.location.origin;
+  return `${baseUrl}/public/${token}`;
+};
+
+/**
+ * Download QR code as PNG image
+ */
+export const downloadQRCodeAsPng = async (
+  canvasRef: HTMLCanvasElement | null,
+  filename: string = 'qrcode.png'
+): Promise<boolean> => {
+  if (!canvasRef) return false;
+
+  try {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvasRef.toBlob(resolve, 'image/png', 1.0);
+    });
+
+    if (blob) {
+      downloadBlob(blob, filename);
+      return true;
+    }
+    return false;
+  } catch {
+    console.error('Failed to download QR code');
+    return false;
+  }
+};
+
+/**
+ * Download QR code as SVG
+ */
+export const downloadQRCodeAsSvg = (
+  svgElement: SVGSVGElement | null,
+  filename: string = 'qrcode.svg'
+): boolean => {
+  if (!svgElement) return false;
+
+  try {
+    const svgData = new XMLSerializer().serializeToString(svgElement);
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    downloadBlob(svgBlob, filename);
+    return true;
+  } catch {
+    console.error('Failed to download QR code as SVG');
+    return false;
+  }
+};
+
+/**
+ * Generate print-ready QR code sheet HTML
+ */
+export const generateQRCodePrintSheet = (
+  qrCodeDataUrl: string,
+  eventName: string,
+  eventUrl: string,
+  instructions?: string
+): string => {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR Code - ${eventName}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 40px;
+      background: #fff;
+    }
+    .sheet {
+      max-width: 800px;
+      margin: 0 auto;
+      text-align: center;
+    }
+    .qr-container {
+      padding: 40px;
+      border: 2px solid #e5e7eb;
+      border-radius: 16px;
+      margin-bottom: 24px;
+      background: #fafafa;
+    }
+    .qr-code {
+      width: 300px;
+      height: 300px;
+      margin: 0 auto 24px;
+    }
+    .event-name {
+      font-size: 28px;
+      font-weight: 700;
+      color: #111;
+      margin-bottom: 12px;
+    }
+    .instructions {
+      font-size: 16px;
+      color: #666;
+      margin-bottom: 16px;
+      line-height: 1.6;
+    }
+    .url {
+      font-size: 14px;
+      color: #888;
+      word-break: break-all;
+      padding: 12px 16px;
+      background: #f0f0f0;
+      border-radius: 8px;
+    }
+    .divider {
+      border: none;
+      border-top: 1px dashed #ccc;
+      margin: 32px 0;
+    }
+    .small-cards {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+    .small-card {
+      padding: 16px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .small-qr {
+      width: 100px;
+      height: 100px;
+      margin: 0 auto 8px;
+    }
+    @media print {
+      body { padding: 20px; }
+      .no-print { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="qr-container">
+      <img src="${qrCodeDataUrl}" alt="Event QR Code" class="qr-code" />
+      <h1 class="event-name">${eventName}</h1>
+      ${instructions ? `<p class="instructions">${instructions}</p>` : ''}
+      <p class="url">${eventUrl}</p>
+    </div>
+    
+    <hr class="divider" />
+    
+    <h3 style="margin-bottom: 16px; color: #666;">Pocket Size Cards (cut along lines)</h3>
+    <div class="small-cards">
+      ${Array(4).fill(`
+        <div class="small-card">
+          <img src="${qrCodeDataUrl}" alt="QR" class="small-qr" />
+          <p style="font-size: 10px; color: #888;">Scan to find your photos</p>
+        </div>
+      `).join('')}
+    </div>
+  </div>
+</body>
+</html>
+  `;
+};
+
+/**
+ * Open print dialog for QR code sheet
+ */
+export const printQRCodeSheet = (
+  qrCodeDataUrl: string,
+  eventName: string,
+  eventUrl: string
+): void => {
+  const html = generateQRCodePrintSheet(qrCodeDataUrl, eventName, eventUrl, 
+    'Scan this QR code with your phone camera to find your photos from the event!');
+  
+  const printWindow = window.open('', '_blank');
+  if (printWindow) {
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 500);
+  }
+};
+
+/**
+ * Track QR code scan analytics
+ */
+export const trackQRCodeScan = (token: string): void => {
+  trackEvent('qr_code_scanned', { token });
+};
+
+/**
+ * Track QR code download analytics
+ */
+export const trackQRCodeDownload = (token: string, format: 'png' | 'svg' | 'print'): void => {
+  trackEvent('qr_code_downloaded', { token, format });
+};

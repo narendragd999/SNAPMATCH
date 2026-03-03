@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text
 from sqlalchemy.orm import relationship
 from app.database.db import Base
 from datetime import datetime
+import json
 
 
 class Event(Base):
@@ -55,4 +56,44 @@ class Event(Base):
     # Guest photos land in approval queue (approval_status='pending')
     guest_upload_enabled = Column(Boolean, default=True, nullable=False)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🎨 WATERMARK SETTINGS
+    # ═══════════════════════════════════════════════════════════════
+    watermark_enabled = Column(Boolean, default=False, nullable=False)
+    watermark_config = Column(Text, nullable=True)
+
     owner = relationship("User")
+
+    # ───────────────────────────────────────────────────────────────
+    # Helper methods for watermark config
+    # ───────────────────────────────────────────────────────────────
+    
+    def get_watermark_config(self) -> dict:
+        """Parse and return watermark config as dict."""
+        DEFAULT_CONFIG = {
+            "enabled": False,
+            "type": "text",
+            "text": "© Event Photos",
+            "textSize": 3,
+            "textOpacity": 60,
+            "textPosition": "bottom-center",
+            "textColor": "#ffffff",
+            "textFont": "Arial, sans-serif",
+            "padding": 20,
+            "rotation": 0,
+            "tile": False,
+        }
+        
+        if not self.watermark_config:
+            return DEFAULT_CONFIG
+        
+        try:
+            config = json.loads(self.watermark_config)
+            return {**DEFAULT_CONFIG, **config}
+        except (json.JSONDecodeError, TypeError):
+            return DEFAULT_CONFIG
+
+    def set_watermark_config(self, config: dict):
+        """Save watermark config as JSON string."""
+        config["enabled"] = self.watermark_enabled
+        self.watermark_config = json.dumps(config)

@@ -19,6 +19,7 @@ import {
 } from '@/hooks/snapmatch/useSnapmatch';
 import { nameOf, sceneOf, confidenceOf, hapticFeedback, downloadBlob } from '@/lib/snapmatch/utils';
 import { ConfidenceBadge, sceneIcon } from './UIComponents';
+import { WatermarkConfig, applyWatermarkToCanvas } from '@/lib/snapmatch/watermark';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ interface PhotoPreviewProps {
   onDownload?: (imageName: string) => Promise<void>;
   onFavorite?: (imageName: string) => void;
   favorites?: Set<string>;
+  watermarkConfig?: WatermarkConfig | null;
 }
 
 interface PhotoInfo {
@@ -84,6 +86,7 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
   onDownload,
   onFavorite,
   favorites = new Set(),
+  watermarkConfig,
 }) => {
   const prefersReducedMotion = useReducedMotion();
   const [zoom, setZoom] = useState(1);
@@ -91,8 +94,10 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [watermarkedUrl, setWatermarkedUrl] = useState<string | null>(null);
   const containerRef = useFocusTrap(isOpen);
   const imageRef = useRef<HTMLImageElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Current item data
   const currentItem = items[currentIndex];
@@ -227,6 +232,65 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
 
   // Image URL
   const imageUrl = `${apiBaseUrl}/public/events/${token}/photo/${imageName}`;
+
+  // Apply watermark when image changes
+  useEffect(() => {
+    if (!isOpen || !imageName) return;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = async () => {
+      // If no watermark, just use original URL
+      if (!watermarkConfig?.enabled) {
+        setWatermarkedUrl(imageUrl);
+        return;
+      }
+
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        setWatermarkedUrl(imageUrl);
+        return;
+      }
+
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setWatermarkedUrl(imageUrl);
+        return;
+      }
+
+      // Draw original
+      ctx.drawImage(img, 0, 0);
+
+      // Apply watermark
+      try {
+        await applyWatermarkToCanvas(canvas, watermarkConfig);
+        setWatermarkedUrl(canvas.toDataURL('image/jpeg', 0.95));
+      } catch (err) {
+        console.error('Watermark failed:', err);
+        setWatermarkedUrl(imageUrl);
+      }
+    };
+
+    img.onerror = () => {
+      setWatermarkedUrl(imageUrl);
+    };
+
+    img.src = imageUrl;
+
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [isOpen, imageName, imageUrl, watermarkConfig]);
+
+  // Reset watermark when image changes
+  useEffect(() => {
+    setWatermarkedUrl(null);
+  }, [imageName]);
 
   if (!isOpen) return null;
 
@@ -366,6 +430,9 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
             overflow: 'hidden',
           }}
         >
+          {/* Hidden canvas for watermark processing */}
+          <canvas ref={canvasRef} style={{ display: 'none' }} />
+          
           <motion.div
             drag="x"
             dragConstraints={{ left: 0, right: 0 }}
@@ -386,24 +453,46 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
               touchAction: 'none',
             }}
           >
-            <motion.img
-              ref={imageRef}
-              key={imageName}
-              src={imageUrl}
-              alt=""
-              variants={prefersReducedMotion ? {} : imageVariants}
-              initial="hidden"
-              animate="visible"
-              exit="exit"
-              draggable={false}
-              style={{
-                maxWidth: '90vw',
-                maxHeight: '80vh',
-                objectFit: 'contain',
-                borderRadius: 8,
-                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-              }}
-            />
+            {watermarkedUrl ? (
+              <motion.img
+                ref={imageRef}
+                key={imageName}
+                src={watermarkedUrl}
+                alt=""
+                variants={prefersReducedMotion ? {} : imageVariants}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                draggable={false}
+                style={{
+                  maxWidth: '90vw',
+                  maxHeight: '80vh',
+                  objectFit: 'contain',
+                  borderRadius: 8,
+                  boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                }}
+              />
+            ) : (
+              <div style={{
+                width: 200,
+                height: 200,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
+                  style={{
+                    width: 40,
+                    height: 40,
+                    border: '3px solid rgba(255,255,255,0.1)',
+                    borderTopColor: '#e8c97e',
+                    borderRadius: '50%',
+                  }}
+                />
+              </div>
+            )}
           </motion.div>
         </div>
 

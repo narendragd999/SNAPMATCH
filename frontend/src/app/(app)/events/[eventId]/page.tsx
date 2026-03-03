@@ -9,13 +9,16 @@ import {
   ImageIcon, Users, Grid3X3, Search, Play, Trash2,
   ToggleLeft, ToggleRight, Copy, Check, AlertCircle, Clock,
   BarChart2, Layers, ArrowLeft, ExternalLink, ZoomIn,
-  ChevronDown, Loader2, Lock, AlertTriangle,
+  ChevronDown, Loader2, AlertTriangle,
   CloudUpload, CheckCircle2, XCircle, ThumbsUp, ThumbsDown,
-  RefreshCw, ImagePlus, Eye, Pause, RotateCcw, Zap,
-  FileImage,
+  RefreshCw, ImagePlus, Pause, RotateCcw, Zap,
+  FileImage, QrCode, Droplet,
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 import PeopleGallery from "@/components/PeopleGallery";
+import { QRCodeDisplay } from "@/components/snapmatch/QRCodeDisplay";
+import { WatermarkSettings } from "@/components/snapmatch/WatermarkSettings";
+import { WatermarkConfig, DEFAULT_WATERMARK_CONFIG } from "@/lib/snapmatch/watermark";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +38,8 @@ interface EventDetail {
   cover_image_url: string | null;      // ← full URL from storage_service
   public_status: "active" | "disabled";
   plan_type: string;
+  watermark_enabled?: boolean;          // 🎨 Watermark enabled flag
+  watermark_config?: WatermarkConfig;   // 🎨 Watermark configuration
 }
 
 interface ClusterItem {
@@ -756,6 +761,12 @@ export default function OwnerEventDetailPage() {
   const [uploadSuccess,   setUploadSuccess]   = useState(false);
   const [uploadDragOver,  setUploadDragOver]  = useState(false);
 
+  // ── QR Code & Watermark state ──
+  const [showQR, setShowQR] = useState(false);
+  const [showWatermark, setShowWatermark] = useState(false);
+  const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
+  const [watermarkSaving, setWatermarkSaving] = useState(false);
+
   // ─── Guest Uploads state ─────────────────────────────────────────────────
   const [guestUploads,        setGuestUploads]        = useState<GuestUploadsData | null>(null);
   const [guestUploadsLoading, setGuestUploadsLoading] = useState(false);
@@ -823,7 +834,17 @@ export default function OwnerEventDetailPage() {
     try {
       const res = await fetch(`${API}/events/${eventId}`, { headers: authH() });
       if (!res.ok) throw new Error();
-      setEvent(await res.json());
+      const data: EventDetail = await res.json();
+      setEvent(data);
+      
+      // 🎨 Load watermark config from event data
+      if (data.watermark_enabled && data.watermark_config) {
+        setWatermarkConfig({
+          ...DEFAULT_WATERMARK_CONFIG,
+          ...data.watermark_config,
+          enabled: true,
+        });
+      }
     } catch {
       showToast("Failed to load event");
     } finally {
@@ -1092,12 +1113,67 @@ export default function OwnerEventDetailPage() {
   const coverImageUrl = event?.cover_image_url ?? null;
 
   const isFree      = event?.plan_type === "free";
+  const isPro       = !isFree; // Pro or Enterprise
   const canDownload = !isFree;
 
   // ─── Plan limit ───────────────────────────────────────────────────────────
   const planLimit = event?.plan_type === "enterprise" ? 100000
                   : event?.plan_type === "pro"        ? 10000
                   : 1000;
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🎨 WATERMARK SAVE TO BACKEND API
+  // ═══════════════════════════════════════════════════════════════
+  const handleSaveWatermark = useCallback(async (config: WatermarkConfig) => {
+    setWatermarkConfig(config);
+    setWatermarkSaving(true);
+    
+    // Save to backend API using FormData (backend expects Form parameters)
+    try {
+      const formData = new FormData();
+      formData.append('enabled', String(config.enabled));
+      formData.append('type', config.type);
+      
+      // Text watermark options
+      if (config.text) formData.append('text', config.text);
+      if (config.textSize) formData.append('textSize', String(config.textSize));
+      if (config.textOpacity) formData.append('textOpacity', String(config.textOpacity));
+      if (config.textPosition) formData.append('textPosition', config.textPosition);
+      if (config.textColor) formData.append('textColor', config.textColor);
+      if (config.textFont) formData.append('textFont', config.textFont);
+      
+      // Logo watermark options
+      if (config.logoUrl) formData.append('logoUrl', config.logoUrl);
+      if (config.logoSize) formData.append('logoSize', String(config.logoSize));
+      if (config.logoOpacity) formData.append('logoOpacity', String(config.logoOpacity));
+      if (config.logoPosition) formData.append('logoPosition', config.logoPosition);
+      
+      // Advanced options
+      formData.append('padding', String(config.padding ?? 20));
+      formData.append('rotation', String(config.rotation ?? 0));
+      formData.append('tile', String(config.tile ?? false));
+      
+      const res = await fetch(`${API}/events/${eventId}/watermark`, {
+        method: 'PUT',
+        headers: authH(),  // Don't set Content-Type, let browser set it with boundary
+        body: formData,
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Failed to save watermark settings');
+      }
+      
+      // Also save to localStorage as backup/cache
+      localStorage.setItem(`watermark_${eventId}`, JSON.stringify(config));
+      showToast('Watermark settings saved!');
+    } catch (error) {
+      console.error('Failed to save watermark:', error);
+      showToast(error instanceof Error ? error.message : 'Failed to save watermark settings');
+    } finally {
+      setWatermarkSaving(false);
+    }
+  }, [eventId, API]);
 
   // ─── Render guards ───────────────────────────────────────────────────────
   if (eventLoading) return (
@@ -1285,6 +1361,22 @@ export default function OwnerEventDetailPage() {
                         className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 transition-colors">
                         <ExternalLink size={12} />Open public page
                       </a>
+                      {/* QR Code Button */}
+                      <button onClick={() => setShowQR(true)}
+                        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20 transition-colors">
+                        <QrCode size={12} />QR Code
+                      </button>
+                      {/* Watermark Button (Pro) */}
+                      {isPro && (
+                        <button onClick={() => setShowWatermark(true)}
+                          className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                            watermarkConfig.enabled
+                              ? "bg-violet-500/10 border-violet-500/20 text-violet-400 hover:bg-violet-500/20"
+                              : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                          }`}>
+                          <Droplet size={12} />Watermark
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1975,6 +2067,22 @@ export default function OwnerEventDetailPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── QR CODE MODAL ── */}
+      <QRCodeDisplay
+        isOpen={showQR}
+        onClose={() => setShowQR(false)}
+        token={event?.public_token ?? ""}
+        eventName={event?.name}
+      />
+
+      {/* ── WATERMARK SETTINGS MODAL ── */}
+      <WatermarkSettings
+        isOpen={showWatermark}
+        onClose={() => setShowWatermark(false)}
+        onSave={handleSaveWatermark}
+        previewImageUrl={event?.cover_image_url ?? undefined}
+      />
 
     </div>
   );

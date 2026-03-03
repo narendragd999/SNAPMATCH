@@ -5,7 +5,7 @@
 
 'use client';
 
-import React, { memo, useState, useCallback, useMemo } from 'react';
+import React, { memo, useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Check, X, Download, Share2, Trash2, 
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { hapticFeedback, downloadBlob } from '@/lib/snapmatch/utils';
 import { SelectionCheckbox, SelectionOverlay } from './UIComponents';
+import { WatermarkConfig, applyWatermarkToCanvas } from '@/lib/snapmatch/watermark';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -259,6 +260,146 @@ export const MultiSelectToolbar: React.FC<MultiSelectManagerProps> = memo(({
 
 MultiSelectToolbar.displayName = 'MultiSelectToolbar';
 
+// ─── WatermarkedCardImage ─────────────────────────────────────────────────────
+
+interface WatermarkedCardImageProps {
+  src: string;
+  watermarkConfig?: WatermarkConfig | null;
+  opacity?: number;
+}
+
+const WatermarkedCardImage: React.FC<WatermarkedCardImageProps> = memo(({
+  src,
+  watermarkConfig,
+  opacity = 1,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [processed, setProcessed] = useState(!watermarkConfig?.enabled);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!src) return;
+
+    // If watermark not enabled, skip processing
+    if (!watermarkConfig?.enabled) {
+      return;
+    }
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = async () => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        setProcessed(true);
+        return;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setProcessed(true);
+        return;
+      }
+
+      // Set canvas dimensions (use thumbnail size for grid cards)
+      const maxSize = 400;
+      let width = img.naturalWidth;
+      let height = img.naturalHeight;
+
+      if (width > maxSize || height > maxSize) {
+        const ratio = Math.min(maxSize / width, maxSize / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+
+      // Draw original image
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Apply watermark
+      try {
+        await applyWatermarkToCanvas(canvas, {
+          ...watermarkConfig,
+          padding: Math.round((watermarkConfig.padding / img.naturalWidth) * width),
+        });
+      } catch (err) {
+        console.error('Watermark failed:', err);
+      }
+
+      setProcessed(true);
+    };
+
+    img.onerror = () => {
+      setError(true);
+      setProcessed(true);
+    };
+
+    img.src = src;
+
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [src, watermarkConfig]);
+
+  // If watermark not enabled or not processed, show original image
+  if (!watermarkConfig?.enabled || !processed) {
+    return (
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          display: 'block',
+          opacity,
+          transition: 'opacity 0.2s',
+        }}
+      />
+    );
+  }
+
+  // Error fallback
+  if (error) {
+    return (
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          display: 'block',
+          opacity,
+          transition: 'opacity 0.2s',
+        }}
+      />
+    );
+  }
+
+  // Render watermarked canvas
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        width: '100%',
+        height: '100%',
+        objectFit: 'cover',
+        display: 'block',
+        opacity,
+        transition: 'opacity 0.2s',
+      }}
+    />
+  );
+});
+
+WatermarkedCardImage.displayName = 'WatermarkedCardImage';
+
 // ─── SelectablePhotoCard ───────────────────────────────────────────────────────
 
 interface SelectablePhotoCardProps {
@@ -275,6 +416,7 @@ interface SelectablePhotoCardProps {
   confidence?: number;
   showConfidence?: boolean;
   children?: React.ReactNode;
+  watermarkConfig?: WatermarkConfig | null;
 }
 
 export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
@@ -289,6 +431,7 @@ export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
   confidence,
   showConfidence = false,
   children,
+  watermarkConfig,
 }) => {
   const handleClick = useCallback(() => {
     if (isSelectMode) {
@@ -331,19 +474,11 @@ export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
         }
       }}
     >
-      {/* Image */}
-      <img
+      {/* Image with optional watermark */}
+      <WatermarkedCardImage
         src={thumbnailUrl}
-        alt=""
-        loading="lazy"
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          display: 'block',
-          opacity: isSelectMode && !isSelected ? 0.7 : 1,
-          transition: 'opacity 0.2s',
-        }}
+        watermarkConfig={watermarkConfig}
+        opacity={isSelectMode && !isSelected ? 0.7 : 1}
       />
 
       {/* Selection overlay */}
