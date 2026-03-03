@@ -86,7 +86,8 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
         Photo.optimized_filename.in_(all_names),
     ).all() if all_names else []
 
-    photo_meta = {}
+    # Build meta dict with parsed objects array
+    photo_meta: dict[str, dict] = {}
     for row in photo_rows:
         try:
             raw_objs = row.objects_detected
@@ -109,6 +110,7 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
                 "scene_label": meta.get("scene_label"),
                 "objects":     meta.get("objects", []),
             }
+            # Preserve similarity score if present
             if isinstance(item, dict) and "similarity" in item:
                 d["similarity"] = item["similarity"]
             enriched.append(d)

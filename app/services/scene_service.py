@@ -17,7 +17,7 @@ import os
 import cv2
 import numpy as np
 from pathlib import Path
-from app.core.config import STORAGE_PATH
+from app.services import storage_service
 
 # Lazy import — only loaded when scene detection is used
 _scene_model = None
@@ -113,7 +113,7 @@ def detect_scene(event_id: int, image_filename: str) -> dict:
     try:
         import torch
 
-        image_path = os.path.join(STORAGE_PATH, str(event_id), image_filename)
+        image_path = storage_service.get_local_temp_path(event_id, image_filename)
 
         if not os.path.exists(image_path):
             return {"scene_label": None, "scene_confidence": None, "top5": []}

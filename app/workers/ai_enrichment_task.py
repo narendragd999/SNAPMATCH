@@ -93,6 +93,7 @@ def ai_enrich_event(event_id: int):
                     if scene_result.get("scene_confidence") else None
                 )
                 photo.objects_detected = obj_result.get("raw_json", "[]")
+                photo.enriched_at = datetime.utcnow()  # ← add this
 
                 enriched += 1
                 pending_batch += 1
@@ -177,6 +178,7 @@ def ai_enrich_photo(event_id: int, photo_id: int):
             if scene_result.get("scene_confidence") else None
         )
         photo.objects_detected = obj_result.get("raw_json", "[]")
+        photo.enriched_at = datetime.utcnow()  # ← add this
 
         db.commit()
 

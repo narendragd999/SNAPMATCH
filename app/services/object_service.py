@@ -17,7 +17,7 @@ import os
 import json
 import cv2
 import numpy as np
-from app.core.config import STORAGE_PATH
+from app.services import storage_service
 
 _yolo_model = None
 CONFIDENCE_THRESHOLD = float(os.getenv("YOLO_CONFIDENCE", "0.4"))
@@ -61,7 +61,7 @@ def detect_objects(event_id: int, image_filename: str) -> dict:
         return {"objects": [], "object_counts": {}, "raw_json": "[]"}
 
     try:
-        image_path = os.path.join(STORAGE_PATH, str(event_id), image_filename)
+        image_path = storage_service.get_local_temp_path(event_id, image_filename)
 
         if not os.path.exists(image_path):
             return {"objects": [], "object_counts": {}, "raw_json": "[]"}
