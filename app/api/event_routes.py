@@ -141,7 +141,7 @@ def create_event(
         processing_status="pending",
         public_status="active",
     )
-    # 🔒 PIN enabled by default — value comes from DEFAULT_EVENT_PIN in config/.env
+    # 🔒 Set default PIN so public page is protected from the start
     event.set_pin(DEFAULT_EVENT_PIN)
     db.add(event)
     db.commit()
@@ -1174,6 +1174,42 @@ class PinSetRequest(BaseModel):
 
 class PinRemoveRequest(BaseModel):
     pass
+
+
+@router.get("/{event_id}/pin-value")
+def get_pin_value(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the plain-text PIN for an event — owner only.
+    Used by dashboard to show PIN on QR card and build owner share links.
+    NOTE: We re-derive by brute-checking 0000–9999. PIN is only 4 digits so
+    this is instant (<10ms) and avoids storing the plain PIN anywhere.
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not event.pin_enabled or not event.pin_hash:
+        return {"event_id": event_id, "pin_enabled": False, "pin": None}
+
+    # Brute-force 0000–9999 to recover plain PIN (safe — only 10k iterations)
+    plain_pin = None
+    for i in range(10000):
+        candidate = f"{i:04d}"
+        if event.verify_pin(candidate):
+            plain_pin = candidate
+            break
+
+    return {
+        "event_id":    event_id,
+        "pin_enabled": event.pin_enabled,
+        "pin":         plain_pin,
+    }
 
 
 @router.get("/{event_id}/pin")

@@ -28,6 +28,7 @@ interface WatermarkSettingsProps {
   onClose: () => void;
   onSave: (config: WatermarkConfig) => void;
   previewImageUrl?: string;
+  initialConfig?: WatermarkConfig | null; // 🎨 Per-event config from API/parent
 }
 
 // ─── Position Grid Selector ───────────────────────────────────────────────────
@@ -136,6 +137,7 @@ export const WatermarkSettings: React.FC<WatermarkSettingsProps> = memo(({
   onClose,
   onSave,
   previewImageUrl,
+  initialConfig,
 }) => {
   const [config, setConfig]           = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
   const [activeTab, setActiveTab]     = useState<'text' | 'logo'>('text');
@@ -144,14 +146,14 @@ export const WatermarkSettings: React.FC<WatermarkSettingsProps> = memo(({
   const [showAdvanced, setShowAdvanced]     = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load saved config on mount
+  // Load saved config on mount — prefer per-event config from parent (API), fall back to global localStorage
   useEffect(() => {
     if (isOpen) {
-      const saved = loadWatermarkConfig();
-      setConfig(saved);
-      setActiveTab(saved.type);
+      const config = initialConfig ?? loadWatermarkConfig();
+      setConfig({ ...DEFAULT_WATERMARK_CONFIG, ...config });
+      setActiveTab((initialConfig ?? loadWatermarkConfig()).type ?? 'text');
     }
-  }, [isOpen]);
+  }, [isOpen, initialConfig]);
 
   // Close on Escape
   useEffect(() => {

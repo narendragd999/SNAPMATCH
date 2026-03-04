@@ -770,6 +770,7 @@ export default function OwnerEventDetailPage() {
 
   // ── PIN state ──
   const [pinEnabled,    setPinEnabled]    = useState(false);
+  const [currentPin,    setCurrentPin]    = useState<string | null>(null);
   const [showPinModal,  setShowPinModal]  = useState(false);
   const [pinInput,      setPinInput]      = useState('');
   const [pinSaving,     setPinSaving]     = useState(false);
@@ -854,7 +855,16 @@ export default function OwnerEventDetailPage() {
         });
       }
       // 🔒 Sync PIN status
+      // PIN is hashed server-side and cannot be retrieved.
+      // Default PIN is "0000" (from .env). Owner can change it via the PIN modal.
+      // We preserve the PIN the owner set this session; fall back to "0000" if unknown.
       setPinEnabled(!!data.pin_enabled);
+      if (!data.pin_enabled) {
+        setCurrentPin(null);
+      } else {
+        // Keep whatever the owner set this session; if null, use default "0000"
+        setCurrentPin(prev => prev ?? "0000");
+      }
     } catch {
       showToast("Failed to load event");
     } finally {
@@ -937,7 +947,8 @@ export default function OwnerEventDetailPage() {
   // ─── Copy public link ────────────────────────────────────────────────────
   const copyLink = () => {
     if (!event) return;
-    navigator.clipboard.writeText(`${window.location.origin}/public/${event.public_token}`);
+    // Copy owner link (with PIN) for frictionless access
+    navigator.clipboard.writeText(ownerPageUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
     showToast("Link copied!");
@@ -1120,6 +1131,11 @@ export default function OwnerEventDetailPage() {
     ? `${window.location.origin}/public/${event?.public_token ?? ""}`
     : `/public/${event?.public_token ?? ""}`;
 
+  // Owner link — embeds PIN for one-tap frictionless access
+  const ownerPageUrl = currentPin && publicPageUrl
+    ? `${publicPageUrl}?pin=${currentPin}`
+    : publicPageUrl;
+
   const coverImageUrl = event?.cover_image_url ?? null;
 
   const isFree      = event?.plan_type === "free";
@@ -1197,9 +1213,10 @@ export default function OwnerEventDetailPage() {
       });
       if (!res.ok) throw new Error();
       setPinEnabled(true);
+      setCurrentPin(pinInput);
       setShowPinModal(false);
       setPinInput("");
-      showToast("🔒 PIN protection enabled");
+      showToast("🔒 PIN updated");
     } catch { showToast("Failed to set PIN"); }
     finally { setPinSaving(false); }
   };
@@ -1213,6 +1230,7 @@ export default function OwnerEventDetailPage() {
       });
       if (!res.ok) throw new Error();
       setPinEnabled(false);
+      setCurrentPin(null);
       showToast("🔓 PIN protection removed");
     } catch { showToast("Failed to remove PIN"); }
     finally { setPinRemoving(false); }
@@ -1400,7 +1418,7 @@ export default function OwnerEventDetailPage() {
                         {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                         {copied ? "Copied!" : "Copy link"}
                       </button>
-                      <a href={publicPageUrl} target="_blank" rel="noopener noreferrer"
+                      <a href={ownerPageUrl} target="_blank" rel="noopener noreferrer"
                         className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 transition-colors">
                         <ExternalLink size={12} />Open public page
                       </a>
@@ -1420,18 +1438,18 @@ export default function OwnerEventDetailPage() {
                           <Droplet size={12} />Watermark
                         </button>
                       )}
-                      {/* PIN Protection Button */}
+                      {/* PIN Button */}
                       <button
-                        onClick={() => pinEnabled ? removePin() : setShowPinModal(true)}
+                        onClick={() => setShowPinModal(true)}
                         disabled={pinRemoving}
                         className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
                           pinEnabled
-                            ? "bg-blue-500/10 border-blue-500/20 text-blue-400 hover:bg-red-500/10 hover:border-red-500/20 hover:text-red-400"
+                            ? "bg-blue-500/10 border-blue-500/20 text-blue-400 hover:bg-blue-500/20"
                             : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
                         }`}>
                         {pinRemoving ? <Loader2 size={12} className="animate-spin" /> :
                           pinEnabled ? <Lock size={12} /> : <LockOpen size={12} />}
-                        {pinEnabled ? "PIN On" : "Set PIN"}
+                        {pinEnabled ? `PIN: ${currentPin ?? "••••"}` : "Set PIN"}
                       </button>
                     </>
                   )}
@@ -2130,6 +2148,7 @@ export default function OwnerEventDetailPage() {
         onClose={() => setShowQR(false)}
         token={event?.public_token ?? ""}
         eventName={event?.name}
+        pin={currentPin}
       />
 
       {/* ── PIN MODAL ── */}
@@ -2149,8 +2168,12 @@ export default function OwnerEventDetailPage() {
                     <KeyRound size={15} className="text-blue-400" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-zinc-100">Set PIN Protection</h3>
-                    <p className="text-[11px] text-zinc-500">4-digit PIN for public page access</p>
+                    <h3 className="text-sm font-semibold text-zinc-100">
+                      {pinEnabled ? "Change PIN" : "Set PIN Protection"}
+                    </h3>
+                    <p className="text-[11px] text-zinc-500">
+                      {pinEnabled ? `Current PIN: ${currentPin ?? "••••"}` : "4-digit PIN for public page"}
+                    </p>
                   </div>
                 </div>
                 <button onClick={() => { setShowPinModal(false); setPinInput(""); }}
@@ -2160,24 +2183,31 @@ export default function OwnerEventDetailPage() {
               </div>
 
               <div className="mb-5">
-                <label className="block text-xs font-medium text-zinc-400 mb-2">Enter 4-digit PIN</label>
+                <label className="block text-xs font-medium text-zinc-400 mb-2">New 4-digit PIN</label>
                 <input
-                  type="password"
+                  type="text"
                   inputMode="numeric"
                   maxLength={4}
                   value={pinInput}
                   onChange={e => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
                   onKeyDown={e => e.key === "Enter" && savePin()}
-                  placeholder="••••"
+                  placeholder="0000"
                   autoFocus
                   className="w-full px-4 py-3 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 text-center text-2xl font-bold tracking-[0.5em] placeholder-zinc-700 focus:outline-none focus:border-blue-500/50 transition-colors"
                 />
                 <p className="text-[11px] text-zinc-600 mt-2 text-center">
-                  Visitors must enter this PIN to view the public page
+                  Guests must enter this PIN on the public page
                 </p>
               </div>
 
               <div className="flex gap-2">
+                {pinEnabled && (
+                  <button onClick={removePin} disabled={pinRemoving}
+                    className="px-4 py-2.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-sm font-medium transition-colors disabled:opacity-40 flex items-center gap-1.5">
+                    {pinRemoving ? <Loader2 size={13} className="animate-spin" /> : <LockOpen size={13} />}
+                    Remove
+                  </button>
+                )}
                 <button onClick={() => { setShowPinModal(false); setPinInput(""); }}
                   className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 text-sm font-medium transition-colors">
                   Cancel
@@ -2186,7 +2216,7 @@ export default function OwnerEventDetailPage() {
                   className="flex-[2] py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2">
                   {pinSaving
                     ? <><Loader2 size={14} className="animate-spin" /> Saving…</>
-                    : <><Lock size={14} /> Enable PIN</>}
+                    : <><Lock size={14} /> {pinEnabled ? "Update PIN" : "Enable PIN"}</>}
                 </button>
               </div>
             </motion.div>

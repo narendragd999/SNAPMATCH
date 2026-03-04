@@ -10,7 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
   QrCode, Printer, Copy, Check, Share2,
-  X, FileImage, FileCode,
+  X, FileImage, FileCode, KeyRound,
 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ interface QRCodeDisplayProps {
   token: string;
   eventName?: string;
   eventDate?: string;
+  pin?: string | null;   // 🔒 Current event PIN — shown on card for owner to share
 }
 
 type DownloadFormat = 'png' | 'svg' | 'print';
@@ -65,9 +66,17 @@ const downloadQRCodeAsSvg = (svg: SVGSVGElement, filename: string): boolean => {
   } catch { return false; }
 };
 
-const printQRCodeSheet = (qrCodeDataUrl: string, eventName: string, eventUrl: string): void => {
-  const printWindow = window.open('', '_blank');
+const printQRCodeSheet = (qrCodeDataUrl: string, eventName: string, eventUrl: string, pin?: string | null): void => {
+  const printWindow = window.open('_blank');
   if (!printWindow) return;
+  const pinHtml = pin ? `
+    <div class="pin-box">
+      <p class="pin-label">Event PIN</p>
+      <div class="pin-digits">
+        ${pin.split('').map((d: string) => `<span class="pin-digit">${d}</span>`).join('')}
+      </div>
+      <p class="pin-hint">Enter this PIN when prompted on the event page</p>
+    </div>` : '';
   printWindow.document.write(`
     <!DOCTYPE html>
     <html>
@@ -78,9 +87,14 @@ const printQRCodeSheet = (qrCodeDataUrl: string, eventName: string, eventUrl: st
         body { font-family: system-ui, sans-serif; background: #fff; color: #111; }
         .container { max-width: 400px; margin: 60px auto; text-align: center; padding: 40px; border: 1px solid #e5e7eb; border-radius: 16px; }
         h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
-        .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 32px; }
-        .qr-container { display: inline-block; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px; margin-bottom: 24px; }
+        .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 28px; }
+        .qr-container { display: inline-block; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px; margin-bottom: 20px; }
         .qr-container img { display: block; width: 200px; height: 200px; }
+        .pin-box { background: #f8faff; border: 2px dashed #93c5fd; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
+        .pin-label { font-size: 11px; font-weight: 700; color: #3b82f6; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 10px; }
+        .pin-digits { display: flex; justify-content: center; gap: 8px; margin-bottom: 8px; }
+        .pin-digit { width: 44px; height: 52px; border: 2px solid #3b82f6; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: 800; color: #1d4ed8; background: #fff; }
+        .pin-hint { font-size: 11px; color: #6b7280; }
         .instructions { text-align: left; margin-bottom: 20px; }
         .instructions h3 { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 10px; }
         .instructions ol { padding-left: 18px; }
@@ -94,10 +108,12 @@ const printQRCodeSheet = (qrCodeDataUrl: string, eventName: string, eventUrl: st
         <h1>${eventName}</h1>
         <p class="subtitle">Find Your Event Photos</p>
         <div class="qr-container"><img src="${qrCodeDataUrl}" alt="QR Code" /></div>
+        ${pinHtml}
         <div class="instructions">
           <h3>How to find your photos:</h3>
           <ol>
             <li>Scan this QR code with your phone camera</li>
+            ${pin ? '<li>Enter the PIN shown above when prompted</li>' : ''}
             <li>Upload a selfie to find your photos</li>
             <li>Download and share your memories!</li>
           </ol>
@@ -126,6 +142,7 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = memo(({
   token,
   eventName = 'Event Photos',
   eventDate,
+  pin,
 }) => {
   const [qrSize, setQrSize]       = useState<QRSize>('M');
   const [copied, setCopied]       = useState(false);
@@ -170,7 +187,7 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = memo(({
         if (svgRef.current) downloadQRCodeAsSvg(svgRef.current, `${slug}-qr.svg`);
       } else if (format === 'print') {
         const canvas = canvasRef.current?.querySelector('canvas');
-        if (canvas) printQRCodeSheet(canvas.toDataURL('image/png'), eventName, eventUrl);
+        if (canvas) printQRCodeSheet(canvas.toDataURL('image/png'), eventName, eventUrl, pin);
       }
     } catch { /* noop */ } finally {
       setDownloading(null);
@@ -260,6 +277,24 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = memo(({
                 <p className="text-[10px] text-zinc-600 break-all font-mono leading-relaxed px-1">
                   {eventUrl}
                 </p>
+
+                {/* PIN display */}
+                {pin && (
+                  <div className="w-full mt-1 pt-3 border-t border-zinc-800">
+                    <div className="flex items-center justify-center gap-1.5 mb-2">
+                      <KeyRound size={11} className="text-blue-400" />
+                      <span className="text-[10px] font-semibold text-blue-400 tracking-widest uppercase">Event PIN</span>
+                    </div>
+                    <div className="flex items-center justify-center gap-2">
+                      {pin.split('').map((digit, i) => (
+                        <div key={i} className="w-9 h-10 rounded-lg bg-zinc-900 border border-blue-500/30 flex items-center justify-center text-lg font-bold text-blue-300">
+                          {digit}
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-zinc-600 mt-2">Share this PIN with your guests</p>
+                  </div>
+                )}
               </div>
 
               {/* Size selector + Copy URL row */}

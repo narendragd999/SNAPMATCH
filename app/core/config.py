@@ -28,3 +28,10 @@ INDEXES_PATH = os.getenv("INDEXES_PATH", os.path.join(BASE_DIR, "indexes"))
 # Always create these directories — used for local backend and temp files
 os.makedirs(STORAGE_PATH, exist_ok=True)
 os.makedirs(INDEXES_PATH, exist_ok=True)
+
+# ── PIN Protection ────────────────────────────────────────────────────────────
+# Default PIN assigned to every new event at creation.
+# Owner can change it from the dashboard at any time.
+# Must be exactly 4 digits.
+# Add this line to config.py:
+DEFAULT_EVENT_PIN = os.getenv("DEFAULT_EVENT_PIN", "0000")
