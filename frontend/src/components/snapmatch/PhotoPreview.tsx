@@ -18,7 +18,34 @@ import {
   useFocusTrap 
 } from '@/hooks/snapmatch/useSnapmatch';
 import { nameOf, sceneOf, confidenceOf, hapticFeedback, downloadBlob } from '@/lib/snapmatch/utils';
-import { ConfidenceBadge, sceneIcon } from './UIComponents';
+import { sceneIcon } from './UIComponents';
+
+// Inline badge — score is already 0–100 from confidenceOf()
+function ConfidenceBadge({ score, showLabel }: { score: number; showLabel?: boolean }) {
+  const pct = Math.round(score * 100); // confidenceOf returns 0–1 float
+  const colorCls =
+    pct >= 90 ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+    : pct >= 75 ? 'bg-blue-500/20 text-blue-300 border-blue-500/30'
+    : 'bg-zinc-700/60 text-zinc-400 border-zinc-600/30';
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '3px 8px',
+        borderRadius: 6,
+        fontSize: 11,
+        fontWeight: 700,
+        border: '1px solid',
+      }}
+      className={colorCls}
+    >
+      {showLabel && <span style={{ opacity: 0.7, fontSize: 10 }}>Match</span>}
+      {pct}%
+    </span>
+  );
+}
 import { WatermarkConfig, applyWatermarkToCanvas } from '@/lib/snapmatch/watermark';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -386,7 +413,7 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
                 width: 40,
                 height: 40,
                 borderRadius: 10,
-                background: showInfo ? 'rgba(232,201,126,0.2)' : 'rgba(255,255,255,0.1)',
+                background: showInfo ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.1)',
                 border: 'none',
                 display: 'flex',
                 alignItems: 'center',
@@ -395,7 +422,7 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
               }}
               aria-label="Toggle info"
             >
-              <Info size={20} color={showInfo ? '#e8c97e' : '#fff'} />
+              <Info size={20} color={showInfo ? '#60a5fa' : '#fff'} />
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.05 }}
@@ -487,7 +514,7 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
                     width: 40,
                     height: 40,
                     border: '3px solid rgba(255,255,255,0.1)',
-                    borderTopColor: '#e8c97e',
+                    borderTopColor: '#3b82f6',
                     borderRadius: '50%',
                   }}
                 />
@@ -524,10 +551,10 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
                       gap: 6,
                       padding: '4px 10px',
                       borderRadius: 6,
-                      background: 'rgba(232,201,126,0.15)',
+                      background: 'rgba(59,130,246,0.15)',
                       fontSize: 12,
                       fontWeight: 600,
-                      color: '#e8c97e',
+                      color: '#60a5fa',
                       textTransform: 'capitalize',
                     }}
                   >
@@ -715,13 +742,13 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
               gap: 8,
               padding: '10px 18px',
               borderRadius: 12,
-              background: 'linear-gradient(135deg, #e8c97e, #c88c25)',
+              background: '#2563eb',
               border: 'none',
               cursor: 'pointer',
               fontWeight: 600,
               fontSize: 13,
-              color: '#0a0808',
-              boxShadow: '0 4px 20px rgba(232,201,126,0.3)',
+              color: '#fff',
+              boxShadow: '0 4px 20px rgba(37,99,235,0.35)',
             }}
             aria-label="Download photo"
           >
@@ -791,7 +818,7 @@ export const PhotoPreview: React.FC<PhotoPreviewProps> = memo(({
                   height: isActive ? 48 : 36,
                   borderRadius: 6,
                   overflow: 'hidden',
-                  border: isActive ? '2px solid #e8c97e' : '2px solid transparent',
+                  border: isActive ? '2px solid #3b82f6' : '2px solid transparent',
                   padding: 0,
                   cursor: 'pointer',
                   flexShrink: 0,

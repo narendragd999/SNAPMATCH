@@ -1,25 +1,24 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import API from "@/services/api";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Plus, Folder, Globe, Lock, Trash2,
   CalendarDays, LayoutGrid, QrCode, MessageCircle,
-  Download, X,
 } from "lucide-react";
-import { QRCodeSVG } from "qrcode.react";
+import { QRCodeDisplay } from "@/components/snapmatch/QRCodeDisplay";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Event {
-  id:             number;
-  name:           string;
-  created_at?:    string;
-  cover_image?:   string;
+  id:              number;
+  name:            string;
+  created_at?:     string;
+  cover_image?:    string;
   cover_image_url: string | null;      // ← full URL from storage_service
-  public_status?: string;
-  public_token?:  string;
+  public_status?:  string;
+  public_token?:   string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -30,9 +29,7 @@ export default function EventsPage() {
   const [deletingId,   setDeletingId]   = useState<number | null>(null);
   const [togglingId,   setTogglingId]   = useState<number | null>(null);
   const [qrEvent,      setQrEvent]      = useState<Event | null>(null);
-  const qrRef   = useRef<HTMLDivElement>(null);
-  const router  = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL;
+  const router = useRouter();
 
   // ─── Fetch ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -49,7 +46,9 @@ export default function EventsPage() {
     try {
       const res = await API.post(`/events/${id}/toggle-public`);
       setEvents(prev =>
-        prev.map(ev => ev.id === id ? { ...ev, public_status: res.data.public_status } : ev)
+        prev.map(ev => ev.id === id
+          ? { ...ev, public_status: res.data.public_status }
+          : ev)
       );
     } catch {
       alert("Failed to update public status");
@@ -64,17 +63,6 @@ export default function EventsPage() {
     if (!event.public_token) return;
     const link = `${window.location.origin}/public/${event.public_token}`;
     window.open(`https://wa.me/?text=${encodeURIComponent(`Check your photos here: ${link}`)}`, "_blank");
-  };
-
-  // ─── QR download ────────────────────────────────────────────────────────────
-  const downloadQR = () => {
-    const svg = qrRef.current?.querySelector("svg");
-    if (!svg || !qrEvent) return;
-    const blob = new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href = url; a.download = `${qrEvent.name}-qr.svg`; a.click();
-    URL.revokeObjectURL(url);
   };
 
   // ─── Delete ─────────────────────────────────────────────────────────────────
@@ -92,10 +80,7 @@ export default function EventsPage() {
     }
   };
 
-  const isActive  = (e: Event) => e.public_status === "active";
-  const publicUrl = (event: Event) =>
-    typeof window !== "undefined" && event.public_token
-      ? `${window.location.origin}/public/${event.public_token}` : "";
+  const isActive = (e: Event) => e.public_status === "active";
 
   // ─── Skeleton ───────────────────────────────────────────────────────────────
   if (loading) {
@@ -125,43 +110,7 @@ export default function EventsPage() {
     );
   }
 
-  // ─── Empty ───────────────────────────────────────────────────────────────────
-  if (events.length === 0) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-zinc-300">Your Events</h2>
-          <button
-            onClick={() => router.push("/events/create")}
-            className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors"
-          >
-            <Plus size={13} />
-            Create Event
-          </button>
-        </div>
-        <div className="flex flex-col items-center justify-center py-24 gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-700">
-            <LayoutGrid size={22} />
-          </div>
-          <div className="text-center">
-            <p className="text-sm font-medium text-zinc-400">No events yet</p>
-            <p className="text-xs text-zinc-600 mt-1 leading-relaxed max-w-[220px]">
-              Create your first event to start collecting and finding photos
-            </p>
-          </div>
-          <button
-            onClick={() => router.push("/events/create")}
-            className="flex items-center gap-1.5 text-xs font-medium px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white transition-colors mt-1"
-          >
-            <Plus size={13} />
-            Create your first event
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Main ────────────────────────────────────────────────────────────────────
+  // ─── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
       <div className="space-y-6">
@@ -169,8 +118,10 @@ export default function EventsPage() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-zinc-300">Your Events</h2>
-            <p className="text-xs text-zinc-600 mt-0.5">{events.length} event{events.length !== 1 ? "s" : ""}</p>
+            <h1 className="text-lg font-bold tracking-tight text-zinc-50">My Events</h1>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              {events.length} event{events.length !== 1 ? "s" : ""}
+            </p>
           </div>
           <button
             onClick={() => router.push("/events/create")}
@@ -180,6 +131,24 @@ export default function EventsPage() {
             Create Event
           </button>
         </div>
+
+        {/* Empty state */}
+        {events.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-4">
+              <LayoutGrid size={24} className="text-zinc-600" />
+            </div>
+            <p className="text-sm font-semibold text-zinc-300 mb-1">No events yet</p>
+            <p className="text-xs text-zinc-600 mb-6">Create your first event to start indexing photos with AI</p>
+            <button
+              onClick={() => router.push("/events/create")}
+              className="flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+            >
+              <Plus size={13} />
+              Create your first event
+            </button>
+          </div>
+        )}
 
         {/* Grid */}
         <motion.div
@@ -204,7 +173,7 @@ export default function EventsPage() {
               >
                 {event.cover_image_url ? (
                   <img
-                    src={event.cover_image_url!}
+                    src={event.cover_image_url}
                     className="w-full h-36 object-cover group-hover:scale-[1.03] transition-transform duration-300"
                     alt={event.name}
                   />
@@ -226,14 +195,15 @@ export default function EventsPage() {
                 </span>
               </div>
 
-              {/* Content */}
-              <div className="p-4 flex flex-col flex-1 gap-3">
-                <div className="cursor-pointer" onClick={() => router.push(`/events/${event.id}`)}>
-                  <h3 className="text-sm font-semibold text-zinc-100 truncate leading-tight group-hover:text-white transition-colors">
-                    {event.name}
-                  </h3>
+              {/* Info */}
+              <div className="p-4 flex flex-col gap-3 flex-1">
+                <div
+                  className="cursor-pointer"
+                  onClick={() => router.push(`/events/${event.id}`)}
+                >
+                  <p className="text-sm font-semibold text-zinc-100 truncate leading-snug">{event.name}</p>
                   {event.created_at && (
-                    <p className="text-[11px] text-zinc-600 flex items-center gap-1 mt-1.5">
+                    <p className="text-[11px] text-zinc-600 mt-0.5 flex items-center gap-1">
                       <CalendarDays size={10} />
                       {new Date(event.created_at).toLocaleDateString("en-US", {
                         month: "short", day: "numeric", year: "numeric",
@@ -242,19 +212,19 @@ export default function EventsPage() {
                   )}
                 </div>
 
-                {/* ── 4 ACTION BUTTONS ── */}
+                {/* Action buttons */}
                 <div className="grid grid-cols-4 gap-1.5 mt-auto">
 
-                  {/* 1 — Publish / Disable (wider, text label) */}
+                  {/* 1 — Toggle public */}
                   <button
                     onClick={e => togglePublic(e, event.id)}
                     disabled={togglingId === event.id}
-                    title={isActive(event) ? "Disable public access" : "Make event public"}
-                    className={`col-span-1 flex items-center justify-center gap-1 text-[11px] font-medium py-2 rounded-lg border transition-colors disabled:opacity-50 ${
+                    title={isActive(event) ? "Make private" : "Make public"}
+                    className={`col-span-1 flex items-center justify-center rounded-lg border transition-colors py-2 ${
                       isActive(event)
-                        ? "bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-400"
-                        : "bg-blue-600/12 hover:bg-blue-600/20 border-blue-500/25 text-blue-400"
-                    }`}
+                        ? "bg-emerald-950/40 border-emerald-900/50 text-emerald-400 hover:bg-emerald-950/60"
+                        : "bg-zinc-800 border-zinc-700 text-zinc-500 hover:bg-zinc-700"
+                    } disabled:opacity-40 disabled:cursor-not-allowed`}
                   >
                     {togglingId === event.id
                       ? <div className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
@@ -305,68 +275,13 @@ export default function EventsPage() {
         </motion.div>
       </div>
 
-      {/* ── QR MODAL ── */}
-      <AnimatePresence>
-        {qrEvent && (
-          <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            onClick={() => setQrEvent(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden w-full max-w-xs"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800">
-                <span className="text-xs font-semibold text-zinc-100">QR Code</span>
-                <button
-                  onClick={() => setQrEvent(null)}
-                  className="w-6 h-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-
-              <div className="p-5">
-                <div
-                  ref={qrRef}
-                  className="bg-zinc-950 border border-zinc-800 rounded-xl p-5 flex flex-col items-center gap-3 text-center"
-                >
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-100 truncate max-w-[180px]">{qrEvent.name}</p>
-                    <p className="text-[10px] text-zinc-600 mt-0.5">Scan to find your photos</p>
-                  </div>
-                  <div className="bg-white p-2.5 rounded-lg">
-                    <QRCodeSVG value={publicUrl(qrEvent)} size={140} level="H" />
-                  </div>
-                  <p className="text-[10px] text-zinc-700 break-all font-mono leading-relaxed">
-                    {publicUrl(qrEvent)}
-                  </p>
-                </div>
-              </div>
-
-              <div className="px-5 pb-5 flex gap-2">
-                <button
-                  onClick={downloadQR}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
-                >
-                  <Download size={12} />
-                  Download SVG
-                </button>
-                <button
-                  onClick={() => setQrEvent(null)}
-                  className="flex-1 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors"
-                >
-                  Close
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* ── QR CODE MODAL (rich component from event detail) ── */}
+      <QRCodeDisplay
+        isOpen={!!qrEvent}
+        onClose={() => setQrEvent(null)}
+        token={qrEvent?.public_token ?? ""}
+        eventName={qrEvent?.name}
+      />
 
       {/* ── DELETE CONFIRM MODAL ── */}
       <AnimatePresence>

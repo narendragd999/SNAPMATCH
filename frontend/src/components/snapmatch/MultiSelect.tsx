@@ -1,308 +1,203 @@
 /**
- * MultiSelectMode Component
- * Batch selection, download, and sharing functionality
+ * MultiSelect — fixed to remove all amber/golden colors.
+ * All accents now use blue (matching the zinc dark theme).
  */
 
 'use client';
 
-import React, { memo, useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Check, X, Download, Share2, Trash2, 
-  CheckCircle2, Package, Loader2 
-} from 'lucide-react';
-import { hapticFeedback, downloadBlob } from '@/lib/snapmatch/utils';
-import { SelectionCheckbox, SelectionOverlay } from './UIComponents';
-import { WatermarkConfig, applyWatermarkToCanvas } from '@/lib/snapmatch/watermark';
+import { CheckSquare, Square, Download, X, Check } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface MultiSelectManagerProps {
-  items: unknown[];
+export interface PhotoItem {
+  image_name?: string;
+  [key: string]: unknown;
+}
+
+interface MultiSelectState {
+  isSelectMode: boolean;
+  selectedIds: Set<string>;
+  selectionOrder: string[];
+  count: number;
+  enterSelectMode: () => void;
+  exitSelectMode: () => void;
+  toggle: (id: string) => void;
+  selectAll: () => void;
+  clearSelection: () => void;
+  getSelectionIndex: (id: string) => number;
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
+export function useMultiSelect(items: PhotoItem[]): MultiSelectState {
+  const [isSelectMode, setIsSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionOrder, setSelectionOrder] = useState<string[]>([]);
+
+  const enterSelectMode = useCallback(() => setIsSelectMode(true), []);
+
+  const exitSelectMode = useCallback(() => {
+    setIsSelectMode(false);
+    setSelectedIds(new Set());
+    setSelectionOrder([]);
+  }, []);
+
+  const toggle = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        setSelectionOrder(o => o.filter(x => x !== id));
+      } else {
+        next.add(id);
+        setSelectionOrder(o => [...o, id]);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    const ids = items.map(i => i.image_name ?? '').filter(Boolean);
+    setSelectedIds(new Set(ids));
+    setSelectionOrder(ids);
+  }, [items]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setSelectionOrder([]);
+  }, []);
+
+  const getSelectionIndex = useCallback(
+    (id: string) => selectionOrder.indexOf(id) + 1,
+    [selectionOrder]
+  );
+
+  return {
+    isSelectMode,
+    selectedIds,
+    selectionOrder,
+    count: selectedIds.size,
+    enterSelectMode,
+    exitSelectMode,
+    toggle,
+    selectAll,
+    clearSelection,
+    getSelectionIndex,
+  };
+}
+
+// ─── MultiSelectToolbar ───────────────────────────────────────────────────────
+
+interface MultiSelectToolbarProps {
+  items: PhotoItem[];
   selectedIds: Set<string>;
   onToggle: (id: string) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
-  onBatchDownload: () => Promise<void>;
-  onBatchShare?: () => void;
-  onBatchDelete?: () => void;
+  onBatchDownload: () => void;
   isActive: boolean;
   onActivate: () => void;
   onDeactivate: () => void;
 }
 
-// ─── MultiSelectToolbar ────────────────────────────────────────────────────────
-
-export const MultiSelectToolbar: React.FC<MultiSelectManagerProps> = memo(({
+export function MultiSelectToolbar({
+  items,
   selectedIds,
   onSelectAll,
   onClearSelection,
   onBatchDownload,
-  onBatchShare,
   isActive,
   onActivate,
   onDeactivate,
-}) => {
-  const [downloadStatus, setDownloadStatus] = useState<'idle' | 'loading' | 'success'>('idle');
+}: MultiSelectToolbarProps) {
   const count = selectedIds.size;
+  const allSelected = count === items.length && items.length > 0;
 
-  const handleBatchDownload = async () => {
-    setDownloadStatus('loading');
-    hapticFeedback('medium');
-    try {
-      await onBatchDownload();
-      setDownloadStatus('success');
-      hapticFeedback('success');
-      setTimeout(() => setDownloadStatus('idle'), 2000);
-    } catch (error) {
-      console.error('Batch download failed:', error);
-      setDownloadStatus('idle');
-    }
-  };
-
+  /* ── Inactive trigger button ── */
   if (!isActive) {
     return (
       <motion.button
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
         whileHover={{ scale: 1.02 }}
-        whileTap={{ scale: 0.98 }}
+        whileTap={{ scale: 0.97 }}
         onClick={onActivate}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '8px 16px',
-          borderRadius: 10,
-          background: 'rgba(255,255,255,0.04)',
-          border: '1px solid rgba(255,255,255,0.07)',
-          color: 'rgba(255,255,255,0.55)',
-          fontSize: 13,
-          fontWeight: 600,
-          cursor: 'pointer',
-          transition: 'all 0.2s',
-        }}
-        aria-label="Enter selection mode"
+        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 hover:border-zinc-600 text-zinc-300 text-xs font-medium transition-colors"
       >
-        <Check size={14} />
+        <CheckSquare size={13} className="text-zinc-400" />
         Select
       </motion.button>
     );
   }
 
+  /* ── Active toolbar ── */
   return (
     <motion.div
-      initial={{ opacity: 0, y: -20 }}
+      initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -20 }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '10px 16px',
-        borderRadius: 14,
-        background: 'rgba(232,201,126,0.1)',
-        border: '1px solid rgba(232,201,126,0.2)',
-        backdropFilter: 'blur(10px)',
-      }}
+      exit={{ opacity: 0, y: -4 }}
+      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800"
     >
-      {/* Selection count */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '4px 12px',
-        borderRadius: 8,
-        background: 'rgba(232,201,126,0.15)',
-      }}>
-        <CheckCircle2 size={14} color="#e8c97e" />
-        <span style={{
-          fontSize: 13,
-          fontWeight: 700,
-          color: '#e8c97e',
-        }}>
+      {/* Selected count indicator — BLUE (was amber) */}
+      <div className="flex items-center gap-1.5">
+        <div className="w-5 h-5 rounded-full bg-blue-500/15 border border-blue-500/30 flex items-center justify-center flex-shrink-0">
+          <div className="w-2 h-2 rounded-full bg-blue-400" />
+        </div>
+        <span className="text-xs font-semibold text-zinc-200 tabular-nums">
           {count} selected
         </span>
       </div>
 
-      {/* Select All / Clear */}
+      {/* Divider */}
+      <div className="w-px h-4 bg-zinc-700" />
+
+      {/* Select all / Clear */}
+      {!allSelected ? (
+        <button
+          onClick={onSelectAll}
+          className="text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors whitespace-nowrap"
+        >
+          Select all
+        </button>
+      ) : (
+        <button
+          onClick={onClearSelection}
+          className="text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors whitespace-nowrap"
+        >
+          Clear
+        </button>
+      )}
+
+      {/* Download selected — BLUE (was amber/gold) */}
       <motion.button
         whileHover={{ scale: 1.02 }}
-        whileTap={{ scale: 0.98 }}
-        onClick={count > 0 ? onClearSelection : onSelectAll}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '6px 12px',
-          borderRadius: 8,
-          background: 'rgba(255,255,255,0.05)',
-          border: 'none',
-          color: 'rgba(255,255,255,0.7)',
-          fontSize: 12,
-          fontWeight: 600,
-          cursor: 'pointer',
-        }}
+        whileTap={{ scale: 0.97 }}
+        onClick={onBatchDownload}
+        disabled={count === 0}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors"
       >
-        {count > 0 ? 'Clear' : 'Select all'}
+        <Download size={12} />
+        Download ({count})
       </motion.button>
 
-      {/* Spacer */}
-      <div style={{ flex: 1 }} />
-
-      {/* Actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {/* Download */}
-        <motion.button
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={handleBatchDownload}
-          disabled={count === 0 || downloadStatus === 'loading'}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '8px 16px',
-            borderRadius: 10,
-            background: count > 0 
-              ? 'linear-gradient(135deg, #e8c97e, #c88c25)' 
-              : 'rgba(255,255,255,0.05)',
-            border: 'none',
-            color: count > 0 ? '#0a0808' : 'rgba(255,255,255,0.3)',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: count > 0 && downloadStatus !== 'loading' ? 'pointer' : 'not-allowed',
-            opacity: count === 0 ? 0.6 : 1,
-            boxShadow: count > 0 ? '0 4px 20px rgba(232,201,126,0.3)' : 'none',
-          }}
-          aria-label={`Download ${count} photos`}
-        >
-          <AnimatePresence mode="wait">
-            {downloadStatus === 'loading' ? (
-              <motion.div
-                key="loading"
-                initial={{ scale: 0 }}
-                animate={{ scale: 1, rotate: 360 }}
-                transition={{ rotate: { repeat: Infinity, duration: 1, ease: 'linear' } }}
-              >
-                <Loader2 size={14} color="#0a0808" />
-              </motion.div>
-            ) : downloadStatus === 'success' ? (
-              <motion.div
-                key="success"
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-              >
-                <Check size={14} color="#0a0808" />
-              </motion.div>
-            ) : (
-              <motion.div
-                key="idle"
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-              >
-                <Package size={14} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-          {downloadStatus === 'loading' ? 'Preparing...' : downloadStatus === 'success' ? 'Done!' : `Download (${count})`}
-        </motion.button>
-
-        {/* Share */}
-        {onBatchShare && (
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={onBatchShare}
-            disabled={count === 0}
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 10,
-              background: 'rgba(255,255,255,0.05)',
-              border: 'none',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: count > 0 ? 'pointer' : 'not-allowed',
-              opacity: count === 0 ? 0.4 : 1,
-            }}
-            aria-label="Share selected photos"
-          >
-            <Share2 size={14} color="rgba(255,255,255,0.7)" />
-          </motion.button>
-        )}
-
-        {/* Close selection mode */}
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={onDeactivate}
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 10,
-            background: 'rgba(255,255,255,0.05)',
-            border: 'none',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-          }}
-          aria-label="Exit selection mode"
-        >
-          <X size={14} color="rgba(255,255,255,0.7)" />
-        </motion.button>
-      </div>
+      {/* Exit select mode */}
+      <button
+        onClick={onDeactivate}
+        className="w-6 h-6 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+      >
+        <X size={13} />
+      </button>
     </motion.div>
   );
-});
-
-MultiSelectToolbar.displayName = 'MultiSelectToolbar';
-
-// ─── WatermarkedCardImage ─────────────────────────────────────────────────────
-
-interface WatermarkedCardImageProps {
-  src: string;
-  watermarkConfig?: WatermarkConfig | null;
-  opacity?: number;
 }
 
-const WatermarkedCardImage: React.FC<WatermarkedCardImageProps> = memo(({
-  src,
-  watermarkConfig,
-  opacity = 1,
-}) => {
-  // For grid thumbnails, we skip watermarking to avoid CORS issues with redirected URLs
-  // Watermarking will be applied only when downloading the full-resolution image
-  // This ensures thumbnails always display correctly
-  
-  return (
-    <img
-      src={src}
-      alt=""
-      loading="lazy"
-      style={{
-        width: '100%',
-        height: '100%',
-        objectFit: 'cover',
-        display: 'block',
-        opacity,
-        transition: 'opacity 0.2s',
-      }}
-    />
-  );
-});
-
-WatermarkedCardImage.displayName = 'WatermarkedCardImage';
-
-// ─── SelectablePhotoCard ───────────────────────────────────────────────────────
+// ─── SelectablePhotoCard ──────────────────────────────────────────────────────
 
 interface SelectablePhotoCardProps {
-  item: unknown;
+  item: PhotoItem;
   imageId: string;
   imageUrl: string;
-  thumbnailUrl: string;
+  thumbnailUrl?: string;
   isSelected: boolean;
   selectionIndex: number;
   isSelectMode: boolean;
@@ -311,11 +206,10 @@ interface SelectablePhotoCardProps {
   scene?: string;
   confidence?: number;
   showConfidence?: boolean;
-  children?: React.ReactNode;
-  watermarkConfig?: WatermarkConfig | null;
+  watermarkConfig?: unknown;
 }
 
-export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
+export function SelectablePhotoCard({
   imageId,
   imageUrl,
   thumbnailUrl,
@@ -326,202 +220,108 @@ export const SelectablePhotoCard: React.FC<SelectablePhotoCardProps> = memo(({
   onClick,
   scene,
   confidence,
-  showConfidence = false,
-  children,
-  watermarkConfig,
-}) => {
-  const handleClick = useCallback(() => {
+  showConfidence,
+}: SelectablePhotoCardProps) {
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
+
+  const handleClick = () => {
     if (isSelectMode) {
-      hapticFeedback('light');
       onToggle();
     } else {
       onClick();
     }
-  }, [isSelectMode, onToggle, onClick]);
-
-  // Use imageUrl which has better fallback (thumbnail -> full photo)
-  // instead of thumbnailUrl which may return 404 if no thumbnail exists
-  const displayUrl = imageUrl || thumbnailUrl;
+  };
 
   return (
     <motion.div
-      className="photo-card"
+      layout
+      className={`relative group rounded-xl overflow-hidden cursor-pointer bg-zinc-900 border transition-all ${
+        isSelected
+          ? 'border-blue-500/60 ring-2 ring-blue-500/20'
+          : 'border-zinc-800 hover:border-zinc-700'
+      }`}
       onClick={handleClick}
-      whileHover={{ scale: isSelectMode ? 1.01 : 1.028 }}
+      whileHover={{ scale: isSelectMode ? 1 : 1.01 }}
       whileTap={{ scale: 0.98 }}
-      style={{
-        aspectRatio: '1',
-        cursor: 'pointer',
-        overflow: 'hidden',
-        borderRadius: 12,
-        position: 'relative',
-        background: '#111',
-        border: isSelected 
-          ? '2px solid #e8c97e' 
-          : '1px solid rgba(255,255,255,0.07)',
-        transition: 'transform 0.22s ease, box-shadow 0.22s ease',
-        boxShadow: isSelected 
-          ? '0 0 0 2px rgba(232,201,126,0.3), 0 8px 32px rgba(0,0,0,0.4)' 
-          : 'none',
-      }}
-      role="button"
-      tabIndex={0}
-      aria-pressed={isSelected}
-      aria-label={`${isSelected ? 'Deselect' : 'Select'} photo`}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          handleClick();
-        }
-      }}
     >
-      {/* Image with optional watermark */}
-      <WatermarkedCardImage
-        src={displayUrl}
-        watermarkConfig={watermarkConfig}
-        opacity={isSelectMode && !isSelected ? 0.7 : 1}
-      />
+      {/* Image */}
+      <div className="aspect-square">
+        {!loaded && !error && (
+          <div className="absolute inset-0 bg-zinc-800 animate-pulse" />
+        )}
+        {error ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-zinc-900">
+            <span className="text-zinc-600 text-xs">Failed to load</span>
+          </div>
+        ) : (
+          <img
+            src={thumbnailUrl ?? imageUrl}
+            alt={imageId}
+            className={`w-full h-full object-cover transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'}`}
+            onLoad={() => setLoaded(true)}
+            onError={() => setError(true)}
+          />
+        )}
+      </div>
 
-      {/* Selection overlay */}
+      {/* Hover overlay */}
+      {!isSelectMode && (
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors rounded-xl" />
+      )}
+
+      {/* Select checkbox — top-left — BLUE (was amber) */}
       <AnimatePresence>
-        {isSelected && (
-          <SelectionOverlay selected={isSelected} index={selectionIndex} />
+        {(isSelectMode || isSelected) && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            className="absolute top-2 left-2"
+          >
+            <div
+              className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                isSelected
+                  ? 'bg-blue-600 border-blue-500 shadow-lg shadow-blue-500/30'
+                  : 'bg-black/50 border-white/40 backdrop-blur-sm'
+              }`}
+            >
+              {isSelected && <Check size={13} className="text-white" strokeWidth={3} />}
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Selection checkbox */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 8,
-          left: 8,
-          opacity: isSelectMode || isSelected ? 1 : 0,
-          transition: 'opacity 0.2s',
-        }}
-      >
-        <SelectionCheckbox selected={isSelected} onToggle={onToggle} />
-      </div>
+      {/* Selection order badge — BLUE (was amber) */}
+      {isSelected && selectionIndex > 0 && (
+        <div className="absolute top-2 right-2 min-w-[20px] h-5 px-1.5 rounded-full bg-blue-600 border border-blue-500/50 flex items-center justify-center">
+          <span className="text-white text-[10px] font-bold tabular-nums">{selectionIndex}</span>
+        </div>
+      )}
 
-      {/* Scene badge */}
+      {/* Scene label */}
       {scene && !isSelectMode && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            padding: '3px 8px',
-            borderRadius: 6,
-            background: 'rgba(0,0,0,0.62)',
-            backdropFilter: 'blur(8px)',
-            fontSize: 10,
-            fontWeight: 600,
-            color: 'rgba(255,255,255,0.85)',
-            textTransform: 'capitalize',
-            letterSpacing: '0.04em',
-            border: '1px solid rgba(255,255,255,0.1)',
-          }}
-        >
-          {scene}
+        <div className="absolute bottom-2 left-2 right-2">
+          <span className="text-[10px] text-white/70 bg-black/50 backdrop-blur-sm px-1.5 py-0.5 rounded-md font-medium capitalize">
+            {scene}
+          </span>
         </div>
       )}
 
       {/* Confidence badge */}
-      {showConfidence && confidence && !isSelectMode && (
-        <div style={{ position: 'absolute', bottom: 8, left: 8 }}>
-          {/* ConfidenceBadge would go here */}
-        </div>
-      )}
-
-      {/* Hover overlay (non-select mode) */}
-      {!isSelectMode && (
-        <div
-          className="photo-overlay"
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'linear-gradient(to top, rgba(0,0,0,0.88) 0%, transparent 55%)',
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          {children}
+      {showConfidence && confidence !== undefined && !isSelectMode && (
+        <div className="absolute top-2 right-2">
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md backdrop-blur-sm ${
+            confidence >= 0.9
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              : confidence >= 0.75
+              ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+              : 'bg-zinc-700/60 text-zinc-400 border border-zinc-600/30'
+          }`}>
+            {Math.round(confidence * 100)}%
+          </span>
         </div>
       )}
     </motion.div>
   );
-});
-
-SelectablePhotoCard.displayName = 'SelectablePhotoCard';
-
-// ─── useMultiSelect Hook ──────────────────────────────────────────────────────
-
-export const useMultiSelect = <T extends { id?: string; image_name?: string }>(
-  items: T[]
-) => {
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [isSelectMode, setIsSelectMode] = useState(false);
-
-  const getId = useCallback((item: T): string => {
-    return item.id ?? item.image_name ?? '';
-  }, []);
-
-  const toggle = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const selectAll = useCallback(() => {
-    setSelectedIds(new Set(items.map(getId)));
-    hapticFeedback('medium');
-  }, [items, getId]);
-
-  const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
-    hapticFeedback('light');
-  }, []);
-
-  const enterSelectMode = useCallback(() => {
-    setIsSelectMode(true);
-    hapticFeedback('light');
-  }, []);
-
-  const exitSelectMode = useCallback(() => {
-    setIsSelectMode(false);
-    setSelectedIds(new Set());
-  }, []);
-
-  const selectionOrder = useMemo(() => {
-    return Array.from(selectedIds);
-  }, [selectedIds]);
-
-  const getSelectionIndex = useCallback((id: string): number => {
-    return selectionOrder.indexOf(id);
-  }, [selectionOrder]);
-
-  return {
-    selectedIds,
-    isSelectMode,
-    toggle,
-    selectAll,
-    clearSelection,
-    enterSelectMode,
-    exitSelectMode,
-    getSelectionIndex,
-    selectionOrder,
-    getId,
-    count: selectedIds.size,
-  };
-};
-
-export default {
-  MultiSelectToolbar,
-  SelectablePhotoCard,
-  useMultiSelect,
-};
+}
