@@ -20,7 +20,7 @@ import {
   ImageIcon, RefreshCw, Sparkles,
   Loader2, Star, X, Check, ArrowLeft,
   AlertCircle, CloudUpload,
-  SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid
+  SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff
 } from 'lucide-react';
 import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf, confidenceOf } from '@/lib/snapmatch/utils';
 import {
@@ -81,6 +81,7 @@ interface EventData {
   plan_type?: string;
   watermark_enabled?: boolean;
   watermark_config?: WatermarkConfig;
+  pin_enabled?: boolean;
 }
 
 type Mode = 'search' | 'contribute';
@@ -153,6 +154,20 @@ export default function EnhancedPublicSelfiePage() {
 
   // Watermark state
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
+
+  // PIN state
+  const [pinVerified, setPinVerified] = useState(false);
+  const [pinInput, setPinInput] = useState(['', '', '', '']);
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [pinLoading, setPinLoading] = useState(false);
+  const [pinAttempts, setPinAttempts] = useState(0);
+  const [showPin, setShowPin] = useState(false);
+  const pinRefs = [
+    useRef<HTMLInputElement>(null),
+    useRef<HTMLInputElement>(null),
+    useRef<HTMLInputElement>(null),
+    useRef<HTMLInputElement>(null),
+  ];
 
   // Refs
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -416,9 +431,195 @@ export default function EnhancedPublicSelfiePage() {
   const pillInactive = 'bg-zinc-800/60 border-zinc-700/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200';
   const pillActive = 'bg-blue-500/10 border-blue-500/30 text-blue-400';
 
+
+
+  // ── Auto-focus first PIN input when gate shows ──
+  useEffect(() => {
+    if (event?.pin_enabled && !pinVerified) {
+      setTimeout(() => pinRefs[0].current?.focus(), 200);
+    }
+  }, [event?.pin_enabled, pinVerified]);
+
+  // ── Auto-submit when all 4 PIN digits filled ──
+  useEffect(() => {
+    if (pinInput.join('').length === 4 && !pinLoading && !pinError) {
+      verifyPin();
+    }
+  }, [pinInput]);
+
+  // ── PIN Verify ──
+  const verifyPin = useCallback(async () => {
+    const pin = pinInput.join('');
+    if (pin.length < 4) return;
+    setPinLoading(true);
+    setPinError(null);
+    try {
+      const res = await fetch(`${API}/public/events/${token}/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      if (res.ok) {
+        setPinVerified(true);
+        hapticFeedback('success');
+      } else {
+        const attempts = pinAttempts + 1;
+        setPinAttempts(attempts);
+        setPinError(attempts >= 5 ? 'Too many attempts. Please try again later.' : 'Incorrect PIN. Please try again.');
+        setPinInput(['', '', '', '']);
+        pinRefs[0].current?.focus();
+        hapticFeedback('error');
+      }
+    } catch {
+      setPinError('Connection error. Please try again.');
+    } finally {
+      setPinLoading(false);
+    }
+  }, [pinInput, token, API, pinAttempts]);
+
   // ─── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-[#09090f] text-white font-sans">
+
+
+      {/* ════════════ PIN GATE ════════════ */}
+      <AnimatePresence>
+        {event?.pin_enabled && !pinVerified && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-[#09090f] flex items-center justify-center p-5"
+          >
+            <div aria-hidden className="fixed inset-0 pointer-events-none">
+              <div className="absolute -top-[10%] left-1/4 w-[600px] h-[500px] rounded-full bg-blue-500/[0.05] blur-[80px]" />
+              <div className="absolute bottom-[5%] right-[10%] w-[400px] h-[400px] rounded-full bg-violet-500/[0.04] blur-[90px]" />
+            </div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.08, duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+              className="relative w-full max-w-sm"
+            >
+              <div className="bg-zinc-900/80 backdrop-blur-2xl border border-zinc-800 rounded-3xl p-8">
+
+                <div className="flex justify-center mb-6">
+                  <div className="relative">
+                    <div className="w-[72px] h-[72px] rounded-[22px] bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                      <Lock size={30} className="text-blue-400" strokeWidth={1.6} />
+                    </div>
+                    {[
+                      ['top-[-4px]', 'left-[-4px]', 'border-t-2', 'border-l-2', 'rounded-tl'],
+                      ['top-[-4px]', 'right-[-4px]', 'border-t-2', 'border-r-2', 'rounded-tr'],
+                      ['bottom-[-4px]', 'left-[-4px]', 'border-b-2', 'border-l-2', 'rounded-bl'],
+                      ['bottom-[-4px]', 'right-[-4px]', 'border-b-2', 'border-r-2', 'rounded-br'],
+                    ].map((cls, i) => (
+                      <div key={i} className={`absolute w-3.5 h-3.5 border-blue-400 ${cls.join(' ')}`} />
+                    ))}
+                  </div>
+                </div>
+
+                <h1 className="text-xl font-bold text-zinc-100 text-center mb-1">Protected Event</h1>
+                <p className="text-sm text-zinc-500 text-center mb-7 leading-relaxed">
+                  Enter the 4-digit PIN to access<br />
+                  <span className="text-zinc-400 font-medium">{event?.name || 'this event'}</span>
+                </p>
+
+                {/* PIN digit inputs */}
+                <div className="flex gap-3 justify-center mb-5">
+                  {pinInput.map((digit, idx) => (
+                    <input
+                      key={idx}
+                      ref={pinRefs[idx]}
+                      type={showPin ? 'text' : 'password'}
+                      inputMode="numeric"
+                      maxLength={1}
+                      value={digit}
+                      onChange={e => {
+                        const val = e.target.value.replace(/\D/g, '');
+                        const next = [...pinInput];
+                        next[idx] = val.slice(-1);
+                        setPinInput(next);
+                        setPinError(null);
+                        if (val && idx < 3) pinRefs[idx + 1].current?.focus();
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Backspace' && !digit && idx > 0) {
+                          const next = [...pinInput];
+                          next[idx - 1] = '';
+                          setPinInput(next);
+                          pinRefs[idx - 1].current?.focus();
+                        }
+                        if (e.key === 'Enter') verifyPin();
+                      }}
+                      onPaste={e => {
+                        e.preventDefault();
+                        const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 4);
+                        if (!pasted) return;
+                        const next = ['', '', '', ''];
+                        pasted.split('').forEach((ch, i) => { next[i] = ch; });
+                        setPinInput(next);
+                        pinRefs[Math.min(pasted.length, 3)].current?.focus();
+                      }}
+                      className={`w-14 h-14 text-center text-xl font-bold rounded-2xl border-2 bg-zinc-800 text-zinc-100 outline-none transition-all ${
+                        pinError
+                          ? 'border-red-500/60 bg-red-500/5'
+                          : digit
+                          ? 'border-blue-500/60 bg-blue-500/5'
+                          : 'border-zinc-700 focus:border-blue-500/50 focus:bg-zinc-800/80'
+                      }`}
+                      aria-label={`PIN digit ${idx + 1}`}
+                    />
+                  ))}
+                </div>
+
+                {/* Show/hide toggle */}
+                <div className="flex justify-center mb-5">
+                  <button
+                    onClick={() => setShowPin(v => !v)}
+                    className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    {showPin ? <EyeOff size={13} /> : <Eye size={13} />}
+                    {showPin ? 'Hide PIN' : 'Show PIN'}
+                  </button>
+                </div>
+
+                {/* Error */}
+                <AnimatePresence>
+                  {pinError && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                      className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 mb-4"
+                    >
+                      <AlertCircle size={13} className="text-red-400 flex-shrink-0" />
+                      <span className="text-red-400 text-xs">{pinError}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Submit */}
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={verifyPin}
+                  disabled={pinInput.join('').length < 4 || pinLoading || pinAttempts >= 5}
+                  className="w-full py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2"
+                >
+                  {pinLoading
+                    ? <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={15} /></motion.div> Verifying…</>
+                    : <><ShieldCheck size={15} /> Access Event</>
+                  }
+                </motion.button>
+
+                <p className="text-center text-[10px] text-zinc-700 mt-5 tracking-wide">
+                  Powered by <span className="text-zinc-600 font-semibold">AI · Face Recognition</span>
+                </p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Ambient glows ── */}
       <div aria-hidden className="fixed inset-0 pointer-events-none z-0">

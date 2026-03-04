@@ -12,7 +12,7 @@ import {
   ChevronDown, Loader2, AlertTriangle,
   CloudUpload, CheckCircle2, XCircle, ThumbsUp, ThumbsDown,
   RefreshCw, ImagePlus, Pause, RotateCcw, Zap,
-  FileImage, QrCode, Droplet,
+  FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound,
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 import PeopleGallery from "@/components/PeopleGallery";
@@ -40,6 +40,7 @@ interface EventDetail {
   plan_type: string;
   watermark_enabled?: boolean;          // 🎨 Watermark enabled flag
   watermark_config?: WatermarkConfig;   // 🎨 Watermark configuration
+  pin_enabled?: boolean;                 // 🔒 PIN protection
 }
 
 interface ClusterItem {
@@ -767,6 +768,13 @@ export default function OwnerEventDetailPage() {
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
   const [watermarkSaving, setWatermarkSaving] = useState(false);
 
+  // ── PIN state ──
+  const [pinEnabled,    setPinEnabled]    = useState(false);
+  const [showPinModal,  setShowPinModal]  = useState(false);
+  const [pinInput,      setPinInput]      = useState('');
+  const [pinSaving,     setPinSaving]     = useState(false);
+  const [pinRemoving,   setPinRemoving]   = useState(false);
+
   // ─── Guest Uploads state ─────────────────────────────────────────────────
   const [guestUploads,        setGuestUploads]        = useState<GuestUploadsData | null>(null);
   const [guestUploadsLoading, setGuestUploadsLoading] = useState(false);
@@ -845,6 +853,8 @@ export default function OwnerEventDetailPage() {
           enabled: true,
         });
       }
+      // 🔒 Sync PIN status
+      setPinEnabled(!!data.pin_enabled);
     } catch {
       showToast("Failed to load event");
     } finally {
@@ -1175,6 +1185,39 @@ export default function OwnerEventDetailPage() {
     }
   }, [eventId, API]);
 
+  // ─── PIN handlers ────────────────────────────────────────────────────────
+  const savePin = async () => {
+    if (!/^\d{4}$/.test(pinInput)) { showToast("PIN must be exactly 4 digits"); return; }
+    setPinSaving(true);
+    try {
+      const res = await fetch(`${API}/events/${eventId}/pin`, {
+        method: "PUT",
+        headers: { ...authH(), "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: pinInput }),
+      });
+      if (!res.ok) throw new Error();
+      setPinEnabled(true);
+      setShowPinModal(false);
+      setPinInput("");
+      showToast("🔒 PIN protection enabled");
+    } catch { showToast("Failed to set PIN"); }
+    finally { setPinSaving(false); }
+  };
+
+  const removePin = async () => {
+    if (!confirm("Remove PIN protection? Anyone with the link can access the event.")) return;
+    setPinRemoving(true);
+    try {
+      const res = await fetch(`${API}/events/${eventId}/pin`, {
+        method: "DELETE", headers: authH(),
+      });
+      if (!res.ok) throw new Error();
+      setPinEnabled(false);
+      showToast("🔓 PIN protection removed");
+    } catch { showToast("Failed to remove PIN"); }
+    finally { setPinRemoving(false); }
+  };
+
   // ─── Render guards ───────────────────────────────────────────────────────
   if (eventLoading) return (
     <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
@@ -1377,6 +1420,19 @@ export default function OwnerEventDetailPage() {
                           <Droplet size={12} />Watermark
                         </button>
                       )}
+                      {/* PIN Protection Button */}
+                      <button
+                        onClick={() => pinEnabled ? removePin() : setShowPinModal(true)}
+                        disabled={pinRemoving}
+                        className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                          pinEnabled
+                            ? "bg-blue-500/10 border-blue-500/20 text-blue-400 hover:bg-red-500/10 hover:border-red-500/20 hover:text-red-400"
+                            : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                        }`}>
+                        {pinRemoving ? <Loader2 size={12} className="animate-spin" /> :
+                          pinEnabled ? <Lock size={12} /> : <LockOpen size={12} />}
+                        {pinEnabled ? "PIN On" : "Set PIN"}
+                      </button>
                     </>
                   )}
                 </div>
@@ -2075,6 +2131,68 @@ export default function OwnerEventDetailPage() {
         token={event?.public_token ?? ""}
         eventName={event?.name}
       />
+
+      {/* ── PIN MODAL ── */}
+      <AnimatePresence>
+        {showPinModal && (
+          <motion.div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => { setShowPinModal(false); setPinInput(""); }}>
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-sm">
+
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                    <KeyRound size={15} className="text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-100">Set PIN Protection</h3>
+                    <p className="text-[11px] text-zinc-500">4-digit PIN for public page access</p>
+                  </div>
+                </div>
+                <button onClick={() => { setShowPinModal(false); setPinInput(""); }}
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors">
+                  <X size={13} />
+                </button>
+              </div>
+
+              <div className="mb-5">
+                <label className="block text-xs font-medium text-zinc-400 mb-2">Enter 4-digit PIN</label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={4}
+                  value={pinInput}
+                  onChange={e => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                  onKeyDown={e => e.key === "Enter" && savePin()}
+                  placeholder="••••"
+                  autoFocus
+                  className="w-full px-4 py-3 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 text-center text-2xl font-bold tracking-[0.5em] placeholder-zinc-700 focus:outline-none focus:border-blue-500/50 transition-colors"
+                />
+                <p className="text-[11px] text-zinc-600 mt-2 text-center">
+                  Visitors must enter this PIN to view the public page
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button onClick={() => { setShowPinModal(false); setPinInput(""); }}
+                  className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 text-sm font-medium transition-colors">
+                  Cancel
+                </button>
+                <button onClick={savePin} disabled={pinInput.length !== 4 || pinSaving}
+                  className="flex-[2] py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2">
+                  {pinSaving
+                    ? <><Loader2 size={14} className="animate-spin" /> Saving…</>
+                    : <><Lock size={14} /> Enable PIN</>}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── WATERMARK SETTINGS MODAL ── */}
       <WatermarkSettings

@@ -42,7 +42,7 @@ from app.models.cluster import Cluster
 from app.models.photo import Photo
 from app.core.dependencies import get_current_user
 from app.workers.tasks import process_event
-from app.core.config import STORAGE_PATH, INDEXES_PATH
+from app.core.config import STORAGE_PATH, INDEXES_PATH, DEFAULT_EVENT_PIN
 from app.services.search_service import search_face
 from app.services import storage_service
 from app.services.storage_service import STORAGE_BACKEND
@@ -141,6 +141,8 @@ def create_event(
         processing_status="pending",
         public_status="active",
     )
+    # 🔒 PIN enabled by default — value comes from DEFAULT_EVENT_PIN in config/.env
+    event.set_pin(DEFAULT_EVENT_PIN)
     db.add(event)
     db.commit()
     db.refresh(event)
@@ -246,6 +248,8 @@ def get_event(
         # 🎨 Watermark settings
         "watermark_enabled":    event.watermark_enabled,
         "watermark_config":     event.get_watermark_config(),
+        # 🔒 PIN protection
+        "pin_enabled":          event.pin_enabled,
     }
 
 
@@ -297,6 +301,7 @@ def update_event(
         "cover_image_url": storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
         "guest_upload_enabled": event.guest_upload_enabled,
         "watermark_enabled": event.watermark_enabled,
+        "pin_enabled":       event.pin_enabled,
     }
 
 
@@ -1156,4 +1161,87 @@ def reset_watermark_config(
         "success": True,
         "watermark_config": DEFAULT_WATERMARK_CONFIG,
         "message": "Watermark settings reset to defaults"
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🔒 PIN PROTECTION  —  Owner endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+from pydantic import BaseModel, Field as PydanticField
+
+class PinSetRequest(BaseModel):
+    pin: str = PydanticField(..., min_length=4, max_length=4, pattern=r"^\d{4}$")
+
+class PinRemoveRequest(BaseModel):
+    pass
+
+
+@router.get("/{event_id}/pin")
+def get_pin_status(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return whether PIN protection is currently enabled for an event."""
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    return {
+        "event_id":    event_id,
+        "pin_enabled": event.pin_enabled,
+    }
+
+
+@router.put("/{event_id}/pin")
+def set_pin(
+    event_id: int,
+    body: PinSetRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Set (or replace) a 4-digit numeric PIN on an event.
+    The PIN is hashed before storage — it is never persisted in plain text.
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    event.set_pin(body.pin)
+    db.commit()
+
+    return {
+        "success":     True,
+        "event_id":    event_id,
+        "pin_enabled": True,
+        "message":     "PIN set successfully. Visitors will need this PIN to access the public page.",
+    }
+
+
+@router.delete("/{event_id}/pin")
+def remove_pin(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove PIN protection from an event, making it freely accessible."""
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    event.clear_pin()
+    db.commit()
+
+    return {
+        "success":     True,
+        "event_id":    event_id,
+        "pin_enabled": False,
+        "message":     "PIN protection removed. The public page is now freely accessible.",
     }

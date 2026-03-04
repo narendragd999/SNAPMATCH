@@ -3,6 +3,8 @@ from sqlalchemy.orm import relationship
 from app.database.db import Base
 from datetime import datetime
 import json
+import hashlib
+import secrets as _secrets
 
 
 class Event(Base):
@@ -62,6 +64,12 @@ class Event(Base):
     watermark_enabled = Column(Boolean, default=False, nullable=False)
     watermark_config = Column(Text, nullable=True)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🔒 PIN PROTECTION
+    # ═══════════════════════════════════════════════════════════════
+    pin_enabled = Column(Boolean, default=True, nullable=False)
+    pin_hash    = Column(String, nullable=True)
+
     owner = relationship("User")
 
     # ───────────────────────────────────────────────────────────────
@@ -97,3 +105,30 @@ class Event(Base):
         """Save watermark config as JSON string."""
         config["enabled"] = self.watermark_enabled
         self.watermark_config = json.dumps(config)
+
+    # ───────────────────────────────────────────────────────────────
+    # PIN helpers
+    # ───────────────────────────────────────────────────────────────
+
+    def set_pin(self, pin: str) -> None:
+        """Hash and store a PIN."""
+        salt   = _secrets.token_hex(16)
+        digest = hashlib.sha256(f"{salt}:{pin}".encode()).hexdigest()
+        self.pin_hash    = f"{salt}:{digest}"
+        self.pin_enabled = True
+
+    def verify_pin(self, pin: str) -> bool:
+        """Return True if supplied PIN matches stored hash."""
+        if not self.pin_hash:
+            return False
+        try:
+            salt, digest = self.pin_hash.split(":", 1)
+        except ValueError:
+            return False
+        candidate = hashlib.sha256(f"{salt}:{pin}".encode()).hexdigest()
+        return _secrets.compare_digest(candidate, digest)
+
+    def clear_pin(self) -> None:
+        """Remove PIN protection."""
+        self.pin_enabled = False
+        self.pin_hash    = None

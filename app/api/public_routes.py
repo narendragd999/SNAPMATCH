@@ -33,6 +33,13 @@ from app.models.user import User
 from app.services import storage_service
 from app.services.search_service import public_search_face, search_face
 import json as _json
+from pydantic import BaseModel
+
+# ── PIN brute-force rate limiting (in-memory, per token) ──────────────────────
+_pin_attempts: dict[str, list[float]] = {}   # token -> [timestamp, ...]
+_pin_lock = Lock()
+PIN_MAX_ATTEMPTS = 5       # per window
+PIN_WINDOW_SECS  = 300     # 5 minutes
 
 router = APIRouter(prefix="/public", tags=["public"])
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -158,6 +165,83 @@ def get_public_event(
         # 🎨 Watermark configuration
         "watermark_enabled": event.watermark_enabled,
         "watermark_config": event.get_watermark_config() if event.watermark_enabled else None,
+        # 🔒 PIN protection — only expose the flag, never the hash
+        "pin_enabled": event.pin_enabled,
+    }
+
+
+
+# ── PIN Verification ──────────────────────────────────────────────────────────
+
+class PinVerifyRequest(BaseModel):
+    pin: str
+
+
+def _check_pin_rate_limit(token: str) -> bool:
+    """Return True if the request is allowed (under rate limit)."""
+    now = time.time()
+    with _pin_lock:
+        attempts = _pin_attempts.get(token, [])
+        # Drop old attempts outside the window
+        attempts = [t for t in attempts if now - t < PIN_WINDOW_SECS]
+        if len(attempts) >= PIN_MAX_ATTEMPTS:
+            _pin_attempts[token] = attempts
+            return False
+        attempts.append(now)
+        _pin_attempts[token] = attempts
+        return True
+
+
+@router.post("/events/{public_token}/verify-pin")
+def verify_event_pin(
+    public_token: str,
+    body: PinVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify a visitor-supplied PIN against the event's stored hash.
+
+    - Returns 200 on success.
+    - Returns 401 on wrong PIN.
+    - Returns 429 after PIN_MAX_ATTEMPTS failed attempts within PIN_WINDOW_SECS.
+    - Returns 400 if event has no PIN set.
+
+    The frontend should store the verified token in sessionStorage and pass it
+    as a header or query param on subsequent requests if you want server-side
+    enforcement (optional — the frontend gate alone is sufficient for most use-cases).
+    """
+    event = db.query(Event).filter(Event.public_token == public_token).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.public_status != "active":
+        raise HTTPException(status_code=403, detail="Event is not public")
+
+    if not event.pin_enabled:
+        raise HTTPException(status_code=400, detail="This event does not require a PIN")
+
+    # Rate-limit check
+    if not _check_pin_rate_limit(public_token):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many incorrect attempts. Please wait {PIN_WINDOW_SECS // 60} minutes and try again.",
+        )
+
+    # Validate PIN format
+    pin = (body.pin or "").strip()
+    if not pin.isdigit() or len(pin) != 4:
+        raise HTTPException(status_code=422, detail="PIN must be exactly 4 digits")
+
+    if not event.verify_pin(pin):
+        raise HTTPException(status_code=401, detail="Incorrect PIN. Please try again.")
+
+    # Success — clear rate-limit counter for this token
+    with _pin_lock:
+        _pin_attempts.pop(public_token, None)
+
+    return {
+        "success": True,
+        "message": "PIN verified successfully",
+        "event_name": event.name,
     }
 
 
