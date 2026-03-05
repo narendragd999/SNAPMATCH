@@ -32,7 +32,7 @@ import {
   MultiSelectToolbar, SelectablePhotoCard, useMultiSelect
 } from '@/components/snapmatch/MultiSelect';
 import {
-  ConfidenceSlider, CameraWithEnhancements
+  CameraWithEnhancements
 } from '@/components/snapmatch/CameraEnhancements';
 import {
   WatermarkConfig,
@@ -85,6 +85,7 @@ interface EventData {
   pin_version?:  string | null;   // ← add
   expires_at?: string | null;   // ← ADD
   owner_id?:     number;   // ← add
+  upload_photo_enabled?: boolean;  // ← ADD
 }
 
 type Mode = 'search' | 'contribute';
@@ -142,7 +143,7 @@ export default function EnhancedPublicSelfiePage() {
   const [gridLayout, setGridLayout] = useState<GridLayout>('comfortable');
   const [dlAllLoading, setDlAllLoading] = useState(false);
   const [showConfidence, setShowConfidence] = useState(true);
-  const [sensitivity, setSensitivity] = useLocalStorage('snapmatch_sensitivity', 75);
+  
 
   // Upload state
   const [uploadStep, setUploadStep] = useState<UploadStep>('drop');
@@ -308,8 +309,7 @@ export default function EnhancedPublicSelfiePage() {
         processedFile = await compressImage(file, { maxWidth: 1920, quality: 0.85 });
       }
       const form = new FormData();
-      form.append('file', processedFile);
-      form.append('sensitivity', String(sensitivity / 100));
+      form.append('file', processedFile);      
 
       const res = await fetch(`${API}/public/events/${token}/search`, { method: 'POST', body: form });
       if (!res.ok) throw new Error(await res.text());
@@ -329,7 +329,7 @@ export default function EnhancedPublicSelfiePage() {
     } finally {
       setProcessing(false);
     }
-  }, [token, API, sensitivity]);
+  }, [token, API]);
 
   // ── Infinite Scroll ──
   const loadNextPage = useCallback(async () => {
@@ -767,13 +767,14 @@ export default function EnhancedPublicSelfiePage() {
                     Upload a selfie — AI scans every event photo and finds your matches instantly.
                   </motion.p>
 
-                  {/* Sensitivity Slider */}
-                  <motion.div variants={fadeUp} className="max-w-[280px] mx-auto mb-6">
-                    <ConfidenceSlider value={sensitivity} onChange={setSensitivity} min={50} max={95} step={5} />
-                  </motion.div>
-
-                  {/* CTA buttons */}
-                  <motion.div variants={fadeUp} className="grid grid-cols-2 gap-3 max-w-[430px] mx-auto mb-4">
+                  
+                 {/* CTA buttons */}
+                  <motion.div
+                    variants={fadeUp}
+                    className={`grid gap-3 max-w-[430px] mx-auto mb-4 ${
+                      event?.upload_photo_enabled ? 'grid-cols-2' : 'grid-cols-1'
+                    }`}
+                  >
                     <motion.button
                       whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
                       onClick={() => setCameraOpen(true)}
@@ -781,13 +782,17 @@ export default function EnhancedPublicSelfiePage() {
                     >
                       <Camera size={17} /> Take Selfie
                     </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
-                      onClick={() => fileInputRef.current?.click()}
-                      className="flex items-center justify-center gap-2 py-4 rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-sm font-semibold transition-colors"
-                    >
-                      <Upload size={17} /> Upload Photo
-                    </motion.button>
+
+                    {event?.upload_photo_enabled && (
+                      <motion.button
+                        whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex items-center justify-center gap-2 py-4 rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-sm font-semibold transition-colors"
+                      >
+                        <Upload size={17} /> Upload Photo
+                      </motion.button>
+                    )}
+
                     <input
                       ref={fileInputRef} type="file" accept="image/*" className="hidden"
                       onChange={e => { if (e.target.files?.[0]) handleUpload(e.target.files[0]); e.target.value = ''; }}

@@ -41,7 +41,14 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function AdminDashboard() {
-  const [stats,   setStats]   = useState<Stats | null>(null);
+  const [stats, setStats] = useState<any>({
+    total_users:           0,
+    total_events:          0,
+    total_images:          0,
+    total_faces:           0,
+    plan_distribution:     {},
+    status_distribution:   {},
+  });
   const [loading, setLoading] = useState(true);
   const [cleaning, setCleaning] = useState(false);
   const [cleanMsg, setCleanMsg] = useState("");
@@ -114,7 +121,7 @@ export default function AdminDashboard() {
             <h2 className="text-xs font-semibold text-zinc-300">Plan Distribution</h2>
           </div>
           <div className="space-y-2.5">
-            {Object.entries(stats.plan_distribution).map(([plan, count]) => {
+            {Object.entries(stats.plan_distribution ?? {}).map(([plan, count]) => {
               const pct = stats.total_users > 0
                 ? Math.round((count / stats.total_users) * 100)
                 : 0;
@@ -145,7 +152,7 @@ export default function AdminDashboard() {
             <h2 className="text-xs font-semibold text-zinc-300">Event Processing Status</h2>
           </div>
           <div className="space-y-2">
-            {Object.entries(stats.status_distribution).map(([status, count]) => (
+            {Object.entries(stats.status_distribution ?? {}).map(([status, count]) => (
               <div key={status} className="flex items-center justify-between py-1.5 border-b border-zinc-800 last:border-0">
                 <div className="flex items-center gap-2">
                   <div className={`w-1.5 h-1.5 rounded-full ${

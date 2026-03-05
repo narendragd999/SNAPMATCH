@@ -11,6 +11,7 @@ from app.core.plans import PLANS
 from app.services.faiss_manager import FaissManager
 from app.core.config import INDEXES_PATH, STORAGE_PATH
 from app.services.storage_cleanup import delete_event_storage   # ← MinIO fix
+from app.models.platform_settings import PlatformSetting
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
@@ -285,3 +286,31 @@ def trigger_cleanup(_: User = Depends(get_admin_user)):
     from app.workers.tasks import cleanup_expired_events
     task = cleanup_expired_events.delay()
     return {"message": "Cleanup task triggered", "task_id": task.id}
+
+
+@router.get("/settings")
+def get_settings(
+    db: Session = Depends(get_db),
+    _:  User    = Depends(get_admin_user),
+):
+    rows = db.query(PlatformSetting).all()
+    return {r.key: r.value for r in rows}
+
+
+@router.patch("/settings")
+def update_settings(
+    body: dict,
+    db:   Session = Depends(get_db),
+    _:    User    = Depends(get_admin_user),
+):
+    ALLOWED_KEYS = {"upload_photo_enabled"}
+    for key, value in body.items():
+        if key not in ALLOWED_KEYS:
+            continue
+        row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
+        if row:
+            row.value = str(value).lower()
+        else:
+            db.add(PlatformSetting(key=key, value=str(value).lower()))
+    db.commit()
+    return {"success": True}

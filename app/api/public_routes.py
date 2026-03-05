@@ -170,7 +170,7 @@ def get_public_event(
         "pin_version":  event.pin_version,   # ← add this
         "expires_at": event.expires_at.isoformat() if event.expires_at else None,  # ← ADD
         "owner_id":     event.owner_id,   # ← add this
-
+        "upload_photo_enabled": _get_setting(db, "upload_photo_enabled") == "true",  # ← ADD
     }
 
 
@@ -638,3 +638,9 @@ async def guest_contribute(
         "failed": failed,
         "message": f"{len(saved)} photo(s) submitted for review.",
     }
+
+# helper at top of file
+def _get_setting(db: Session, key: str, default: str = "false") -> str:
+    from app.models.platform_settings import PlatformSetting
+    row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
+    return row.value if row else default
