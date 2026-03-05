@@ -167,6 +167,10 @@ def get_public_event(
         "watermark_config": event.get_watermark_config() if event.watermark_enabled else None,
         # 🔒 PIN protection — only expose the flag, never the hash
         "pin_enabled": event.pin_enabled,
+        "pin_version":  event.pin_version,   # ← add this
+        "expires_at": event.expires_at.isoformat() if event.expires_at else None,  # ← ADD
+        "owner_id":     event.owner_id,   # ← add this
+
     }
 
 

@@ -82,6 +82,9 @@ interface EventData {
   watermark_enabled?: boolean;
   watermark_config?: WatermarkConfig;
   pin_enabled?: boolean;
+  pin_version?:  string | null;   // ← add
+  expires_at?: string | null;   // ← ADD
+  owner_id?:     number;   // ← add
 }
 
 type Mode = 'search' | 'contribute';
@@ -149,6 +152,9 @@ export default function EnhancedPublicSelfiePage() {
   const [contribError, setContribError] = useState<string | null>(null);
   const [uploadCount, setUploadCount] = useState(0);
 
+  // ── PIN localStorage helpers ──────────────────────────────────────────────
+  const PIN_STORAGE_KEY = (t: string) => `pin_verified_${t}`;
+
   // Multi-select state
   const multiSelect = useMultiSelect(tab.items);
 
@@ -212,6 +218,61 @@ export default function EnhancedPublicSelfiePage() {
     if (activeObject !== 'all') items = items.filter(item => objectOf(item) === activeObject);
     return items;
   }, [tab.items, activeScene, activeObject]);
+
+  // AFTER — accepts current server pin_version to compare against
+  const readPinSession = (t: string, currentPinVersion?: string | null): boolean => {
+    try {
+      const raw = localStorage.getItem(PIN_STORAGE_KEY(t));
+      if (!raw) return false;
+      const { verified, expiry, pinVersion } = JSON.parse(raw);
+      if (!verified || Date.now() >= expiry) {
+        localStorage.removeItem(PIN_STORAGE_KEY(t));
+        return false;
+      }
+      // If server pin_version doesn't match stored one → PIN was changed → invalidate
+      if (currentPinVersion && pinVersion !== currentPinVersion) {
+        localStorage.removeItem(PIN_STORAGE_KEY(t));
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const writePinSession = (t: string, pinVersion: string, eventExpiresAt?: string | null) => {
+    const eventExpiry = eventExpiresAt ? new Date(eventExpiresAt).getTime() : null;
+    const fallback    = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    const expiry      = eventExpiry && eventExpiry > Date.now() ? eventExpiry : fallback;
+    localStorage.setItem(PIN_STORAGE_KEY(t), JSON.stringify({ verified: true, expiry, pinVersion }));
+  };
+
+  // ── Hydrate PIN state from localStorage once token is known ──────────────
+  // AFTER — runs after event loads, passes pin_version for validation  
+  useEffect(() => {
+    if (!token || !event) return;
+    if (!event.pin_enabled) {
+      setPinVerified(true);
+      return;
+    }
+
+    // ── Auto-verify if viewer is the event owner ──────────────────────
+    const storedUser = localStorage.getItem("user");
+    if (storedUser) {
+      try {
+        const user = JSON.parse(storedUser);
+        if (user?.id && event?.owner_id && user.id === event.owner_id) {
+          setPinVerified(true);
+          return;
+        }
+      } catch { /* ignore malformed user object */ }
+    }
+    // ─────────────────────────────────────────────────────────────────
+
+    if (readPinSession(token, event.pin_version)) {
+      setPinVerified(true);
+    }
+  }, [token, event]);
 
   // ── Load Event ──
   useEffect(() => {
@@ -460,6 +521,7 @@ export default function EnhancedPublicSelfiePage() {
         body: JSON.stringify({ pin }),
       });
       if (res.ok) {
+        writePinSession(token, event?.pin_version ?? '', event?.expires_at);
         setPinVerified(true);
         hapticFeedback('success');
       } else {

@@ -69,6 +69,8 @@ class Event(Base):
     # ═══════════════════════════════════════════════════════════════
     pin_enabled = Column(Boolean, default=True, nullable=False)
     pin_hash    = Column(String, nullable=True)
+    pin_version = Column(String, nullable=True)  # changes on every PIN update
+
 
     owner = relationship("User")
 
@@ -116,6 +118,7 @@ class Event(Base):
         digest = hashlib.sha256(f"{salt}:{pin}".encode()).hexdigest()
         self.pin_hash    = f"{salt}:{digest}"
         self.pin_enabled = True
+        self.pin_version = _secrets.token_hex(8)   # ← new token on every PIN change
 
     def verify_pin(self, pin: str) -> bool:
         """Return True if supplied PIN matches stored hash."""
@@ -132,3 +135,4 @@ class Event(Base):
         """Remove PIN protection."""
         self.pin_enabled = False
         self.pin_hash    = None
+        self.pin_version = None                    # ← clear on removal

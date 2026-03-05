@@ -862,8 +862,16 @@ export default function OwnerEventDetailPage() {
       if (!data.pin_enabled) {
         setCurrentPin(null);
       } else {
-        // Keep whatever the owner set this session; if null, use default "0000"
-        setCurrentPin(prev => prev ?? "0000");
+        // Fetch the real current PIN from the server
+        try {
+          const pinRes = await fetch(`${API}/events/${eventId}/pin-value`, { headers: authH() });
+          if (pinRes.ok) {
+            const pinData = await pinRes.json();
+            setCurrentPin(pinData.pin ?? null);
+          }
+        } catch {
+          setCurrentPin(null); // silently fail — UI shows "••••" fallback
+        }
       }
     } catch {
       showToast("Failed to load event");
@@ -1132,9 +1140,8 @@ export default function OwnerEventDetailPage() {
     : `/public/${event?.public_token ?? ""}`;
 
   // Owner link — embeds PIN for one-tap frictionless access
-  const ownerPageUrl = currentPin && publicPageUrl
-    ? `${publicPageUrl}?pin=${currentPin}`
-    : publicPageUrl;
+  // AFTER — plain URL, no PIN exposed
+  const ownerPageUrl = publicPageUrl;
 
   const coverImageUrl = event?.cover_image_url ?? null;
 
