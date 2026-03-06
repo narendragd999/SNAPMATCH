@@ -52,7 +52,7 @@ class Event(Base):
     description         = Column(String, nullable=True)
     total_faces         = Column(Integer, default=0)
     total_clusters      = Column(Integer, default=0)
-    public_status       = Column(String, default="disabled")
+    public_status       = Column(String, default="active")
     process_count       = Column(Integer, default=0)
     last_processed_at   = Column(DateTime, nullable=True)
     expires_at          = Column(DateTime, nullable=True)

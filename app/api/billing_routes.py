@@ -48,6 +48,7 @@ from app.core.pricing import (
     format_inr,
 )
 from app.core.razorpay_config import get_razorpay_client
+from app.core.config import DEFAULT_EVENT_PIN
 from app.models.event import Event
 from app.models.event_order import EventOrder
 from app.models.user import User
@@ -248,9 +249,11 @@ def create_event_order(
         payment_status="pending",
         amount_paid_paise=amount_paise,
         guest_upload_enabled=False,
+        public_status="active",
     )
     db.add(event)
     db.flush()  # get event.id before commit
+    event.set_pin(DEFAULT_EVENT_PIN)  # 🔒 set default PIN
 
     # Create Razorpay order
     client = get_razorpay_client()
@@ -408,8 +411,10 @@ def create_free_event(
         amount_paid_paise=0,
         guest_upload_enabled=False,
         expires_at=datetime.utcnow() + timedelta(days=FREE_TIER_CONFIG["validity_days"]),
+        public_status="active",
     )
     db.add(event)
+    event.set_pin(DEFAULT_EVENT_PIN)  # 🔒 set default PIN
 
     # Mark free event as consumed
     current_user.free_event_used = True
