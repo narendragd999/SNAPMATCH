@@ -551,7 +551,7 @@ def get_public_scenes(
 
 GUEST_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 GUEST_MAX_FILE_SIZE_MB   = 20
-GUEST_MAX_FILES          = 10
+PER_SUBMISSION_CAP       = 20   # hard cap per single submission regardless of quota
 
 
 @router.post("/events/{public_token}/contribute")
@@ -560,18 +560,60 @@ async def guest_contribute(
     files:            List[UploadFile] = File(...),
     contributor_name: str = Form(""),
     message:          str = Form(""),
-    db: Session = Depends(get_db),
+    request:          Request = None,
+    db:               Session = Depends(get_db),
 ):
     event = validate_public_event(public_token, db)
 
+    # ── Guest uploads enabled? ────────────────────────────────────────────────
     if not event.guest_upload_enabled:
         raise HTTPException(status_code=403, detail="Guest uploads are disabled for this event.")
 
-    if len(files) > GUEST_MAX_FILES:
-        raise HTTPException(status_code=400, detail=f"Maximum {GUEST_MAX_FILES} photos per submission.")
+    # ── Guest quota purchased? ────────────────────────────────────────────────
+    if event.guest_quota == 0:
+        raise HTTPException(status_code=403, detail="Guest uploads are not available for this event.")
+
+    # ── Remaining slots check ─────────────────────────────────────────────────
+    remaining_slots = event.guest_quota - event.guest_uploads_used
+    if remaining_slots <= 0:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Guest upload quota exhausted for this event "
+                f"({event.guest_uploads_used}/{event.guest_quota} slots used). "
+                "No more guest photos can be accepted."
+            ),
+        )
+
+    # ── Batch size guards ─────────────────────────────────────────────────────
+    if len(files) > PER_SUBMISSION_CAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {PER_SUBMISSION_CAP} photos per submission.",
+        )
+
+    if len(files) > remaining_slots:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"You tried to submit {len(files)} photos but only "
+                f"{remaining_slots} guest slot(s) remain for this event. "
+                "Please reduce your selection."
+            ),
+        )
 
     guest_name    = contributor_name.strip() if contributor_name else None
     guest_message = message.strip()          if message          else None
+
+    # ── Guest IP for abuse tracking ───────────────────────────────────────────
+    guest_ip = None
+    if request:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        guest_ip = (
+            forwarded_for.split(",")[0].strip()
+            if forwarded_for
+            else (str(request.client.host) if request.client else None)
+        )
 
     saved  = []
     failed = []
@@ -603,10 +645,10 @@ async def guest_contribute(
             failed.append({"filename": original_name, "reason": f"Upload failed: {e}"})
             continue
 
-        # Generate guest preview thumbnail
+        # Generate guest preview thumbnail for owner review UI
         preview_filename = None
         try:
-            img     = PILImage.open(io.BytesIO(content))
+            img = PILImage.open(io.BytesIO(content))
             img.thumbnail((400, 400))
             preview_buf = io.BytesIO()
             img.save(preview_buf, format="WEBP", quality=75)
@@ -627,16 +669,44 @@ async def guest_contribute(
             guest_name=guest_name,
             guest_message=guest_message,
             guest_preview_filename=preview_filename,
+            guest_ip=guest_ip,
         )
         db.add(photo)
         saved.append(original_name)
 
+    # NOTE: guest_uploads_used is NOT incremented here.
+    # It is incremented in guest_upload_routes.py when the owner APPROVES.
+    # Rejected photos never consume a slot.
     db.commit()
 
     return {
-        "saved":  saved,
-        "failed": failed,
-        "message": f"{len(saved)} photo(s) submitted for review.",
+        "saved":           saved,
+        "failed":          failed,
+        "message":         f"{len(saved)} photo(s) submitted for review.",
+        "quota_total":     event.guest_quota,
+        "quota_used":      event.guest_uploads_used,
+        "quota_remaining": remaining_slots - len(saved),
+    }
+
+
+# ── Guest quota info (public) ─────────────────────────────────────────────────
+
+@router.get("/events/{public_token}/guest-quota")
+def get_guest_quota(public_token: str, db: Session = Depends(get_db)):
+    """
+    Returns guest upload quota info for the public contribute page UI.
+    Shows remaining slots so guests know whether uploads are still possible.
+    """
+    event = validate_public_event(public_token, db)
+
+    enabled = event.guest_upload_enabled and event.guest_quota > 0
+
+    return {
+        "guest_upload_enabled": enabled,
+        "quota_total":          event.guest_quota,
+        "quota_used":           event.guest_uploads_used,
+        "quota_remaining":      event.guest_quota_remaining,
+        "quota_exhausted":      event.guest_quota_remaining == 0,
     }
 
 # helper at top of file

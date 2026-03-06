@@ -162,6 +162,11 @@ def bulk_approve_guest_uploads(
     now = datetime.utcnow()
     for photo in photos:
         photo.approval_status = "approved"
+        # Increment guest quota counter
+        if photo.uploaded_by == "guest":
+            event = db.query(Event).filter(Event.id == event_id).first()
+            if event:
+                event.guest_uploads_used = (event.guest_uploads_used or 0) + 1
         photo.approved_by = current_user.id
         photo.approved_at = now
         #delete_guest_preview(photo)     # ← ADD THIS
@@ -425,6 +430,11 @@ def re_approve_guest_upload(
     
     # Re-approve
     photo.approval_status = "approved"
+    # Increment guest quota counter
+    if photo.uploaded_by == "guest":
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event:
+            event.guest_uploads_used = (event.guest_uploads_used or 0) + 1
     photo.approved_by = current_user.id
     photo.approved_at = datetime.utcnow()
     photo.rejection_reason = None  # Clear rejection reason

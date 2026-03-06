@@ -67,6 +67,11 @@ def approve_photo(
 
     # Approve
     photo.approval_status = "approved"
+    # Increment guest quota counter
+    if photo.uploaded_by == "guest":
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event:
+            event.guest_uploads_used = (event.guest_uploads_used or 0) + 1
     photo.approved_by = current_user.id
     photo.approved_at = datetime.utcnow()
 
@@ -192,6 +197,11 @@ def re_approve_photo(
         )
 
     photo.approval_status = "approved"
+    # Increment guest quota counter
+    if photo.uploaded_by == "guest":
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event:
+            event.guest_uploads_used = (event.guest_uploads_used or 0) + 1
     photo.approved_by = current_user.id
     photo.approved_at = datetime.utcnow()
     photo.rejection_reason = None   # Clear the rejection reason

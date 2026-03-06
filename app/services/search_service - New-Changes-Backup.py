@@ -36,7 +36,7 @@ import cv2
 from sqlalchemy.orm import Session
 from app.models.cluster import Cluster
 from app.services.faiss_manager import FaissManager
-from app.services.face_model import face_app   # lazy, thread-safe singleton
+from app.services.face_model import get_face_app   # lazy, thread-safe singleton
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ def extract_all_embeddings(image_bytes: bytes) -> list[np.ndarray]:
     # get_face_app() returns the lazily-initialized singleton.
     # Safe to call from FastAPI async context — model is already warm by the
     # time search requests arrive (Celery workers pre-warm it during indexing).
-    faces = face_app.get(img)
+    face_app = get_face_app()
 
     try:
         faces = face_app.get(img)

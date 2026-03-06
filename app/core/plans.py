@@ -1,3 +1,6 @@
+# app/core/plans.py  — shim, delegates to pricing.py
+from app.core.pricing import PLANS  # noqa: F401
+
 PLANS = {
     "free": {
         "event_validity_days": 7,

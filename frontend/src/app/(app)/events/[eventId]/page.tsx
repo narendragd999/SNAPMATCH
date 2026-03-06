@@ -19,6 +19,7 @@ import PeopleGallery from "@/components/PeopleGallery";
 import { QRCodeDisplay } from "@/components/snapmatch/QRCodeDisplay";
 import { WatermarkSettings } from "@/components/snapmatch/WatermarkSettings";
 import { WatermarkConfig, DEFAULT_WATERMARK_CONFIG } from "@/lib/snapmatch/watermark";
+import EventQuotaBar from "@/components/EventQuotaBar";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,14 @@ interface EventDetail {
   plan_type: string;
   watermark_enabled?: boolean;          // 🎨 Watermark enabled flag
   watermark_config?: WatermarkConfig;   // 🎨 Watermark configuration
-  pin_enabled?: boolean;                 // 🔒 PIN protection
+  pin_enabled?: boolean;                // 🔒 PIN protection
+  // 💰 Billing / quota (pay-per-event)
+  photo_quota?: number;                 // Max owner photos purchaseed
+  guest_quota?: number;                 // Guest upload slots purchased
+  guest_uploads_used?: number;          // Approved guest photos so far
+  payment_status?: "pending" | "paid" | "free" | "failed";
+  is_free_tier?: boolean;
+  validity_days?: number;
 }
 
 interface ClusterItem {
@@ -98,7 +106,7 @@ type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 
-const BATCH_SIZE  = 20;
+const BATCH_SIZE  = 40;
 const MAX_RETRIES = 2;
 const ACCEPTED_EXT = /\.(jpe?g|png|webp)$/i;
 
@@ -1149,10 +1157,11 @@ export default function OwnerEventDetailPage() {
   const isPro       = !isFree; // Pro or Enterprise
   const canDownload = !isFree;
 
-  // ─── Plan limit ───────────────────────────────────────────────────────────
-  const planLimit = event?.plan_type === "enterprise" ? 100000
-                  : event?.plan_type === "pro"        ? 10000
-                  : 1000;
+  // ─── Photo quota: use event.photo_quota (pay-per-event) with plan fallback ──
+  const planLimit = event?.photo_quota
+    ?? (event?.plan_type === "enterprise" ? 100000
+      : event?.plan_type === "pro"        ? 10000
+      : 1000);
 
   // ═══════════════════════════════════════════════════════════════
   // 🎨 WATERMARK SAVE TO BACKEND API
@@ -1552,13 +1561,29 @@ export default function OwnerEventDetailPage() {
                   ))}
                 </div>
 
+                {/* 💰 Quota bar — shows photo + guest quota usage for pay-per-event */}
+                {event.photo_quota != null && (
+                  <div className="mb-6">
+                    <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">
+                      Event Quota
+                    </h3>
+                    <EventQuotaBar
+                      eventId={parseInt(eventId)}
+                      showGuestToggle={true}
+                      onToggleGuest={(enabled) => {
+                        setEvent(e => e ? { ...e, guest_upload_enabled: enabled } : e);
+                      }}
+                    />
+                  </div>
+                )}
+
                 {/* ── UPLOAD CARD (bulk upload) ── */}
                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-4">
                   <div className="px-5 py-4 border-b border-zinc-800 flex items-center justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold">Upload Photos</p>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        Add images · {(event.image_count ?? 0).toLocaleString()} uploaded so far · up to {planLimit.toLocaleString()} total
+                        Add images · {(event.image_count ?? 0).toLocaleString()} uploaded so far · up to {planLimit.toLocaleString()} quota
                       </p>
                       <p className="text-xs text-amber-400 mt-1 flex items-center gap-1">
                         <AlertTriangle size={11} />

@@ -126,6 +126,13 @@ async def bulk_upload(
             })
             continue
 
+    #After the loop that approves all photos, add: for incremental    
+    guest_count = sum(1 for p in approved_photos if p.uploaded_by == "guest")
+    if guest_count > 0:
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event:
+            event.guest_uploads_used = (event.guest_uploads_used or 0) + guest_count    
+
         photo_records.append(Photo(
             event_id=event_id,
             original_filename=file.filename,

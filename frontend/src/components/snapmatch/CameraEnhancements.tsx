@@ -83,12 +83,12 @@ export const CameraWithEnhancements: React.FC<CameraWithEnhancementsProps> = mem
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Flip horizontally for front camera (mirror effect)
-    if (facingMode === 'user') {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-
+    // ✅ DO NOT flip/mirror the image.
+    // The video preview appears mirrored on screen (CSS transform) so the user
+    // sees a natural mirror-selfie UX — but the actual pixel data must be
+    // unflipped so InsightFace receives the correct face orientation.
+    // A horizontally flipped face produces a measurably different embedding
+    // and will miss matches in the FAISS index.
     ctx.drawImage(video, 0, 0);
 
     canvas.toBlob((blob) => {
@@ -100,7 +100,7 @@ export const CameraWithEnhancements: React.FC<CameraWithEnhancementsProps> = mem
         onClose();
       }
     }, 'image/jpeg', 0.92);
-  }, [facingMode, onCapture, onClose]);
+  }, [onCapture, onClose]);
 
   // Handle capture with timer
   const handleCapture = useCallback(() => {
@@ -201,6 +201,7 @@ export const CameraWithEnhancements: React.FC<CameraWithEnhancementsProps> = mem
       }}
     >
       {/* Video element */}
+      // AFTER — add the scaleX(-1) transform for front camera only:
       <video
         ref={videoRef}
         autoPlay
@@ -210,6 +211,8 @@ export const CameraWithEnhancements: React.FC<CameraWithEnhancementsProps> = mem
           width: '100%',
           height: '100%',
           objectFit: 'cover',
+          // Mirror the PREVIEW only so user sees a natural selfie reflection.
+          // The captured pixels are NOT flipped (capturePhoto draws without transform).
           transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
         }}
       />

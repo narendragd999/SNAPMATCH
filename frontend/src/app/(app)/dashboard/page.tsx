@@ -313,38 +313,37 @@ export default function DashboardPage() {
             Create Event
           </Link>
           <Link
-            href="/pricing"
+            href="/events/create"
             className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 hover:border-zinc-600 text-zinc-200 transition-colors"
           >
             <Rocket size={12} />
-            Upgrade
+            + New Event
           </Link>
         </div>
       </div>
 
       {/* ── PLAN BANNER (free only) ─────────────────────────────────────────── */}
-      {stats.plan_type?.toLowerCase() === "free" && (
+      {stats.free_event_available && (
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="flex items-center justify-between gap-4 bg-gradient-to-r from-blue-600/10 to-violet-600/10 border border-blue-500/20 rounded-2xl px-5 py-4"
+          className="flex items-center justify-between gap-4 bg-gradient-to-r from-emerald-600/10 to-teal-600/10 border border-emerald-500/20 rounded-2xl px-5 py-4"
         >
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-blue-500/15 border border-blue-500/25 flex items-center justify-center text-blue-400 flex-shrink-0">
-              <Crown size={14} />
+            <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/25 flex items-center justify-center text-emerald-400 flex-shrink-0">
+              <Gift size={14} />
             </div>
             <div>
-              <p className="text-xs font-semibold text-zinc-200">You're on the Free plan</p>
+              <p className="text-xs font-semibold text-zinc-200">You have a free event available!</p>
               <p className="text-[11px] text-zinc-500 mt-0.5">
-                Upgrade to unlock more events, images, and priority processing
+                50 photos · 10 guest slots · 7-day validity — no payment needed
               </p>
             </div>
           </div>
-          <Link
-            href="/pricing"
-            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors flex-shrink-0"
+          <Link href="/events/create?free=1"
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex-shrink-0"
           >
-            <Zap size={11} /> Upgrade
+            <Gift size={11} /> Create Free Event
           </Link>
         </motion.div>
       )}

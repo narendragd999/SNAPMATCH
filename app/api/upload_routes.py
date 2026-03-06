@@ -1,9 +1,14 @@
 """
 app/api/upload_routes.py
 
-Owner photo upload — writes raw file to object store via storage_service.
-All existing behaviour preserved; only disk I/O replaced with storage_service calls.
+Owner photo upload — enforces per-event photo_quota instead of plan limits.
+
+Key changes from previous version:
+  - Replaced: PLANS.get(user.plan_type)["max_images_per_event"]
+  - With:     event.photo_quota  (set at purchase time)
+  - Added:    payment_status guard — only paid/free events accept uploads
 """
+
 import os
 import uuid
 from pathlib import Path
@@ -16,7 +21,6 @@ from app.models.event import Event
 from app.models.photo import Photo
 from app.models.user import User
 from app.core.dependencies import get_current_user
-from app.core.plans import PLANS
 from app.services import storage_service
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -46,12 +50,28 @@ async def upload_photos(
     if event.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    plan_config = PLANS.get(current_user.plan_type, PLANS["free"])
-    max_images  = plan_config["max_images_per_event"]
-    if event.image_count >= max_images:
+    # ── Payment guard ─────────────────────────────────────────────────────────
+    if event.payment_status not in ("paid", "free"):
+        raise HTTPException(
+            status_code=402,
+            detail="Event payment is pending. Complete payment before uploading photos.",
+        )
+
+    # ── Expiry guard ──────────────────────────────────────────────────────────
+    from datetime import datetime
+    if event.expires_at and datetime.utcnow() > event.expires_at:
+        raise HTTPException(
+            status_code=410,
+            detail="This event has expired. Please create a new event to continue.",
+        )
+
+    # ── Quota guard (uses event.photo_quota, not plan) ────────────────────────
+    available_slots = event.photo_quota - (event.image_count or 0)
+    if available_slots <= 0:
         raise HTTPException(
             status_code=400,
-            detail=f"Plan limit reached ({max_images} images per event)",
+            detail=f"Photo quota reached ({event.photo_quota} photos). "
+                   f"This event cannot accept more photos.",
         )
 
     uploaded  = []
@@ -59,6 +79,14 @@ async def upload_photos(
     new_count = 0
 
     for file in files:
+        # Stop mid-batch if quota fills up
+        if new_count >= available_slots:
+            failed.append({
+                "filename": file.filename or "unknown",
+                "reason":   "quota_reached",
+            })
+            continue
+
         original_name = file.filename or ""
         ext = Path(original_name).suffix.lower()
 
@@ -72,7 +100,7 @@ async def upload_photos(
             failed.append({"filename": original_name, "reason": f"too_large_{size_mb:.1f}mb"})
             continue
 
-        # Store raw file via storage_service
+        # Store raw file
         stored_filename = f"raw_{uuid.uuid4().hex}{ext}"
         try:
             storage_service.upload_file(
@@ -104,8 +132,10 @@ async def upload_photos(
         db.commit()
 
     return {
-        "uploaded": uploaded,
-        "failed":   failed,
-        "total_uploaded": new_count,
+        "uploaded":          uploaded,
+        "failed":            failed,
+        "total_uploaded":    new_count,
         "event_image_count": event.image_count,
+        "photo_quota":       event.photo_quota,
+        "photos_remaining":  max(0, event.photo_quota - event.image_count),
     }
