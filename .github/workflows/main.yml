@@ -1,0 +1,206 @@
+name: SnapFind Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: "Preview duration in hours (1, 2, 3, or 5)"
+        required: true
+        default: "2"
+        type: string   # ✅ Use string not choice — avoids queue failure bug
+
+timeout-minutes: 330
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. System specs ────────────────────────────────────
+      - name: Show system specs
+        run: |
+          echo "=== CPU ==="
+          nproc
+          echo "=== RAM ==="
+          free -h
+          echo "=== Disk ==="
+          df -h
+
+      # ── 3. Free disk space ─────────────────────────────────
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          docker system prune -f
+          echo "=== Disk after cleanup ==="
+          df -h
+
+      # ── 4. Start Docker stack ──────────────────────────────
+      - name: Start Docker stack
+        run: |
+          docker compose up -d --build
+          echo "Stack started..."
+
+      # ── 5. Wait for services (real health checks) ──────────
+      - name: Wait for services to be healthy
+        run: |
+          echo "Checking PostgreSQL..."
+          timeout 60 bash -c \
+            'until docker compose exec -T postgres \
+              pg_isready -U snapfind 2>/dev/null; \
+            do sleep 3; echo "Waiting for Postgres..."; done'
+          echo "PostgreSQL ready ✅"
+
+          echo "Checking Redis..."
+          timeout 30 bash -c \
+            'until docker compose exec -T redis \
+              redis-cli ping 2>/dev/null | grep -q PONG; \
+            do sleep 2; echo "Waiting for Redis..."; done'
+          echo "Redis ready ✅"
+
+          echo "Checking MinIO..."
+          timeout 60 bash -c \
+            'until curl -sf http://localhost:9000/minio/health/live; \
+            do sleep 3; echo "Waiting for MinIO..."; done'
+          echo "MinIO ready ✅"
+
+          echo "Checking Backend API..."
+          timeout 120 bash -c \
+            'until curl -sf http://localhost:8000/health; \
+            do sleep 5; echo "Waiting for Backend..."; done'
+          echo "Backend ready ✅"
+
+          echo ""
+          echo "All services are healthy ✅"
+
+      # ── 6. Show running containers ─────────────────────────
+      - name: Show running containers
+        run: |
+          echo "=== Running Containers ==="
+          docker ps
+          echo ""
+          echo "=== Resource Usage ==="
+          docker stats --no-stream --format \
+            "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+
+      # ── 7. Install cloudflared (pinned version) ────────────
+      - name: Install Cloudflare Tunnel
+        run: |
+          CLOUDFLARED_VERSION="2024.11.0"
+          echo "Installing cloudflared v${CLOUDFLARED_VERSION}..."
+          wget -q \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
+            -O cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+
+      # ── 8. Verify cloudflared ──────────────────────────────
+      - name: Verify cloudflared
+        run: cloudflared --version
+
+      # ── 9. Start tunnel + keep-alive monitor ───────────────
+      - name: Start Cloudflare Tunnel
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+          PREVIEW_DURATION: ${{ github.event.inputs.duration_hours }}
+        run: |
+          # Validate input is a sane number (1–5)
+          if ! [[ "$PREVIEW_DURATION" =~ ^[1-5]$ ]]; then
+            echo "Invalid duration '$PREVIEW_DURATION' — defaulting to 2 hours"
+            PREVIEW_DURATION=2
+          fi
+
+          # ✅ CORRECT: --token alone — do NOT add tunnel name after it
+          cloudflared tunnel run \
+            --token "$TUNNEL_TOKEN" \
+            --no-autoupdate \
+            2>&1 | tee /tmp/cloudflared.log &
+
+          TUNNEL_PID=$!
+          echo "Tunnel PID: $TUNNEL_PID"
+
+          # Wait up to 30s for tunnel to connect
+          echo "Waiting for tunnel to connect..."
+          for i in $(seq 1 15); do
+            sleep 2
+            if grep -q \
+              "Connection registered\|Registered tunnel connection\|Connected" \
+              /tmp/cloudflared.log 2>/dev/null; then
+              echo "Tunnel connected ✅"
+              break
+            fi
+            echo "Attempt $i — still connecting..."
+          done
+
+          echo ""
+          echo "================================================"
+          echo "  SnapFind Preview is LIVE!"
+          echo "  Check Cloudflare Dashboard for your URL:"
+          echo "  dash.cloudflare.com → Zero Trust → Tunnels"
+          echo "  Duration: $PREVIEW_DURATION hour(s)"
+          echo "================================================"
+          echo ""
+
+          # Convert hours to seconds
+          SLEEP_SECONDS=$(( PREVIEW_DURATION * 3600 ))
+          echo "Keeping alive for ${SLEEP_SECONDS} seconds..."
+
+          # Monitor loop — checks health every 60 seconds
+          ELAPSED=0
+          while [ $ELAPSED -lt $SLEEP_SECONDS ]; do
+            sleep 60
+            ELAPSED=$(( ELAPSED + 60 ))
+            REMAINING_MIN=$(( (SLEEP_SECONDS - ELAPSED) / 60 ))
+
+            # Restart tunnel if it crashed
+            if ! kill -0 $TUNNEL_PID 2>/dev/null; then
+              echo "⚠️  Tunnel crashed at ${ELAPSED}s — restarting..."
+              cloudflared tunnel run \
+                --token "$TUNNEL_TOKEN" \
+                --no-autoupdate \
+                2>&1 | tee -a /tmp/cloudflared.log &
+              TUNNEL_PID=$!
+              echo "Tunnel restarted — PID: $TUNNEL_PID"
+            fi
+
+            # Backend health check
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "[$(date '+%H:%M')] ✅ Healthy — ${REMAINING_MIN} min remaining"
+            else
+              echo "[$(date '+%H:%M')] ⚠️  Backend unhealthy!"
+              docker compose logs backend --tail=10
+            fi
+          done
+
+          echo "Preview session ended after $PREVIEW_DURATION hour(s)."
+
+      # ── 10. Show logs on failure ───────────────────────────
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Backend Logs ==="
+          docker compose logs backend --tail=50 || true
+
+          echo "=== Celery Worker Logs ==="
+          docker compose logs celery-worker --tail=30 || true
+
+          echo "=== Postgres Logs ==="
+          docker compose logs postgres --tail=20 || true
+
+          echo "=== Cloudflared Log ==="
+          cat /tmp/cloudflared.log || true
+
+      # ── 11. Cleanup (always runs) ──────────────────────────
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Stopping tunnel..."
+          pkill cloudflared || true
+          echo "Stopping Docker stack..."
+          docker compose down -v --remove-orphans || true
+          echo "Cleanup complete ✅"
