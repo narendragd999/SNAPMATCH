@@ -37,6 +37,10 @@ jobs:
         sudo apt update
         sudo apt install ngrok -y
 
+    - name: Configure ngrok
+      run: |
+        ngrok config add-authtoken ${{ secrets.NGROK_AUTHTOKEN }}
+
     - name: Start ngrok tunnel
       run: |
         ngrok http 8000 &
