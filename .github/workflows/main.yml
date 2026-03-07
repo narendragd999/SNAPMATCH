@@ -19,8 +19,7 @@ jobs:
         df -h
 
     - name: Start Docker stack
-      run: |
-        docker compose up -d
+      run: docker compose up -d
 
     - name: Wait for services
       run: sleep 40
@@ -35,11 +34,10 @@ jobs:
         sudo chmod +x /usr/local/bin/cloudflared
 
     - name: Verify cloudflared
-      run: |
-        cloudflared --version
+      run: cloudflared --version
 
     - name: Start Cloudflare Tunnel
       run: |
-        cloudflared tunnel --no-autoupdate run --token ${{ secrets.CF_TUNNEL_TOKEN }} &
+        cloudflared tunnel --no-autoupdate --token ${{ secrets.CF_TUNNEL_TOKEN }} run &
         echo "Preview running for 5 hours..."
         sleep 18000
