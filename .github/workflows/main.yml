@@ -1,31 +1,23 @@
-name: Run Project Server
+name: SnapFind Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-project:
+  test-stack:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
 
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Start Docker stack
+        run: docker compose up -d
 
-    - name: Show system specs
-      run: |
-        echo "CPU:"
-        nproc
-        echo "Memory:"
-        free -h
-        echo "Disk:"
-        df -h
+      - name: Wait for services
+        run: sleep 30
 
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y python3 python3-pip docker.io
+      - name: Show containers
+        run: docker ps
 
-    - name: Run project
-      run: |
-        python3 main.py
+      - name: Show logs
+        run: docker compose logs
