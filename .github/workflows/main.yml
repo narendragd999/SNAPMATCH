@@ -38,6 +38,6 @@ jobs:
 
     - name: Start Cloudflare Tunnel
       run: |
-        cloudflared tunnel --no-autoupdate --token ${{ secrets.CF_TUNNEL_TOKEN }} run &
+        cloudflared tunnel run --token ${{ secrets.CF_TUNNEL_TOKEN }} &
         echo "Preview running for 5 hours..."
         sleep 18000
