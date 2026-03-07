@@ -270,7 +270,7 @@ services:
     depends_on:
       - backend
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=/api
       - NEXT_PUBLIC_STORAGE_URL=http://localhost:9000/snapfind
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
