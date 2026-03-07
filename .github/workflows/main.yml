@@ -28,24 +28,18 @@ jobs:
     - name: Show running containers
       run: docker ps
 
-    - name: Install ngrok
+    - name: Install Cloudflare Tunnel
       run: |
-        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-        | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-        | sudo tee /etc/apt/sources.list.d/ngrok.list
-        sudo apt update
-        sudo apt install ngrok -y
+        wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+        sudo chmod +x /usr/local/bin/cloudflared
 
-    - name: Configure ngrok
+    - name: Verify cloudflared
       run: |
-        ngrok config add-authtoken ${{ secrets.NGROK_AUTHTOKEN }}
+        cloudflared --version
 
-    - name: Start ngrok tunnels
+    - name: Start Cloudflare Tunnel
       run: |
-        ngrok http 8000 &
-        ngrok http 3000 &
-        sleep 10
-        curl http://127.0.0.1:4040/api/tunnels
-        echo "Preview running for 5 hours"
+        cloudflared tunnel --no-autoupdate run --token ${{ secrets.CF_TUNNEL_TOKEN }} &
+        echo "Preview running for 5 hours..."
         sleep 18000
