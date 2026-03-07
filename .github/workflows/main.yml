@@ -1,10 +1,10 @@
-name: SnapFind Test Stack
+name: SnapFind Preview
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-stack:
+  preview:
     runs-on: ubuntu-latest
 
     steps:
@@ -12,12 +12,21 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Show system specs
+      run: |
+        nproc
+        free -h
+        df -h
+
     - name: Start Docker stack
       run: |
         docker compose up -d
 
     - name: Wait for services
-      run: sleep 30
+      run: sleep 40
+
+    - name: Show running containers
+      run: docker ps
 
     - name: Install ngrok
       run: |
@@ -28,14 +37,8 @@ jobs:
         sudo apt update
         sudo apt install ngrok -y
 
-    - name: Start tunnel
+    - name: Start ngrok tunnel
       run: |
         ngrok http 8000 &
         sleep 10
         curl http://127.0.0.1:4040/api/tunnels
-
-    - name: Show running containers
-      run: docker ps
-
-    - name: Show logs
-      run: docker compose logs
