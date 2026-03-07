@@ -37,7 +37,9 @@ jobs:
       run: cloudflared --version
 
     - name: Start Cloudflare Tunnel
+      env:
+        TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
       run: |
-        cloudflared tunnel --token ${{ secrets.CF_TUNNEL_TOKEN }} run &
+        cloudflared tunnel run --token $TUNNEL_TOKEN snapfind-preview &
         echo "Preview running for 5 hours..."
         sleep 18000
