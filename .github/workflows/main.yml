@@ -1,4 +1,4 @@
-name: SnapFind Test
+name: SnapFind Test Stack
 
 on:
   workflow_dispatch:
@@ -8,16 +8,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
 
-      - name: Start Docker stack
-        run: docker compose up -d
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Wait for services
-        run: sleep 30
+    - name: Start Docker stack
+      run: |
+        docker compose up -d
 
-      - name: Show containers
-        run: docker ps
+    - name: Wait for services
+      run: sleep 30
 
-      - name: Show logs
-        run: docker compose logs
+    - name: Install ngrok
+      run: |
+        curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+        | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+        | sudo tee /etc/apt/sources.list.d/ngrok.list
+        sudo apt update
+        sudo apt install ngrok -y
+
+    - name: Start tunnel
+      run: |
+        ngrok http 8000 &
+        sleep 10
+        curl http://127.0.0.1:4040/api/tunnels
+
+    - name: Show running containers
+      run: docker ps
+
+    - name: Show logs
+      run: docker compose logs
