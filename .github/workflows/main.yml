@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       duration_hours:
-        description: "Preview duration in hours (max 5)"
-        required: false
+        description: "Preview duration in hours (1, 2, 3, or 5)"
+        required: true
         default: "2"
-        type: choice
-        options: ["1", "2", "3", "5"]
+        type: string   # ✅ Use string not choice — avoids queue failure bug
 
 timeout-minutes: 330
 
@@ -108,10 +107,15 @@ jobs:
       - name: Start Cloudflare Tunnel
         env:
           TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
-          PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
+          PREVIEW_DURATION: ${{ github.event.inputs.duration_hours }}
         run: |
-          # ✅ CORRECT: --token alone is enough
-          # Do NOT add tunnel name — token already identifies the tunnel
+          # Validate input is a sane number (1–5)
+          if ! [[ "$PREVIEW_DURATION" =~ ^[1-5]$ ]]; then
+            echo "Invalid duration '$PREVIEW_DURATION' — defaulting to 2 hours"
+            PREVIEW_DURATION=2
+          fi
+
+          # ✅ CORRECT: --token alone — do NOT add tunnel name after it
           cloudflared tunnel run \
             --token "$TUNNEL_TOKEN" \
             --no-autoupdate \
@@ -124,7 +128,8 @@ jobs:
           echo "Waiting for tunnel to connect..."
           for i in $(seq 1 15); do
             sleep 2
-            if grep -q "Connection registered\|Registered tunnel connection\|Connected" \
+            if grep -q \
+              "Connection registered\|Registered tunnel connection\|Connected" \
               /tmp/cloudflared.log 2>/dev/null; then
               echo "Tunnel connected ✅"
               break
@@ -145,14 +150,14 @@ jobs:
           SLEEP_SECONDS=$(( PREVIEW_DURATION * 3600 ))
           echo "Keeping alive for ${SLEEP_SECONDS} seconds..."
 
-          # ── Monitor loop: check every 60s ──
+          # Monitor loop — checks health every 60 seconds
           ELAPSED=0
           while [ $ELAPSED -lt $SLEEP_SECONDS ]; do
             sleep 60
             ELAPSED=$(( ELAPSED + 60 ))
             REMAINING_MIN=$(( (SLEEP_SECONDS - ELAPSED) / 60 ))
 
-            # Check if tunnel process is still alive
+            # Restart tunnel if it crashed
             if ! kill -0 $TUNNEL_PID 2>/dev/null; then
               echo "⚠️  Tunnel crashed at ${ELAPSED}s — restarting..."
               cloudflared tunnel run \
@@ -160,19 +165,18 @@ jobs:
                 --no-autoupdate \
                 2>&1 | tee -a /tmp/cloudflared.log &
               TUNNEL_PID=$!
-              echo "Tunnel restarted with PID: $TUNNEL_PID"
+              echo "Tunnel restarted — PID: $TUNNEL_PID"
             fi
 
-            # Check backend health
+            # Backend health check
             if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
-              echo "[$(date '+%H:%M')] ✅ All healthy — ${REMAINING_MIN} min remaining"
+              echo "[$(date '+%H:%M')] ✅ Healthy — ${REMAINING_MIN} min remaining"
             else
-              echo "[$(date '+%H:%M')] ⚠️  Backend health check failed!"
-              docker compose logs backend --tail=20
+              echo "[$(date '+%H:%M')] ⚠️  Backend unhealthy!"
+              docker compose logs backend --tail=10
             fi
           done
 
-          echo ""
           echo "Preview session ended after $PREVIEW_DURATION hour(s)."
 
       # ── 10. Show logs on failure ───────────────────────────
@@ -197,8 +201,6 @@ jobs:
         run: |
           echo "Stopping tunnel..."
           pkill cloudflared || true
-
           echo "Stopping Docker stack..."
           docker compose down -v --remove-orphans || true
-
           echo "Cleanup complete ✅"
