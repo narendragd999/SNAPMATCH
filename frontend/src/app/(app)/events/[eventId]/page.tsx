@@ -200,7 +200,7 @@ function BulkUploadModal({
   const totalBytesRef   = useRef(0);
   const fileInputRef    = useRef<HTMLInputElement>(null);
 
-  // Reset on open
+  // Reset on open + install unhandledrejection guard while modal is open
   useEffect(() => {
     if (!open) return;
     filesRef.current = new Map();
@@ -209,6 +209,15 @@ function BulkUploadModal({
     setDoneCount(0); setFailedCount(0); setUploadedBytes(0);
     setSpeed(0); setEta(0); setCurrentBatch(0);
     totalBytesRef.current = 0;
+
+    // Prevent any stray unhandled promise rejection from crashing the page
+    // while the upload modal is open (Next.js dev overlay or browser navigate-away)
+    const onUnhandled = (e: PromiseRejectionEvent) => {
+      e.preventDefault();
+      console.error("Suppressed unhandled rejection during upload:", e.reason);
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => window.removeEventListener("unhandledrejection", onUnhandled);
   }, [open]);
 
   // Files live in a Map ref — ZERO React renders during file addition.
@@ -273,6 +282,7 @@ function BulkUploadModal({
     if (!filesRef.current.size) return;
     setPhase("uploading"); setPaused(false); pausedRef.current = false;
     startTimeRef.current = Date.now();
+    try {  // ── outer guard — catches any unexpected crash, never lets the page die
 
     // Group files into display batches (UI grouping only)
     const allFiles   = getFiles();
@@ -443,27 +453,44 @@ function BulkUploadModal({
       updBatch(bi, { status: "done" });
     }
 
-    // ── Step 3: Confirm uploads with backend (presign flow only) ──────────
+    // ── Step 3: Confirm uploads with backend in chunks of 200 ──────────────
+    // Sending all 2000 at once can hit Cloudflare's request body limit.
     if (usePresign && confirmedUploads.length > 0) {
-      try {
-        await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-          body: JSON.stringify({ uploads: confirmedUploads }),
-        });
-      } catch (e) {
-        console.error("Confirm step failed:", e);
+      const CONFIRM_CHUNK = 200;
+      for (let ci = 0; ci < confirmedUploads.length; ci += CONFIRM_CHUNK) {
+        const chunk = confirmedUploads.slice(ci, ci + CONFIRM_CHUNK);
+        try {
+          await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+            body: JSON.stringify({ uploads: chunk }),
+          });
+        } catch (e) {
+          console.error(`Confirm chunk ${ci}–${ci + chunk.length} failed:`, e);
+          // Non-fatal — photos are already in MinIO, can be retried later
+        }
       }
     }
 
     setPhase("done");
     onComplete(done);
+
+    } catch (fatalErr: unknown) {
+      // Outer safety net — something completely unexpected happened.
+      // Show error state instead of letting the page crash/refresh.
+      const msg = fatalErr instanceof Error ? fatalErr.message : "Unexpected upload error";
+      console.error("startUpload fatal error:", fatalErr);
+      setPhase("done");  // get out of uploading state
+      setFailedCount(prev => prev + (filesRef.current.size - done));
+      onComplete(done);
+    }
   }, [apiUrl, eventId, authToken, onComplete, showList]);
 
   const retryFailed = useCallback(async () => {
     const failed = batches.filter(b => b.status === "failed");
     if (!failed.length) return;
     pausedRef.current = false; setPaused(false);
+    try {
 
     const updFile  = (id: string, patch: Partial<BulkFile>) => {
       const map = filesRef.current;
@@ -506,6 +533,9 @@ function BulkUploadModal({
     }
     setDoneCount(newDone); setFailedCount(newFailed);
     if (newFailed === 0) { setPhase("done"); onComplete(newDone); }
+    } catch (fatalErr: unknown) {
+      console.error("retryFailed fatal error:", fatalErr);
+    }
   }, [batches, apiUrl, eventId, authToken, doneCount, failedCount, onComplete, showList]);
 
   const togglePause = () => {
