@@ -60,7 +60,7 @@ MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"{MINIO_ENDPOINT}/{MINIO_BUCKE
 #   Cloudflare Tunnel preview:  MINIO_PRESIGN_ENDPOINT=https://xxx.trycloudflare.com
 #   Cloudflare R2:              MINIO_PRESIGN_ENDPOINT=https://<acct>.r2.cloudflarestorage.com
 #   Local dev (HTTP is fine):   leave unset → falls back to MINIO_ENDPOINT
-_presign_ep_raw  = os.getenv("MINIO_PRESIGN_ENDPOINT", "").strip()
+_presign_ep_raw        = os.getenv("MINIO_PRESIGN_ENDPOINT", "").strip()
 MINIO_PRESIGN_ENDPOINT = (_presign_ep_raw if _presign_ep_raw else MINIO_ENDPOINT).rstrip("/")
 
 # ── Local fallback paths (used only when STORAGE_BACKEND=local) ───────────────
@@ -71,19 +71,76 @@ _LOCAL_ROOT = os.getenv("STORAGE_PATH", os.path.join(_BASE_DIR, "storage"))
 # boto3 clients (lazy-initialised — not imported at module load to keep local
 # mode free of boto3 dependency)
 #
-# _s3           → internal operations (upload, download, delete, list, head)
-#                 uses MINIO_ENDPOINT (Docker-internal address)
+# _s3           → internal operations (upload, download, delete, list, head,
+#                 bucket creation). Uses MINIO_ENDPOINT (Docker-internal).
 #
-# _presign_s3   → presigned URL generation ONLY
-#                 uses MINIO_PRESIGN_ENDPOINT (public HTTPS address)
-#                 so the browser's Host header matches the signature
+# _presign_s3   → presigned URL generation ONLY.
+#                 Uses MINIO_PRESIGN_ENDPOINT (public HTTPS address) so the
+#                 browser's Host header matches the signature.
+#                 NEVER used for internal ops — the public URL may not be
+#                 reachable from inside Docker.
 # ─────────────────────────────────────────────────────────────────────────────
 _s3         = None
 _presign_s3 = None
 
 
+def _ensure_bucket(s3_client) -> None:
+    """
+    Create the MinIO bucket if it doesn't already exist, then apply:
+      - public-read policy   → thumbnails and photos load in browser without auth
+      - CORS policy          → browser preflight OPTIONS passes for presigned PUTs
+
+    Safe to call multiple times (idempotent).
+    """
+    import json
+
+    try:
+        s3_client.head_bucket(Bucket=MINIO_BUCKET)
+        return  # bucket already exists — nothing to do
+    except Exception:
+        pass  # bucket missing → create it below
+
+    s3_client.create_bucket(Bucket=MINIO_BUCKET)
+
+    # Public-read so thumbnails / photos load directly in browser
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect":    "Allow",
+            "Principal": {"AWS": ["*"]},
+            "Action":    ["s3:GetObject"],
+            "Resource":  [f"arn:aws:s3:::{MINIO_BUCKET}/*"],
+        }]
+    }
+    s3_client.put_bucket_policy(Bucket=MINIO_BUCKET, Policy=json.dumps(policy))
+
+    # CORS — required for browser preflight OPTIONS before presigned PUTs.
+    # Without this every direct-upload attempt silently fails.
+    cors = {
+        "CORSRules": [{
+            "AllowedOrigins": ["*"],
+            "AllowedMethods": ["PUT", "GET", "HEAD"],
+            "AllowedHeaders": [
+                "Content-Type",
+                "Authorization",
+                "X-Amz-Date",
+                "X-Amz-Content-Sha256",
+                "X-Api-Key",
+                "x-amz-*",
+            ],
+            "ExposeHeaders":  ["ETag"],
+            "MaxAgeSeconds":  86400,
+        }]
+    }
+    s3_client.put_bucket_cors(Bucket=MINIO_BUCKET, CORSConfiguration=cors)
+
+
 def _get_s3():
-    """boto3 client for internal S3 operations (internal Docker endpoint)."""
+    """
+    boto3 client for internal S3 operations (upload, download, delete, etc.).
+    Uses the Docker-internal MINIO_ENDPOINT.
+    Also handles one-time bucket creation + policies on first call (MinIO only).
+    """
     global _s3
     if _s3 is None:
         import boto3
@@ -98,31 +155,13 @@ def _get_s3():
         )
         # Ensure bucket exists (MinIO only — R2 bucket is pre-created in dashboard)
         if STORAGE_BACKEND == "minio":
-            try:
-                _s3.head_bucket(Bucket=MINIO_BUCKET)
-            except Exception:
-                _s3.create_bucket(Bucket=MINIO_BUCKET)
-                # Make bucket public-read so thumbnails / photos load directly
-                import json
-                policy = {
-                    "Version": "2012-10-17",
-                    "Statement": [{
-                        "Effect":    "Allow",
-                        "Principal": {"AWS": ["*"]},
-                        "Action":    ["s3:GetObject"],
-                        "Resource":  [f"arn:aws:s3:::{MINIO_BUCKET}/*"],
-                    }]
-                }
-                _s3.put_bucket_policy(
-                    Bucket=MINIO_BUCKET,
-                    Policy=json.dumps(policy)
-                )
+            _ensure_bucket(_s3)
     return _s3
 
 
 def _get_presign_s3():
     """
-    Dedicated boto3 client for presigned URL generation.
+    Dedicated boto3 client for presigned URL generation ONLY.
 
     Uses MINIO_PRESIGN_ENDPOINT (the public HTTPS Cloudflare Tunnel URL or R2
     endpoint) as its endpoint_url so that boto3 computes HMAC signatures that
@@ -146,6 +185,22 @@ def _get_presign_s3():
             region_name="auto",
         )
     return _presign_s3
+
+
+def init_storage() -> None:
+    """
+    Eagerly initialise storage. Call this from FastAPI's startup event so the
+    bucket exists before any presign or upload request arrives.
+
+    - local backend: creates the storage directory tree
+    - minio backend: creates bucket + public-read policy + CORS (idempotent)
+    - r2 backend:    no-op (bucket is pre-created in the Cloudflare dashboard)
+    """
+    if STORAGE_BACKEND == "local":
+        os.makedirs(_LOCAL_ROOT, exist_ok=True)
+    elif STORAGE_BACKEND == "minio":
+        # _get_s3() calls _ensure_bucket() on first use — just trigger it now.
+        _get_s3()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,11 +313,12 @@ def generate_presigned_put_url(
 
         No URL rewriting is performed — the generated URL is already correct.
 
-    Why the old URL-rewrite approach failed:
-        Signing with host=minio:9000 then replacing the host in the URL string
-        does NOT fix the signature. The HMAC already baked in minio:9000.
-        When MinIO received Host: xxx.trycloudflare.com it always returned
-        403 SignatureDoesNotMatch.
+    Bucket initialisation (critical on fresh containers):
+        _get_s3() is called FIRST every time to guarantee the bucket exists
+        before any browser PUT arrives. On a fresh GitHub Actions preview the
+        bucket does not exist yet — _get_s3() creates it along with the
+        public-read and CORS policies via _ensure_bucket(). Only after that
+        is _get_presign_s3() used solely for signature generation.
 
     Local backend:
         Raises NotImplementedError. The /presign route returns an error entry
@@ -278,6 +334,12 @@ def generate_presigned_put_url(
             "Presigned PUT URLs are not supported for STORAGE_BACKEND=local. "
             "The frontend falls back to legacy multipart upload automatically."
         )
+
+    # ── Guarantee the bucket exists before the browser tries to PUT ──────────
+    # _get_s3() creates bucket + public-read + CORS on first call (idempotent).
+    # Skipping this means a fresh MinIO instance returns 404 on presigned PUTs
+    # because the bucket doesn't exist yet.
+    _get_s3()
 
     key = _key(event_id, filename)
 
@@ -368,7 +430,6 @@ def list_event_files(event_id: int) -> list[str]:
         for page in paginator.paginate(Bucket=MINIO_BUCKET, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                # strip prefix, skip sub-folders
                 rel = key[len(prefix):]
                 if "/" not in rel and rel.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
                     filenames.append(rel)
@@ -413,13 +474,11 @@ def upload_from_local_path(local_path: str, event_id: int, filename: str, conten
     Returns the object key.
     """
     if STORAGE_BACKEND == "local":
-        # Already in the right place — just return the key
         return _key(event_id, filename)
 
     with open(local_path, "rb") as f:
         data = f.read()
     key = upload_file(data, event_id, filename, content_type)
-    # Remove temp file
     if local_path.startswith("/tmp/snapfind"):
         os.remove(local_path)
     return key
