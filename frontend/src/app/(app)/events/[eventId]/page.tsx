@@ -225,6 +225,10 @@ function BulkUploadModal({
     addFiles(Array.from(e.dataTransfer.files));
   }, [addFiles]);
 
+  // ── Stable ref for onComplete so startUpload never re-creates mid-upload ──
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+
   const startUpload = useCallback(async () => {
     if (!files.length) return;
     setPhase("uploading"); setPaused(false); pausedRef.current = false;
@@ -306,8 +310,8 @@ function BulkUploadModal({
       }
     }
     setPhase("done");
-    onComplete(done);
-  }, [files, apiUrl, eventId, authToken, onComplete]);
+    onCompleteRef.current(done);
+  }, [files, apiUrl, eventId, authToken]);
 
   const retryFailed = useCallback(async () => {
     const failed = batches.filter(b => b.status === "failed");
@@ -347,8 +351,8 @@ function BulkUploadModal({
       }
     }
     setDoneCount(newDone); setFailedCount(newFailed);
-    if (newFailed === 0) { setPhase("done"); onComplete(newDone); }
-  }, [batches, files, apiUrl, eventId, authToken, doneCount, failedCount, onComplete]);
+    if (newFailed === 0) { setPhase("done"); onCompleteRef.current(newDone); }
+  }, [batches, files, apiUrl, eventId, authToken, doneCount, failedCount]);
 
   const togglePause = () => {
     if (paused) { pausedRef.current = false; setPaused(false); }
@@ -739,7 +743,7 @@ export default function OwnerEventDetailPage() {
   const [clustersLoadingMore,setClustersLoadingMore]= useState(false);
   const [clustersPage,       setClustersPage]       = useState(1);
   const [expanded,           setExpanded]           = useState<number | null>(null);
-  const clusterSentinelRef = useRef<HTMLDivElement | null>(null);
+  const clusterSentinelRef = useRef<HTMLDivElement>(null);
   const PAGE_SIZE = 20;
 
   const [scenes,          setScenes]          = useState<SceneItem[]>([]);
