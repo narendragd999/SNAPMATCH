@@ -257,7 +257,7 @@ interface BulkUploadModalProps {
         const f = incoming instanceof FileList ? incoming.item(i) : incoming[i];
         if (!f) continue;
         if (!f.type.startsWith("image/") && !ACCEPTED_EXT.test(f.name)) continue;
-        const key = `${f.name}_${f.size}`;
+        const key = `${f.name}_${f.size}_${f.lastModified}`;
         if (map.has(key)) continue;
         map.set(key, { id: uid(), file: f, status: "pending" });
         addedBytes += f.size;
