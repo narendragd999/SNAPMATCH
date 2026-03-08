@@ -49,6 +49,10 @@ jobs:
 
     # 4 Start Docker stack
     - name: Start Docker containers
+      env:
+        RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+        RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+        RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
       run: |
         docker compose up -d --build
         docker ps
@@ -177,7 +181,7 @@ jobs:
         pkill cloudflared || true
         docker compose down -v
         echo "Cleanup complete"
-        
+
     - name: Show System Resources
       run: |
         echo "================ CPU ================="
@@ -186,19 +190,19 @@ jobs:
         echo ""
         echo "CPU Details:"
         lscpu
-    
+
         echo ""
         echo "================ RAM ================="
         free -h
-    
+
         echo ""
         echo "================ DISK ================="
         df -h
-    
+
         echo ""
         echo "================ DOCKER CONTAINERS ================="
         docker ps
-    
+
         echo ""
         echo "================ DOCKER RESOURCE USAGE ================="
         docker stats --no-stream
