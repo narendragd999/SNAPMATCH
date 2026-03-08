@@ -35,32 +35,55 @@ MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT",   "http://localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET     = os.getenv("MINIO_BUCKET",     "snapfind")
+
 # Public base URL used to build file URLs returned to the browser.
 # MinIO local:  http://localhost:9000/snapfind
 # R2 custom:    https://photos.yourdomain.com
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"{MINIO_ENDPOINT}/{MINIO_BUCKET}")
 
-# Public endpoint used to REWRITE presigned PUT URLs before sending to the browser.
-# boto3 signs URLs using MINIO_ENDPOINT (often an internal Docker address like
-# http://minio:9000). Browsers on HTTPS block those as Mixed Content.
-# Set MINIO_PRESIGN_ENDPOINT to the public HTTPS URL the browser can reach.
+# Public endpoint used to SIGN presigned PUT URLs for the browser.
 #
-#   MinIO behind Cloudflare Tunnel:  MINIO_PRESIGN_ENDPOINT=https://minio.yourdomain.com
-#   Cloudflare R2:                   MINIO_PRESIGN_ENDPOINT=https://<acct>.r2.cloudflarestorage.com
-#   Local dev (HTTP fine):           leave unset, falls back to MINIO_ENDPOINT
-MINIO_PRESIGN_ENDPOINT = os.getenv("MINIO_PRESIGN_ENDPOINT", MINIO_ENDPOINT).rstrip("/")
+# WHY this exists:
+#   boto3 embeds the endpoint host inside the HMAC signature via
+#   X-Amz-SignedHeaders=content-type;host. If the signing host is the internal
+#   Docker address (minio:9000) but the browser sends the request to a
+#   Cloudflare Tunnel URL (https://xxx.trycloudflare.com), the Host header
+#   won't match the signature → MinIO returns 403 SignatureDoesNotMatch.
+#
+#   The fix is NOT to rewrite the URL after signing (the signature is already
+#   wrong). Instead we use a SEPARATE boto3 client whose endpoint_url is the
+#   public HTTPS address, so signatures are computed with the correct host from
+#   the start. The browser PUT, the cloudflared forwarded Host, and the
+#   signature all agree.
+#
+# Usage:
+#   Cloudflare Tunnel preview:  MINIO_PRESIGN_ENDPOINT=https://xxx.trycloudflare.com
+#   Cloudflare R2:              MINIO_PRESIGN_ENDPOINT=https://<acct>.r2.cloudflarestorage.com
+#   Local dev (HTTP is fine):   leave unset → falls back to MINIO_ENDPOINT
+_presign_ep_raw  = os.getenv("MINIO_PRESIGN_ENDPOINT", "").strip()
+MINIO_PRESIGN_ENDPOINT = (_presign_ep_raw if _presign_ep_raw else MINIO_ENDPOINT).rstrip("/")
 
 # ── Local fallback paths (used only when STORAGE_BACKEND=local) ───────────────
-_BASE_DIR    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_LOCAL_ROOT  = os.getenv("STORAGE_PATH", os.path.join(_BASE_DIR, "storage"))
+_BASE_DIR   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_LOCAL_ROOT = os.getenv("STORAGE_PATH", os.path.join(_BASE_DIR, "storage"))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# boto3 client (lazy-initialised — not imported at module load to keep local
+# boto3 clients (lazy-initialised — not imported at module load to keep local
 # mode free of boto3 dependency)
+#
+# _s3           → internal operations (upload, download, delete, list, head)
+#                 uses MINIO_ENDPOINT (Docker-internal address)
+#
+# _presign_s3   → presigned URL generation ONLY
+#                 uses MINIO_PRESIGN_ENDPOINT (public HTTPS address)
+#                 so the browser's Host header matches the signature
 # ─────────────────────────────────────────────────────────────────────────────
-_s3 = None
+_s3         = None
+_presign_s3 = None
+
 
 def _get_s3():
+    """boto3 client for internal S3 operations (internal Docker endpoint)."""
     global _s3
     if _s3 is None:
         import boto3
@@ -84,7 +107,7 @@ def _get_s3():
                 policy = {
                     "Version": "2012-10-17",
                     "Statement": [{
-                        "Effect": "Allow",
+                        "Effect":    "Allow",
                         "Principal": {"AWS": ["*"]},
                         "Action":    ["s3:GetObject"],
                         "Resource":  [f"arn:aws:s3:::{MINIO_BUCKET}/*"],
@@ -95,6 +118,34 @@ def _get_s3():
                     Policy=json.dumps(policy)
                 )
     return _s3
+
+
+def _get_presign_s3():
+    """
+    Dedicated boto3 client for presigned URL generation.
+
+    Uses MINIO_PRESIGN_ENDPOINT (the public HTTPS Cloudflare Tunnel URL or R2
+    endpoint) as its endpoint_url so that boto3 computes HMAC signatures that
+    include the PUBLIC host. The browser PUT request will carry that same host,
+    cloudflared forwards it unchanged to MinIO on localhost:9000, and MinIO
+    validates the signature correctly.
+
+    This client must NOT be used for internal operations (upload, list, etc.)
+    because the public endpoint may not be network-reachable from inside Docker.
+    """
+    global _presign_s3
+    if _presign_s3 is None:
+        import boto3
+        from botocore.config import Config
+        _presign_s3 = boto3.client(
+            "s3",
+            endpoint_url=MINIO_PRESIGN_ENDPOINT,   # ← PUBLIC endpoint
+            aws_access_key_id=MINIO_ACCESS_KEY,
+            aws_secret_access_key=MINIO_SECRET_KEY,
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+    return _presign_s3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,17 +249,29 @@ def generate_presigned_put_url(
     The browser MUST send that exact Content-Type header or MinIO/S3 returns
     a SignatureDoesNotMatch 403.
 
-    URL rewriting: s
-        boto3 builds the URL from MINIO_ENDPOINT, which is often an internal
-        Docker hostname (http://minio:9000). Browsers on HTTPS reject that as
-        Mixed Content. We replace the endpoint host with MINIO_PRESIGN_ENDPOINT
-        (the public HTTPS address) so the signed path/query remain intact but
-        the host is one the browser can actually reach.
+    How signing with the public endpoint works:
+        _get_presign_s3() uses MINIO_PRESIGN_ENDPOINT as its boto3 endpoint_url.
+        boto3 embeds that host in X-Amz-SignedHeaders=content-type;host.
+        The browser PUTs to that same URL → Host header matches the signature.
+        cloudflared forwards the request to localhost:9000 unchanged.
+        MinIO validates the signature: it matches. ✓
+
+        No URL rewriting is performed — the generated URL is already correct.
+
+    Why the old URL-rewrite approach failed:
+        Signing with host=minio:9000 then replacing the host in the URL string
+        does NOT fix the signature. The HMAC already baked in minio:9000.
+        When MinIO received Host: xxx.trycloudflare.com it always returned
+        403 SignatureDoesNotMatch.
 
     Local backend:
         Raises NotImplementedError. The /presign route returns an error entry
         for each affected file; the frontend falls back to legacy multipart
         automatically, so local dev works unchanged.
+
+    MINIO_PRESIGN_ENDPOINT not set (local dev):
+        Falls back to MINIO_ENDPOINT. Presigned URLs use the internal address
+        which is fine on HTTP. Mixed Content is not a problem on localhost.
     """
     if STORAGE_BACKEND == "local":
         raise NotImplementedError(
@@ -217,7 +280,10 @@ def generate_presigned_put_url(
         )
 
     key = _key(event_id, filename)
-    url = _get_s3().generate_presigned_url(
+
+    # Use the presign-specific client (signed with the PUBLIC host).
+    # No URL rewriting needed — the URL already points to the public endpoint.
+    url = _get_presign_s3().generate_presigned_url(
         "put_object",
         Params={
             "Bucket":      MINIO_BUCKET,
@@ -227,13 +293,6 @@ def generate_presigned_put_url(
         ExpiresIn=expires_in,
         HttpMethod="PUT",
     )
-
-    # Rewrite internal endpoint → public HTTPS endpoint so the browser's PUT
-    # is not blocked as Mixed Content.
-    internal = MINIO_ENDPOINT.rstrip("/")
-    public   = MINIO_PRESIGN_ENDPOINT          # already rstripped in config
-    if internal != public and url.startswith(internal):
-        url = public + url[len(internal):]
 
     return url
 
@@ -383,8 +442,6 @@ def upload_thumbnail_from_local_path(local_path: str, event_id: int, filename: s
 
 def _put(key: str, data: bytes | BinaryIO, content_type: str) -> None:
     if STORAGE_BACKEND == "local":
-        local_path = os.path.join(_LOCAL_ROOT, key.replace("events/", "").replace("covers/", "../covers/"))
-        # Simpler: map key directly under _LOCAL_ROOT
         local_path = os.path.join(_LOCAL_ROOT, *key.split("/"))
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         if isinstance(data, bytes):

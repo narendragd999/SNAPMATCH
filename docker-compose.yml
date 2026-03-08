@@ -105,6 +105,7 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
+      - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-}
       # ── Payments ──
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
