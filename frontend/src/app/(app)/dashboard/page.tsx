@@ -8,7 +8,7 @@ import {
   PlusCircle, Rocket, AlertTriangle, Crown, TrendingUp, Zap,
   Eye, Trash2, Settings, Share2, CheckCircle2, Loader2, X,
   AlertCircle, FolderOpen, Images, Clock, ChevronRight,
-  RefreshCw,
+  RefreshCw,Gift,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
@@ -25,6 +25,8 @@ interface Stats {
   max_events:           number;
   max_images_per_event: number;
   unprocessed_photos?:  number;
+  // from /billing/user-status — fetched separately and merged in
+  free_event_available?: boolean;
 }
 
 interface EventItem {
@@ -214,7 +216,14 @@ export default function DashboardPage() {
     setError(null);
     try {
       const res = await API.get("/events/my");
-      setEvents(res.data?.events || res.data || []);
+      const list: EventItem[] = res.data?.events || res.data || [];
+      setEvents(list);
+
+      // Compute average_progress from events and update stats
+      if (list.length > 0) {
+        const avg = list.reduce((s, e) => s + (e.processing_progress || 0), 0) / list.length;
+        setStats(prev => prev ? { ...prev, average_progress: Math.round(avg) } : prev);
+      }
     } catch {
       setError("Failed to load events");
     } finally {
@@ -223,7 +232,6 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => { fetchEvents(); }, [fetchEvents]);
-
   // ── Delete event ──
   const handleDelete = useCallback(async (id: number) => {
     if (deleting) return;
