@@ -218,9 +218,19 @@ def confirm_uploads(
         # Single round trip for any number of rows
         db.bulk_insert_mappings(Photo, mappings)
 
-        # Atomic: no lost updates if two confirm calls race
+        # Atomic increment + mark event as having unprocessed photos
+        # processing_status='queued' makes the Process button appear in the UI
+        # even if the browser loses uploadSuccess state (e.g. page refresh)
         db.execute(
-            text("UPDATE events SET image_count = COALESCE(image_count, 0) + :n WHERE id = :eid"),
+            text("""
+                UPDATE events
+                SET image_count        = COALESCE(image_count, 0) + :n,
+                    processing_status  = CASE
+                                            WHEN processing_status = 'processing' THEN 'processing'
+                                            ELSE 'queued'
+                                         END
+                WHERE id = :eid
+            """),
             {"n": new_count, "eid": event_id},
         )
         db.commit()
