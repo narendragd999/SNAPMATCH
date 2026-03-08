@@ -282,19 +282,14 @@ function BulkUploadModal({
     if (!filesRef.current.size) return;
     setPhase("uploading"); setPaused(false); pausedRef.current = false;
     startTimeRef.current = Date.now();
+    let done = 0;  // ← hoisted so catch block can reference it
     try {  // ── outer guard — catches any unexpected crash, never lets the page die
 
     // Group files into display batches (UI grouping only)
     const allFiles   = getFiles();
     const batchCount = Math.ceil(allFiles.length / BATCH_SIZE);
-    const batchList: BulkBatch[] = Array.from({ length: batchCount }, (_, i) => ({
-      index: i,
-      fileIds: allFiles.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE).map(f => f.id),
-      status: "pending",
-    }));
-    setBatches(batchList);
 
-    let done = 0, failed = 0, bytesDone = 0;
+    let failed = 0, bytesDone = 0;
     let speedSamples: number[] = [];
 
     const updFile  = (id: string, patch: Partial<BulkFile>) => {
