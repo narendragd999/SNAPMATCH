@@ -41,13 +41,15 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function AdminDashboard() {
-  const [stats, setStats] = useState<any>({
+  const [stats, setStats] = useState<Stats>({
     total_users:           0,
     total_events:          0,
     total_images:          0,
     total_faces:           0,
     plan_distribution:     {},
     status_distribution:   {},
+    new_users_this_week:   0,
+    expiring_soon:         0,
   });
   const [loading, setLoading] = useState(true);
   const [cleaning, setCleaning] = useState(false);
@@ -122,8 +124,9 @@ export default function AdminDashboard() {
           </div>
           <div className="space-y-2.5">
             {Object.entries(stats.plan_distribution ?? {}).map(([plan, count]) => {
+              const c = count as number;
               const pct = stats.total_users > 0
-                ? Math.round((count / stats.total_users) * 100)
+                ? Math.round((c / stats.total_users) * 100)
                 : 0;
               return (
                 <div key={plan}>
@@ -131,7 +134,7 @@ export default function AdminDashboard() {
                     <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full capitalize ${PLAN_COLORS[plan] || "bg-zinc-700 text-zinc-300"}`}>
                       {plan}
                     </span>
-                    <span className="text-xs text-zinc-400">{count} users <span className="text-zinc-600">({pct}%)</span></span>
+                    <span className="text-xs text-zinc-400">{c} users <span className="text-zinc-600">({pct}%)</span></span>
                   </div>
                   <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                     <div
@@ -152,49 +155,62 @@ export default function AdminDashboard() {
             <h2 className="text-xs font-semibold text-zinc-300">Event Processing Status</h2>
           </div>
           <div className="space-y-2">
-            {Object.entries(stats.status_distribution ?? {}).map(([status, count]) => (
-              <div key={status} className="flex items-center justify-between py-1.5 border-b border-zinc-800 last:border-0">
-                <div className="flex items-center gap-2">
-                  <div className={`w-1.5 h-1.5 rounded-full ${
-                    status === "completed"  ? "bg-emerald-400" :
-                    status === "failed"     ? "bg-red-400"     :
-                    status === "processing" ? "bg-blue-400"    :
-                    status === "queued"     ? "bg-amber-400"   :
-                    "bg-zinc-600"
-                  }`} />
-                  <span className={`text-xs capitalize ${STATUS_COLORS[status] || "text-zinc-500"}`}>
+            {Object.entries(stats.status_distribution ?? {}).map(([status, count]) => {
+              const c = count as number;
+              const pct = stats.total_events > 0
+                ? Math.round((c / stats.total_events) * 100)
+                : 0;
+              return (
+                <div key={status} className="flex items-center justify-between">
+                  <span className={`text-[11px] font-medium capitalize ${STATUS_COLORS[status] || "text-zinc-400"}`}>
                     {status}
                   </span>
+                  <div className="flex items-center gap-2">
+                    <div className="w-24 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-zinc-500 rounded-full transition-all"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] text-zinc-500 w-8 text-right">{c}</span>
+                  </div>
                 </div>
-                <span className="text-xs font-medium text-zinc-300">{count}</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* Tools */}
+      {/* Cleanup */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Trash2 size={14} className="text-zinc-500" />
-          <h2 className="text-xs font-semibold text-zinc-300">Quick Tools</h2>
-        </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xs font-semibold text-zinc-300">Maintenance</h2>
+            <p className="text-[11px] text-zinc-600 mt-0.5">Remove expired events and orphaned data</p>
+          </div>
           <button
             onClick={handleCleanup}
             disabled={cleaning}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs text-zinc-300 transition-colors disabled:opacity-60"
+            className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/15 border border-red-500/20 text-red-400 transition-colors disabled:opacity-40"
           >
             {cleaning
-              ? <Loader2 size={13} className="animate-spin" />
-              : <Trash2 size={13} />
-            }
-            Run Expired Events Cleanup
+              ? <Loader2 size={12} className="animate-spin" />
+              : <Trash2 size={12} />}
+            Run Cleanup
           </button>
-          {cleanMsg && (
-            <span className="text-xs text-zinc-400">{cleanMsg}</span>
-          )}
         </div>
+        {cleanMsg && (
+          <div className={`mt-3 flex items-center gap-2 text-xs px-3 py-2 rounded-lg ${
+            cleanMsg.startsWith("✅")
+              ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+              : "bg-red-500/10 border border-red-500/20 text-red-400"
+          }`}>
+            {cleanMsg.startsWith("✅")
+              ? <CheckCircle2 size={12} />
+              : <AlertCircle size={12} />}
+            {cleanMsg.slice(2)}
+          </div>
+        )}
       </div>
     </div>
   );
