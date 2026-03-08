@@ -104,7 +104,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      - MINIO_PUBLIC_URL=/storage
       # ── Payments ──
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
@@ -135,7 +135,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      - MINIO_PUBLIC_URL=/storage
     mem_limit: 4g
     restart: unless-stopped
 
@@ -171,7 +171,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      - MINIO_PUBLIC_URL=/storage
     mem_limit: 6g
     restart: unless-stopped
 
@@ -206,7 +206,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      - MINIO_PUBLIC_URL=/storage
       - PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
       - YOLO_MODEL_PATH=yolov8n.pt
     mem_limit: 4g
@@ -240,7 +240,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=http://localhost:9000/snapfind
+      - MINIO_PUBLIC_URL=/storage
     restart: unless-stopped
 
   # ── Beat Scheduler ────────────────────────────────────────────────────────────
@@ -271,7 +271,7 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_API_URL=/api
-      - NEXT_PUBLIC_STORAGE_URL=http://localhost:9000/snapfind
+      - NEXT_PUBLIC_STORAGE_URL=/storage
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
   nginx:
