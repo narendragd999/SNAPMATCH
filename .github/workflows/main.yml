@@ -21,16 +21,12 @@ jobs:
 
     steps:
 
-    # ───────────────────────────────
-    # 1. Checkout repository
-    # ───────────────────────────────
+    # 1. Checkout
     - name: Checkout code
       uses: actions/checkout@v4
 
 
-    # ───────────────────────────────
-    # 2. Show runner system info
-    # ───────────────────────────────
+    # 2. System info
     - name: System info
       run: |
         echo "CPU:"
@@ -41,9 +37,7 @@ jobs:
         df -h
 
 
-    # ───────────────────────────────
-    # 3. Free disk space
-    # ───────────────────────────────
+    # 3. Free disk
     - name: Free disk space
       run: |
         sudo rm -rf /usr/share/dotnet || true
@@ -53,109 +47,126 @@ jobs:
         df -h
 
 
-    # ───────────────────────────────
     # 4. Start Docker stack
-    # ───────────────────────────────
     - name: Start containers
       run: |
         docker compose -f docker-compose.yml up -d --build
         docker ps
 
 
-    # ───────────────────────────────
-    # 5. Wait for backend API
-    # ───────────────────────────────
+    # 5. Wait for backend
     - name: Wait for backend
       run: |
-        echo "Waiting for backend API..."
+        echo "Waiting for backend..."
         for i in {1..30}; do
           if curl -sf http://localhost:8000/docs >/dev/null; then
             echo "Backend ready"
             exit 0
           fi
-          echo "Still starting..."
           sleep 5
         done
 
-        echo "Backend failed to start"
-        docker compose -f docker-compose.test.yml logs
+        echo "Backend failed"
+        docker compose logs
         exit 1
 
 
-    # ───────────────────────────────
-    # 6. Install cloudflared
-    # ───────────────────────────────
-    - name: Install Cloudflare Tunnel
+    # 6. Wait for frontend
+    - name: Wait for frontend
       run: |
-        CLOUDFLARED_VERSION="2024.11.0"
-        wget -q https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64 -O cloudflared
-        chmod +x cloudflared
-        sudo mv cloudflared /usr/local/bin/cloudflared
+        echo "Waiting for frontend..."
+        for i in {1..30}; do
+          if curl -sf http://localhost:3000 >/dev/null; then
+            echo "Frontend ready"
+            exit 0
+          fi
+          sleep 5
+        done
+
+        echo "Frontend failed"
+        docker compose logs
+        exit 1
+
+
+    # 7. Install cloudflared
+    - name: Install Cloudflare
+      run: |
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x cloudflared-linux-amd64
+        sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
         cloudflared --version
 
 
-    # ───────────────────────────────
-    # 7. Start Cloudflare tunnel
-    # ───────────────────────────────
-    - name: Start Cloudflare Tunnel
-      env:
-        TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+    # 8. Start backend tunnel
+    - name: Start Backend Tunnel
       run: |
-        echo "Starting Cloudflare tunnel..."
+        echo "Starting backend tunnel..."
 
-        cloudflared tunnel --no-autoupdate run \
-          --token "$TUNNEL_TOKEN" \
-          > tunnel.log 2>&1 &
+        cloudflared tunnel --url http://localhost:8000 \
+          > backend_tunnel.log 2>&1 &
 
-        sleep 10
+        sleep 8
 
-        echo "Tunnel log:"
-        cat tunnel.log || true
+        BACKEND_URL=$(grep -o 'https://.*trycloudflare.com' backend_tunnel.log | head -n 1)
+
+        echo "Backend URL:"
+        echo "$BACKEND_URL"
+
+        echo "BACKEND_URL=$BACKEND_URL" >> $GITHUB_ENV
 
 
-    # ───────────────────────────────
-    # 8. Keep preview alive
-    # ───────────────────────────────
+    # 9. Start frontend tunnel
+    - name: Start Frontend Tunnel
+      run: |
+        echo "Starting frontend tunnel..."
+
+        cloudflared tunnel --url http://localhost:3000 \
+          > frontend_tunnel.log 2>&1 &
+
+        sleep 8
+
+        FRONTEND_URL=$(grep -o 'https://.*trycloudflare.com' frontend_tunnel.log | head -n 1)
+
+        echo "Frontend URL:"
+        echo "$FRONTEND_URL"
+
+        echo "FRONTEND_URL=$FRONTEND_URL" >> $GITHUB_ENV
+
+
+    # 10. Print preview URLs
+    - name: Show preview links
+      run: |
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo ""
+        echo "Frontend:"
+        echo "$FRONTEND_URL"
+        echo ""
+        echo "Backend API:"
+        echo "$BACKEND_URL/docs"
+        echo ""
+
+
+    # 11. Keep preview alive
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
       run: |
         SECONDS=$(( PREVIEW_DURATION * 3600 ))
 
-        echo ""
-        echo "================================="
-        echo "SnapFind Preview is LIVE"
-        echo "Duration: $PREVIEW_DURATION hour(s)"
-        echo "================================="
-        echo ""
-
         for ((i=0;i<$SECONDS;i+=60)); do
           sleep 60
           REM=$(( (SECONDS-i)/60 ))
           echo "Preview running... $REM minutes remaining"
-
-          if ! curl -sf http://localhost:8000/docs >/dev/null; then
-            echo "Warning: backend not responding"
-          fi
         done
 
 
-    # ───────────────────────────────
-    # 9. Show logs if failure
-    # ───────────────────────────────
-    - name: Show logs on failure
-      if: failure()
-      run: |
-        docker compose -f docker-compose.test.yml logs --tail=50
-        cat tunnel.log || true
-
-
-    # ───────────────────────────────
-    # 10. Cleanup
-    # ───────────────────────────────
+    # 12. Cleanup
     - name: Cleanup
       if: always()
       run: |
         pkill cloudflared || true
-        docker compose -f docker-compose.test.yml down -v
+        docker compose down -v
         echo "Cleanup complete"
