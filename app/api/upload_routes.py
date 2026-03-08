@@ -129,12 +129,15 @@ def presign_uploads(
         original_name, stored_filename = item
         object_key = f"events/{event_id}/{stored_filename}"
         try:
+            # Sign with application/octet-stream so the URL works for
+            # any image type (jpeg, png, webp) — browser must send this
+            # exact Content-Type header when doing the PUT
             internal_url = s3.generate_presigned_url(
                 "put_object",
                 Params={
                     "Bucket":      bucket,
                     "Key":         object_key,
-                    "ContentType": "image/jpeg",
+                    "ContentType": "application/octet-stream",
                 },
                 ExpiresIn=PRESIGN_EXPIRY,
             )

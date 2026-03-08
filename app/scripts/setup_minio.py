@@ -4,12 +4,11 @@ scripts/setup_minio.py
 
 Run this ONCE after starting MinIO to:
   1. Create the 'snapfind' bucket
-  2. Set a public-read bucket policy (so images load in browser without signed URLs)
+  2. Set a public-read bucket policy (so thumbnails load without signed URLs)
+  3. Set CORS policy (required for browser direct PUT uploads via presigned URLs)
 
 Usage:
   python scripts/setup_minio.py
-
-Requires: pip install boto3
 """
 import json
 import os
@@ -44,10 +43,10 @@ def main():
             s3.create_bucket(Bucket=BUCKET)
             print(f"✅ Bucket '{BUCKET}' created")
         else:
-            print(f"❌ Error: {e}")
+            print(f"❌ Error checking bucket: {e}")
             sys.exit(1)
 
-    # 2. Set public-read policy
+    # 2. Public-read policy (so thumbnails / optimized photos load in browser)
     policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -61,6 +60,30 @@ def main():
     }
     s3.put_bucket_policy(Bucket=BUCKET, Policy=json.dumps(policy))
     print(f"✅ Public-read policy applied to '{BUCKET}'")
+
+    # 3. CORS policy — required for browser direct PUT (presigned URL uploads)
+    #    Without this the browser's preflight OPTIONS request is rejected and
+    #    every upload fails silently with a CORS error.
+    cors = {
+        "CORSRules": [
+            {
+                "AllowedOrigins": ["*"],
+                "AllowedMethods": ["PUT", "GET", "HEAD"],
+                "AllowedHeaders": [
+                    "Content-Type",
+                    "Authorization",
+                    "X-Amz-Date",
+                    "X-Amz-Content-Sha256",
+                    "X-Api-Key",
+                    "x-amz-*",
+                ],
+                "ExposeHeaders":  ["ETag"],
+                "MaxAgeSeconds":  86400,
+            }
+        ]
+    }
+    s3.put_bucket_cors(Bucket=BUCKET, CORSConfiguration=cors)
+    print(f"✅ CORS policy applied to '{BUCKET}' (allows browser PUT uploads)")
 
     print(f"\n🎉 MinIO setup complete!")
     print(f"   Endpoint:   {ENDPOINT}")

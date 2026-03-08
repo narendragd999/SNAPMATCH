@@ -349,9 +349,11 @@ function BulkUploadModal({
               const ctrl = new AbortController();
               // Store array of controllers so cancel-all still works
               abortRef.current = ctrl;
+              // Content-Type MUST match what was signed in the presigned URL
+              // Backend signs with application/octet-stream to work for all image types
               const putRes = await fetch(presigned.upload_url, {
                 method: "PUT",
-                headers: { "Content-Type": bulkFile.file.type || "image/jpeg" },
+                headers: { "Content-Type": "application/octet-stream" },
                 body: bulkFile.file,
                 signal: ctrl.signal,
               });
