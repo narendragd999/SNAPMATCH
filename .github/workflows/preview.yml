@@ -114,6 +114,15 @@ jobs:
     #   calls and page loads. But presigned PUT URLs must point to MinIO
     #   directly (localhost:9000) so the browser can PUT files without going
     #   through the backend. Both tunnels are on HTTPS, so no Mixed Content.
+    #
+    # Why the MinIO tunnel URL must be used as the SIGNING endpoint (not just
+    # rewritten after signing):
+    #   S3 presigned URLs embed the host in X-Amz-SignedHeaders=content-type;host.
+    #   If boto3 signs with host=minio:9000 but the browser sends
+    #   Host=xxx.trycloudflare.com, MinIO returns 403 SignatureDoesNotMatch.
+    #   By passing MINIO_PRESIGN_ENDPOINT as the boto3 endpoint_url for a
+    #   presign-only client, the signature is computed with the public host —
+    #   matching what the browser will actually send. See storage_service.py.
     - name: Start Cloudflare Tunnels
       run: |
         start_tunnel() {
@@ -168,12 +177,16 @@ jobs:
         echo "MinIO tunnel:  $MINIO_TUNNEL_URL  (presigned PUT target)"
         echo ""
 
-    # 10 Inject MINIO_PRESIGN_ENDPOINT into the running backend container
+    # 10 Inject MINIO_PRESIGN_ENDPOINT into the running backend container.
     #
-    # The backend container started before the MinIO tunnel URL existed, so we
-    # couldn't pass it at compose-up time. We append to .env and use
-    # `docker compose up --no-deps --force-recreate` to rebuild ONLY the
-    # backend container with the new var. All other containers stay running.
+    # IMPORTANT: docker-compose.yml must declare
+    #   - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-}
+    # in the backend's environment block. Without that line, Docker Compose
+    # never passes the variable into the container even though it's in .env.
+    #
+    # storage_service.py uses a dedicated presigning boto3 client with
+    # endpoint_url=MINIO_PRESIGN_ENDPOINT so signatures are computed with
+    # the public host — no URL rewriting needed or done.
     - name: Inject MinIO presign endpoint into backend
       run: |
         echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
@@ -185,7 +198,8 @@ jobs:
         # Recreate ONLY the backend container with the updated env.
         #   --no-deps        : don't touch db/redis/minio/nginx/frontend
         #   --force-recreate : always create fresh even if image unchanged
-        MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL"           docker compose up -d --no-deps --force-recreate backend
+        MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
+          docker compose up -d --no-deps --force-recreate backend
 
         # Wait for backend to come back healthy
         echo "Waiting for backend after recreate..."
@@ -201,10 +215,29 @@ jobs:
         BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
         if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
-          echo "✓ MINIO_PRESIGN_ENDPOINT confirmed: $LIVE"
+          echo "✓ MINIO_PRESIGN_ENDPOINT confirmed inside container: $LIVE"
         else
-          echo "WARNING: var mismatch. Got='$LIVE'  Expected='$MINIO_TUNNEL_URL'"
+          echo "ERROR: var not found in container."
+          echo "  Got:      '$LIVE'"
+          echo "  Expected: '$MINIO_TUNNEL_URL'"
+          echo ""
+          echo "Check that docker-compose.yml backend environment includes:"
+          echo "  - MINIO_PRESIGN_ENDPOINT=\${MINIO_PRESIGN_ENDPOINT:-}"
           docker exec "$BACKEND" printenv | grep -i minio || true
+          exit 1   # ← Fail fast so the issue is visible immediately
+        fi
+
+        # Smoke-test: verify that the presign endpoint generates an HTTPS URL
+        echo "Smoke-testing presign endpoint..."
+        PRESIGN_RESP=$(curl -sf -X POST \
+          -H "Content-Type: application/json" \
+          -d '{"filenames":["test.jpg"]}' \
+          http://localhost:8000/uploads/1/presign 2>/dev/null || true)
+        if echo "$PRESIGN_RESP" | grep -q "https://"; then
+          echo "✓ Presign endpoint returns HTTPS URLs"
+        else
+          echo "WARNING: Presign smoke-test inconclusive (may need auth or event ID 1)."
+          echo "Response: $PRESIGN_RESP"
         fi
 
     # 11 Keep preview alive
