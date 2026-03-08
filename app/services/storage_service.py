@@ -40,6 +40,16 @@ MINIO_BUCKET     = os.getenv("MINIO_BUCKET",     "snapfind")
 # R2 custom:    https://photos.yourdomain.com
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"{MINIO_ENDPOINT}/{MINIO_BUCKET}")
 
+# Public endpoint used to REWRITE presigned PUT URLs before sending to the browser.
+# boto3 signs URLs using MINIO_ENDPOINT (often an internal Docker address like
+# http://minio:9000). Browsers on HTTPS block those as Mixed Content.
+# Set MINIO_PRESIGN_ENDPOINT to the public HTTPS URL the browser can reach.
+#
+#   MinIO behind Cloudflare Tunnel:  MINIO_PRESIGN_ENDPOINT=https://minio.yourdomain.com
+#   Cloudflare R2:                   MINIO_PRESIGN_ENDPOINT=https://<acct>.r2.cloudflarestorage.com
+#   Local dev (HTTP fine):           leave unset, falls back to MINIO_ENDPOINT
+MINIO_PRESIGN_ENDPOINT = os.getenv("MINIO_PRESIGN_ENDPOINT", MINIO_ENDPOINT).rstrip("/")
+
 # ── Local fallback paths (used only when STORAGE_BACKEND=local) ───────────────
 _BASE_DIR    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _LOCAL_ROOT  = os.getenv("STORAGE_PATH", os.path.join(_BASE_DIR, "storage"))
@@ -181,22 +191,29 @@ def generate_presigned_put_url(
     expires_in: int = 3600,
 ) -> str:
     """
-    Return a presigned PUT URL so the browser can upload a file directly
-    to MinIO / R2 without routing bytes through FastAPI.
+    Return a presigned PUT URL so the browser can upload directly to MinIO/R2,
+    bypassing FastAPI entirely (no backend bottleneck, no Cloudflare body limit).
 
-    The URL is signed with ContentType=application/octet-stream.
-    The browser MUST send that exact Content-Type header or MinIO/S3 will
-    return a SignatureDoesNotMatch 403.
+    The URL is signed for ContentType=application/octet-stream.
+    The browser MUST send that exact Content-Type header or MinIO/S3 returns
+    a SignatureDoesNotMatch 403.
 
-    Local backend: raises NotImplementedError — presigned uploads make no
-    sense against a local filesystem. upload_routes /presign endpoint catches
-    this and returns an error entry for the file; the frontend falls back to
-    legacy multipart automatically, so local dev continues to work unchanged.
+    URL rewriting:
+        boto3 builds the URL from MINIO_ENDPOINT, which is often an internal
+        Docker hostname (http://minio:9000). Browsers on HTTPS reject that as
+        Mixed Content. We replace the endpoint host with MINIO_PRESIGN_ENDPOINT
+        (the public HTTPS address) so the signed path/query remain intact but
+        the host is one the browser can actually reach.
+
+    Local backend:
+        Raises NotImplementedError. The /presign route returns an error entry
+        for each affected file; the frontend falls back to legacy multipart
+        automatically, so local dev works unchanged.
     """
     if STORAGE_BACKEND == "local":
         raise NotImplementedError(
             "Presigned PUT URLs are not supported for STORAGE_BACKEND=local. "
-            "The frontend will fall back to legacy multipart upload automatically."
+            "The frontend falls back to legacy multipart upload automatically."
         )
 
     key = _key(event_id, filename)
@@ -210,6 +227,14 @@ def generate_presigned_put_url(
         ExpiresIn=expires_in,
         HttpMethod="PUT",
     )
+
+    # Rewrite internal endpoint → public HTTPS endpoint so the browser's PUT
+    # is not blocked as Mixed Content.
+    internal = MINIO_ENDPOINT.rstrip("/")
+    public   = MINIO_PRESIGN_ENDPOINT          # already rstripped in config
+    if internal != public and url.startswith(internal):
+        url = public + url[len(internal):]
+
     return url
 
 
