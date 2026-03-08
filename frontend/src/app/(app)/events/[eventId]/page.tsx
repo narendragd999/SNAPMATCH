@@ -106,8 +106,8 @@ type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 
-const BATCH_SIZE  = 40;
-const MAX_RETRIES = 2;
+const BATCH_SIZE  = 40;  // used only for batch UI display grouping
+const MAX_RETRIES = 3;
 const ACCEPTED_EXT = /\.(jpe?g|png|webp)$/i;
 
 type BulkFileStatus = "pending" | "uploading" | "done" | "failed";
@@ -230,6 +230,7 @@ function BulkUploadModal({
     setPhase("uploading"); setPaused(false); pausedRef.current = false;
     startTimeRef.current = Date.now();
 
+    // Group files into display batches (UI grouping only)
     const batchCount = Math.ceil(files.length / BATCH_SIZE);
     const batchList: BulkBatch[] = Array.from({ length: batchCount }, (_, i) => ({
       index: i,
@@ -246,65 +247,149 @@ function BulkUploadModal({
     const updBatch = (i: number, patch: Partial<BulkBatch>) =>
       setBatches(prev => prev.map(b => b.index === i ? { ...b, ...patch } : b));
 
+    // ── Step 1: Get presigned PUT URLs for all files ───────────────────────
+    let presignedMap = new Map<string, { stored_filename: string; upload_url: string }>();
+    let usePresign = true;
+
+    try {
+      const presignRes = await fetch(`${apiUrl}/upload/${eventId}/presign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ filenames: files.map(f => f.file.name) }),
+      });
+      if (!presignRes.ok) throw new Error(`Presign HTTP ${presignRes.status}`);
+      const presignData = await presignRes.json();
+      for (const pf of presignData.files) {
+        if (!pf.error) presignedMap.set(pf.original_filename, pf);
+      }
+    } catch {
+      usePresign = false; // fall back to legacy multipart
+    }
+
+    // ── Step 2: Upload files ───────────────────────────────────────────────
+    const confirmedUploads: Array<{ original_filename: string; stored_filename: string; file_size_bytes: number }> = [];
+
     for (let bi = 0; bi < batchList.length; bi++) {
       setCurrentBatch(bi);
-      while (pausedRef.current) await new Promise(r => setTimeout(r, 250));
+      updBatch(bi, { status: "uploading" });
 
       const batch      = batchList[bi];
       const batchFiles = files.filter(f => batch.fileIds.includes(f.id));
-      updBatch(bi, { status: "uploading" });
-      batchFiles.forEach(f => updFile(f.id, { status: "uploading" }));
 
-      let success = false;
-      let attempt = 0;
-      let lastErr = "";
+      if (usePresign) {
+        // ── Direct PUT to MinIO — no size limit, no tunnel bottleneck ──
+        for (const bulkFile of batchFiles) {
+          while (pausedRef.current) await new Promise(r => setTimeout(r, 250));
 
-      while (attempt <= MAX_RETRIES && !success) {
-        if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
-        try {
-          abortRef.current = new AbortController();
-          const form = new FormData();
-          batchFiles.forEach(f => form.append("files", f.file));
-          const res = await fetch(`${apiUrl}/upload/${eventId}`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${authToken}` },
-            body: form,
-            signal: abortRef.current.signal,
-          });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ detail: "Upload failed" }));
-            throw new Error(err.detail ?? `HTTP ${res.status}`);
+          const presigned = presignedMap.get(bulkFile.file.name);
+          if (!presigned) {
+            updFile(bulkFile.id, { status: "failed", error: "No presigned URL" });
+            failed++; setFailedCount(failed);
+            continue;
           }
-          const batchBytes = batchFiles.reduce((s, f) => s + f.file.size, 0);
-          bytesDone += batchBytes;
-          setUploadedBytes(bytesDone);
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.1) {
-            const inst = bytesDone / elapsed;
-            speedSamples = [...speedSamples.slice(-4), inst];
-            const avg = speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length;
-            setSpeed(avg);
-            setEta(avg > 0 ? (totalBytesRef.current - bytesDone) / avg : 0);
+
+          updFile(bulkFile.id, { status: "uploading" });
+          let success = false, attempt = 0, lastErr = "";
+
+          while (attempt <= MAX_RETRIES && !success) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
+            try {
+              const ctrl = new AbortController();
+              abortRef.current = ctrl;
+              const putRes = await fetch(presigned.upload_url, {
+                method: "PUT",
+                headers: { "Content-Type": bulkFile.file.type || "image/jpeg" },
+                body: bulkFile.file,
+                signal: ctrl.signal,
+              });
+              if (!putRes.ok) throw new Error(`PUT failed: HTTP ${putRes.status}`);
+
+              bytesDone += bulkFile.file.size;
+              setUploadedBytes(bytesDone);
+              const elapsed = (Date.now() - startTimeRef.current) / 1000;
+              if (elapsed > 0.1) {
+                const inst = bytesDone / elapsed;
+                speedSamples = [...speedSamples.slice(-4), inst];
+                const avg = speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length;
+                setSpeed(avg);
+                setEta(avg > 0 ? (totalBytesRef.current - bytesDone) / avg : 0);
+              }
+              confirmedUploads.push({
+                original_filename: bulkFile.file.name,
+                stored_filename:   presigned.stored_filename,
+                file_size_bytes:   bulkFile.file.size,
+              });
+              done++; setDoneCount(done);
+              updFile(bulkFile.id, { status: "done" });
+              success = true;
+            } catch (e: unknown) {
+              attempt++;
+              lastErr = e instanceof Error ? e.message : "Unknown error";
+              if (e instanceof Error && e.name === "AbortError") break;
+            }
           }
-          done += batchFiles.length;
-          setDoneCount(done);
-          updBatch(bi, { status: "done" });
-          batchFiles.forEach(f => updFile(f.id, { status: "done" }));
-          success = true;
-        } catch (e: unknown) {
-          attempt++;
-          lastErr = e instanceof Error ? e.message : "Unknown error";
-          if (e instanceof Error && e.name === "AbortError") break;
+          if (!success) {
+            failed++; setFailedCount(failed);
+            updFile(bulkFile.id, { status: "failed", error: lastErr });
+          }
+        }
+      } else {
+        // ── Legacy multipart fallback ──────────────────────────────────────
+        batchFiles.forEach(f => updFile(f.id, { status: "uploading" }));
+        let success = false, attempt = 0, lastErr = "";
+        while (attempt <= MAX_RETRIES && !success) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
+          try {
+            const ctrl = new AbortController();
+            abortRef.current = ctrl;
+            const form = new FormData();
+            batchFiles.forEach(f => form.append("files", f.file));
+            const res = await fetch(`${apiUrl}/upload/${eventId}`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${authToken}` },
+              body: form,
+              signal: ctrl.signal,
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ detail: "Upload failed" }));
+              throw new Error(err.detail ?? `HTTP ${res.status}`);
+            }
+            bytesDone += batchFiles.reduce((s, f) => s + f.file.size, 0);
+            setUploadedBytes(bytesDone);
+            done += batchFiles.length; setDoneCount(done);
+            updBatch(bi, { status: "done" });
+            batchFiles.forEach(f => updFile(f.id, { status: "done" }));
+            success = true;
+          } catch (e: unknown) {
+            attempt++;
+            lastErr = e instanceof Error ? e.message : "Unknown error";
+            if (e instanceof Error && e.name === "AbortError") break;
+          }
+        }
+        if (!success) {
+          failed += batchFiles.length; setFailedCount(failed);
+          updBatch(bi, { status: "failed", error: lastErr });
+          batchFiles.forEach(f => updFile(f.id, { status: "failed", error: lastErr }));
+          continue;
         }
       }
 
-      if (!success) {
-        failed += batchFiles.length;
-        setFailedCount(failed);
-        updBatch(bi, { status: "failed", error: lastErr });
-        batchFiles.forEach(f => updFile(f.id, { status: "failed", error: lastErr }));
+      updBatch(bi, { status: "done" });
+    }
+
+    // ── Step 3: Confirm uploads with backend (presign flow only) ──────────
+    if (usePresign && confirmedUploads.length > 0) {
+      try {
+        await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+          body: JSON.stringify({ uploads: confirmedUploads }),
+        });
+      } catch (e) {
+        console.error("Confirm step failed:", e);
       }
     }
+
     setPhase("done");
     onComplete(done);
   }, [files, apiUrl, eventId, authToken, onComplete]);
