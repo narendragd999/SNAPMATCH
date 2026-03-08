@@ -219,7 +219,7 @@ interface BulkUploadModalProps {
   const startTimeRef  = useRef(0);
   const totalBytesRef = useRef(0);
   const fileInputRef  = useRef<HTMLInputElement>(null);
-
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const getFiles = () => Array.from(filesRef.current.values());
 
   // ── Reset when modal opens ─────────────────────────────────────────────────
@@ -245,7 +245,7 @@ interface BulkUploadModalProps {
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const total = incoming.length;
     if (!total) return;
-    const CHUNK = 100;
+    const CHUNK = 500;
     let offset  = 0;
     const processChunk = () => {
       const end      = Math.min(offset + CHUNK, total);
@@ -257,7 +257,7 @@ interface BulkUploadModalProps {
         const f = incoming instanceof FileList ? incoming.item(i) : incoming[i];
         if (!f) continue;
         if (!f.type.startsWith("image/") && !ACCEPTED_EXT.test(f.name)) continue;
-        const key = `${f.name}_${f.size}_${f.lastModified}`;
+        const key = `${f.name}_${f.size}_${f.lastModified}_${offset + i}`;
         if (map.has(key)) continue;
         map.set(key, { id: uid(), file: f, status: "pending" });
         addedBytes += f.size;
@@ -665,10 +665,25 @@ interface BulkUploadModalProps {
                       {totalFiles.toLocaleString()} files · {totalBatches} batches
                     </div>
                   )}
-                  <input ref={fileInputRef} type="file" multiple
-                    accept="image/jpeg,image/png,image/webp,image/heic"
-                    className="hidden"
-                    onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }} />
+                  {/* File picker */}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,.jpg,.jpeg,.png,.webp,.heic"
+                      className="hidden"
+                      onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = ""; } }}
+                    />
+                    {/* Folder picker — bypasses Windows path length limit */}
+                    <input
+                      ref={folderInputRef}
+                      type="file"
+                      // @ts-ignore
+                      webkitdirectory=""
+                      mozdirectory=""
+                      className="hidden"
+                      onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = ""; } }}
+                    />
                 </div>
 
                 {/* Stats */}
@@ -1999,6 +2014,17 @@ export default function OwnerEventDetailPage() {
                         {searchResult ? "Upload a different photo" : "Drop your photo here"}
                       </p>
                       <p className="text-xs text-zinc-500 mt-0.5">or click to browse · JPG, PNG, WEBP</p>
+                      <p className="text-[11px] text-zinc-500 mt-1">
+                        or{" "}
+                        <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300">
+                          select files
+                        </button>
+                        {" "}or{" "}
+                        <button onClick={() => folderInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300">
+                          select entire folder
+                        </button>
+                        {" "}· JPG, PNG, WebP, HEIC · up to 1,000 files
+                    </p>
                     </div>
                     <input type="file" hidden accept="image/*"
                       onChange={e => {
