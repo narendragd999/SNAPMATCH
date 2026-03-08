@@ -106,9 +106,10 @@ type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 
-const BATCH_SIZE  = 40;  // used only for batch UI display grouping
-const MAX_RETRIES = 3;
-const ACCEPTED_EXT = /\.(jpe?g|png|webp)$/i;
+const BATCH_SIZE    = 40;   // UI display grouping only
+const MAX_RETRIES   = 3;
+const CONCURRENCY   = 5;    // upload 5 files in parallel to MinIO
+const ACCEPTED_EXT  = /\.(jpe?g|png|webp)$/i;
 
 type BulkFileStatus = "pending" | "uploading" | "done" | "failed";
 
@@ -277,15 +278,15 @@ function BulkUploadModal({
       const batchFiles = files.filter(f => batch.fileIds.includes(f.id));
 
       if (usePresign) {
-        // ── Direct PUT to MinIO — no size limit, no tunnel bottleneck ──
-        for (const bulkFile of batchFiles) {
+        // ── Direct PUT to MinIO — PARALLEL (CONCURRENCY files at once) ────
+        const uploadOne = async (bulkFile: BulkFile) => {
           while (pausedRef.current) await new Promise(r => setTimeout(r, 250));
 
           const presigned = presignedMap.get(bulkFile.file.name);
           if (!presigned) {
             updFile(bulkFile.id, { status: "failed", error: "No presigned URL" });
             failed++; setFailedCount(failed);
-            continue;
+            return;
           }
 
           updFile(bulkFile.id, { status: "uploading" });
@@ -295,6 +296,7 @@ function BulkUploadModal({
             if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
             try {
               const ctrl = new AbortController();
+              // Store array of controllers so cancel-all still works
               abortRef.current = ctrl;
               const putRes = await fetch(presigned.upload_url, {
                 method: "PUT",
@@ -332,7 +334,18 @@ function BulkUploadModal({
             failed++; setFailedCount(failed);
             updFile(bulkFile.id, { status: "failed", error: lastErr });
           }
-        }
+        };
+
+        // Run CONCURRENCY workers pulling from a shared queue
+        const queue = [...batchFiles];
+        const workers = Array.from({ length: Math.min(CONCURRENCY, batchFiles.length) }, async () => {
+          while (queue.length > 0) {
+            const file = queue.shift()!;
+            await uploadOne(file);
+          }
+        });
+        await Promise.all(workers);
+
       } else {
         // ── Legacy multipart fallback ──────────────────────────────────────
         batchFiles.forEach(f => updFile(f.id, { status: "uploading" }));
