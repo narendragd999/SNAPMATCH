@@ -659,7 +659,7 @@ interface BulkUploadModalProps {
                   onDragOver={e => { e.preventDefault(); setDragOver(true); }}
                   onDragLeave={() => setDragOver(false)}
                   onDrop={onDrop}
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={() => folderInputRef.current?.click()}
                   className="relative rounded-xl cursor-pointer flex flex-col items-center justify-center gap-3 py-12 px-8 text-center select-none transition-all duration-200"
                   style={{
                     border: `1.5px dashed ${dragOver ? "rgba(99,102,241,0.6)" : "rgba(255,255,255,0.09)"}`,
@@ -678,8 +678,22 @@ interface BulkUploadModalProps {
                       {dragOver ? "Drop to add images" : "Drop images here"}
                     </p>
                     <p className="text-xs text-zinc-500 mt-1">
-                      or <span className="text-indigo-400 font-medium">click to browse</span>
-                      {" "}· JPG, PNG, WebP, HEIC · up to {slotsLeft.toLocaleString()} files
+                      {/* AFTER */}
+                      or{" "}
+                      <span
+                        className="text-indigo-400 font-medium cursor-pointer hover:text-indigo-300"
+                        onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
+                      >
+                        select folder
+                      </span>
+                      {" "}or{" "}
+                      <span
+                        className="text-indigo-400 font-medium cursor-pointer hover:text-indigo-300"
+                        onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                      >
+                        individual files
+                      </span>
+                      {" "}· JPG, PNG, WebP, HEIC
                     </p>
                   </div>
                   {totalFiles > 0 && (
@@ -690,24 +704,18 @@ interface BulkUploadModalProps {
                     </div>
                   )}
                   {/* File picker */}
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      accept="image/*,.jpg,.jpeg,.png,.webp,.heic"
-                      className="hidden"
-                      onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = ""; } }}
-                    />
-                    {/* Folder picker — bypasses Windows path length limit */}
-                    <input
-                      ref={folderInputRef}
-                      type="file"
-                      // @ts-ignore
-                      webkitdirectory=""
-                      mozdirectory=""
-                      className="hidden"
-                      onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = ""; } }}
-                    />
+                    {/* Individual files picker */}
+                  <input ref={fileInputRef} type="file" multiple
+                    accept="image/jpeg,image/png,image/webp,image/heic"
+                    className="hidden"
+                    onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }} />
+
+                  {/* Folder picker — no browser path-length limit */}
+                  <input ref={folderInputRef} type="file"
+                    // @ts-ignore
+                    webkitdirectory="" mozdirectory=""
+                    className="hidden"
+                    onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }} />
                 </div>
 
                 {/* Stats */}
