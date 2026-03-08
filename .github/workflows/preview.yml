@@ -177,3 +177,28 @@ jobs:
         pkill cloudflared || true
         docker compose down -v
         echo "Cleanup complete"
+        
+    - name: Show System Resources
+      run: |
+        echo "================ CPU ================="
+        echo "Number of CPU cores:"
+        nproc
+        echo ""
+        echo "CPU Details:"
+        lscpu
+    
+        echo ""
+        echo "================ RAM ================="
+        free -h
+    
+        echo ""
+        echo "================ DISK ================="
+        df -h
+    
+        echo ""
+        echo "================ DOCKER CONTAINERS ================="
+        docker ps
+    
+        echo ""
+        echo "================ DOCKER RESOURCE USAGE ================="
+        docker stats --no-stream
