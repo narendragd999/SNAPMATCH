@@ -53,7 +53,7 @@ function StepBadge({ n, label, active, done }: { n: number; label: string; activ
   );
 }
 
-// ── Inner Page (uses useSearchParams — must be inside Suspense) ───────────────
+// ── Inner form (uses useSearchParams — must be inside Suspense) ───────────────
 
 function CreateEventForm() {
   const router          = useRouter();
@@ -314,13 +314,11 @@ function CreateEventForm() {
                   </div>
                   <button
                     onClick={() => {
-                      if (!details.name.trim()) {
-                        setError("Enter event name first.");
-                        return;
-                      }
+                      if (!details.name.trim()) { setError("Enter event name first."); return; }
                       handleFreeEvent();
                     }}
-                    className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap"
+                    disabled={loading}
+                    className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap disabled:opacity-50"
                   >
                     Use Free →
                   </button>
@@ -349,7 +347,10 @@ function CreateEventForm() {
             >
               <div>
                 <h2 className="text-lg font-bold text-zinc-100">Configure your event</h2>
-                <p className="text-xs text-zinc-500 mt-1">Set photo quota, guest slots, and validity period.</p>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Set photo quota, guest slots, and validity period for{" "}
+                  <span className="text-zinc-300">"{details.name}"</span>.
+                </p>
               </div>
 
               <PricingCalculator
@@ -362,7 +363,7 @@ function CreateEventForm() {
             </motion.div>
           )}
 
-          {/* ── Step 3: Payment processing overlay ────────────────────────── */}
+          {/* ── Step 3: Payment processing ────────────────────────────────── */}
           {step === 3 && (
             <motion.div
               key="step3"
