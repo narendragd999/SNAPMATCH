@@ -198,7 +198,7 @@ def generate_presigned_put_url(
     The browser MUST send that exact Content-Type header or MinIO/S3 returns
     a SignatureDoesNotMatch 403.
 
-    URL rewriting:
+    URL rewriting: s
         boto3 builds the URL from MINIO_ENDPOINT, which is often an internal
         Docker hostname (http://minio:9000). Browsers on HTTPS reject that as
         Mixed Content. We replace the endpoint host with MINIO_PRESIGN_ENDPOINT
