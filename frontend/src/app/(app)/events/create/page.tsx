@@ -1,6 +1,17 @@
 "use client";
+/**
+ * frontend/src/app/(app)/events/create/page.tsx
+ *
+ * 3-step event creation wizard:
+ *   Step 1: Event details (name, description)
+ *   Step 2: Quota configuration (PricingCalculator)
+ *   Step 3: Payment (Razorpay) — or instant for free tier
+ *
+ * URL params:
+ *   ?free=1   → skip to free event creation
+ */
 
-import { Suspense, useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -12,10 +23,18 @@ import PricingCalculator, { type PricingConfig } from "@/components/PricingCalcu
 import { useRazorpay } from "@/hooks/useRazorpay";
 import { FREE_TIER, formatInr } from "@/lib/pricing";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 type Step = 1 | 2 | 3;
-interface EventDetails { name: string; description: string; }
+
+interface EventDetails {
+  name:        string;
+  description: string;
+}
+
+// ── Step indicator ────────────────────────────────────────────────────────────
 
 function StepBadge({ n, label, active, done }: { n: number; label: string; active: boolean; done: boolean }) {
   return (
@@ -34,7 +53,7 @@ function StepBadge({ n, label, active, done }: { n: number; label: string; activ
   );
 }
 
-// ── Inner component — uses useSearchParams, must be inside <Suspense> ──────────
+// ── Inner Page (uses useSearchParams — must be inside Suspense) ───────────────
 
 function CreateEventForm() {
   const router          = useRouter();
@@ -51,49 +70,99 @@ function CreateEventForm() {
   const [freeAvail, setFreeAvail] = useState(false);
   const [userEmail, setUserEmail] = useState("");
 
+  // Load user status on mount
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) { router.push("/login"); return; }
+
     const user = JSON.parse(localStorage.getItem("user") ?? "{}");
     setUserEmail(user?.email ?? "");
-    fetch(`${API}/billing/user-status`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then(d => setFreeAvail(d.free_event_available ?? false))
+
+    // Check free event availability
+    fetch(`${API}/billing/user-status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((d) => setFreeAvail(d.free_event_available ?? false))
       .catch(() => {});
+
+    // Restore pre-filled config from pricing page
     if (!isFreeMode) {
       const saved = sessionStorage.getItem("pendingEventConfig");
-      if (saved) { try { sessionStorage.removeItem("pendingEventConfig"); } catch {} }
+      if (saved) {
+        try {
+          sessionStorage.removeItem("pendingEventConfig");
+        } catch {}
+      }
     }
   }, [router, isFreeMode]);
 
+  // ── Step 1 → Step 2 ──────────────────────────────────────────────────────
+
   const handleDetailsNext = useCallback(() => {
-    if (!details.name.trim()) { setError("Please enter an event name."); return; }
-    setError(null); setStep(2);
+    if (!details.name.trim()) {
+      setError("Please enter an event name.");
+      return;
+    }
+    setError(null);
+    setStep(2);
   }, [details]);
 
+  // ── Step 2 → Step 3 (paid) ────────────────────────────────────────────────
+
   const handleConfigProceed = useCallback(async (cfg: PricingConfig) => {
-    if (!details.name.trim()) { setStep(1); return; }
-    setConfig(cfg); setError(null); setLoading(true);
+    if (!details.name.trim()) {
+      setStep(1);
+      return;
+    }
+    setConfig(cfg);
+    setError(null);
+    setLoading(true);
+
     const token = localStorage.getItem("token") ?? "";
+
     try {
       const res = await fetch(`${API}/billing/create-event-order`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
         body: JSON.stringify({
-          event_name: details.name, description: details.description,
-          photo_quota: cfg.photoQuota, guest_quota: cfg.guestQuota, validity_days: cfg.validityDays,
+          event_name:    details.name,
+          description:   details.description,
+          photo_quota:   cfg.photoQuota,
+          guest_quota:   cfg.guestQuota,
+          validity_days: cfg.validityDays,
         }),
       });
+
       const orderData = await res.json();
-      if (!res.ok) { setError(orderData.detail ?? "Failed to create order."); setLoading(false); return; }
+
+      if (!res.ok) {
+        setError(orderData.detail ?? "Failed to create order. Please try again.");
+        setLoading(false);
+        return;
+      }
+
       setLoading(false);
+
+      // Open Razorpay
       openPayment({
-        orderData: { ...orderData, prefill_email: userEmail },
-        onSuccess: (result) => {
-          if (result.success) router.push(`/events/${result.eventId}?created=1`);
-          else setError(result.error ?? "Payment failed.");
+        orderData: {
+          ...orderData,
+          prefill_email: userEmail,
         },
-        onDismiss: () => setError("Payment was cancelled. You can complete it later."),
+        onSuccess: (result) => {
+          if (result.success) {
+            router.push(`/events/${result.eventId}?created=1`);
+          } else {
+            setError(result.error ?? "Payment failed. Please try again.");
+          }
+        },
+        onDismiss: () => {
+          setError("Payment was cancelled. Your event is saved — you can complete payment later.");
+        },
       });
     } catch {
       setLoading(false);
@@ -101,95 +170,188 @@ function CreateEventForm() {
     }
   }, [details, openPayment, router, userEmail]);
 
+  // ── Free event creation ───────────────────────────────────────────────────
+
   const handleFreeEvent = useCallback(async () => {
-    if (!details.name.trim()) { setError("Please enter an event name first."); setStep(1); return; }
-    setLoading(true); setError(null);
+    if (!details.name.trim()) {
+      setError("Please enter an event name first.");
+      setStep(1);
+      return;
+    }
+    setError(null);
+    setLoading(true);
+
     const token = localStorage.getItem("token") ?? "";
+
     try {
       const res = await fetch(`${API}/billing/create-free-event`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-        body: JSON.stringify({ event_name: details.name, description: details.description }),
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          event_name:  details.name,
+          description: details.description,
+        }),
       });
+
       const data = await res.json();
-      if (!res.ok) { setError(data.detail ?? "Failed to create free event."); return; }
-      router.push(`/events/${data.event_id}?created=1`);
+
+      if (!res.ok) {
+        setLoading(false);
+        setError(data.detail ?? "Failed to create free event.");
+        return;
+      }
+
+      router.push(`/events/${data.event_id}?created=1&free=1`);
     } catch {
-      setError("Network error. Please check your connection.");
+      setLoading(false);
+      setError("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
   }, [details, router]);
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       {/* Header */}
-      <div className="border-b border-zinc-800/60 px-6 py-4 flex items-center justify-between">
-        <button onClick={() => router.back()}
-          className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors group">
-          <ArrowLeft size={12} className="group-hover:-translate-x-0.5 transition-transform" />
-          Back
+      <div className="border-b border-zinc-800/60 px-5 py-3 flex items-center gap-4">
+        <button
+          onClick={() => step > 1 ? setStep((s) => (s - 1) as Step) : router.back()}
+          className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
+        >
+          <ArrowLeft size={16} />
         </button>
-        <div className="flex items-center gap-6">
-          {[
-            { n: 1, label: "Event Details" },
-            { n: 2, label: "Configure"     },
-            { n: 3, label: "Payment"       },
-          ].map(s => (
-            <StepBadge key={s.n} n={s.n} label={s.label}
-              active={step === s.n} done={step > s.n} />
-          ))}
+        <h1 className="text-sm font-semibold text-zinc-200">Create New Event</h1>
+
+        {/* Step indicators */}
+        <div className="ml-auto flex items-center gap-4">
+          <StepBadge n={1} label="Details"  active={step === 1} done={step > 1} />
+          <div className="w-6 h-px bg-zinc-700 hidden sm:block" />
+          <StepBadge n={2} label="Quota"    active={step === 2} done={step > 2} />
+          <div className="w-6 h-px bg-zinc-700 hidden sm:block" />
+          <StepBadge n={3} label="Payment"  active={step === 3} done={false}    />
         </div>
-        <div className="w-16" />
       </div>
 
-      <div className="max-w-2xl mx-auto px-6 py-12">
+      <div className="max-w-2xl mx-auto px-5 py-8">
+        {/* Error banner */}
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex items-start gap-2.5 bg-red-500/8 border border-red-500/20 rounded-xl px-4 py-3 mb-6"
+          >
+            <AlertCircle size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-red-400">{error}</p>
+          </motion.div>
+        )}
+
         <AnimatePresence mode="wait">
 
-          {/* Step 1 — Event Details */}
+          {/* ── Step 1: Event Details ──────────────────────────────────────── */}
           {step === 1 && (
-            <motion.div key="step1" initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 16 }} className="space-y-6">
+            <motion.div
+              key="step1"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-5"
+            >
               <div>
-                <h1 className="text-xl font-bold text-zinc-50">Create an Event</h1>
-                <p className="text-sm text-zinc-500 mt-1">Give your event a name and description</p>
+                <h2 className="text-lg font-bold text-zinc-100">Event details</h2>
+                <p className="text-xs text-zinc-500 mt-1">Give your event a name and optional description.</p>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-4">
+
+              <div className="space-y-4">
                 <div>
-                  <label className="text-xs font-medium text-zinc-400 block mb-2">Event Name *</label>
-                  <input value={details.name} onChange={e => setDetails(p => ({ ...p, name: e.target.value }))}
-                    placeholder="e.g. Sarah & John's Wedding" maxLength={100}
-                    className="w-full px-3 py-2.5 rounded-lg bg-zinc-950 border border-zinc-800 hover:border-zinc-700 focus:border-blue-500/60 focus:outline-none text-sm text-zinc-200 placeholder:text-zinc-600 transition-colors" />
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                    Event name <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Rahul & Priya Wedding 2025"
+                    value={details.name}
+                    onChange={(e) => setDetails((d) => ({ ...d, name: e.target.value }))}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 transition-colors"
+                    maxLength={100}
+                    onKeyDown={(e) => e.key === "Enter" && handleDetailsNext()}
+                  />
+                  <div className="text-right text-[10px] text-zinc-600 mt-1">
+                    {details.name.length}/100
+                  </div>
                 </div>
+
                 <div>
-                  <label className="text-xs font-medium text-zinc-400 block mb-2">Description <span className="text-zinc-600">(optional)</span></label>
-                  <textarea value={details.description} onChange={e => setDetails(p => ({ ...p, description: e.target.value }))}
-                    placeholder="Add a short description…" rows={3} maxLength={500}
-                    className="w-full px-3 py-2.5 rounded-lg bg-zinc-950 border border-zinc-800 hover:border-zinc-700 focus:border-blue-500/60 focus:outline-none text-sm text-zinc-200 placeholder:text-zinc-600 transition-colors resize-none" />
+                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                    Description <span className="text-zinc-600">(optional)</span>
+                  </label>
+                  <textarea
+                    placeholder="A short note about this event..."
+                    value={details.description}
+                    onChange={(e) => setDetails((d) => ({ ...d, description: e.target.value }))}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 transition-colors resize-none"
+                    rows={3}
+                    maxLength={500}
+                  />
                 </div>
               </div>
-              {error && (
-                <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/8 border border-red-500/20 rounded-lg px-3 py-2">
-                  <AlertCircle size={12} /> {error}
+
+              {/* Free event banner */}
+              {freeAvail && (
+                <div className="flex items-center justify-between bg-emerald-500/6 border border-emerald-500/20 rounded-xl px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <Gift size={14} className="text-emerald-400" />
+                    <div>
+                      <p className="text-xs font-medium text-emerald-300">You have a free event available!</p>
+                      <p className="text-[10px] text-zinc-500">
+                        {FREE_TIER.photoQuota} photos · {FREE_TIER.guestQuota} guest slots · {FREE_TIER.validityDays} days
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (!details.name.trim()) {
+                        setError("Enter event name first.");
+                        return;
+                      }
+                      handleFreeEvent();
+                    }}
+                    className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap"
+                  >
+                    Use Free →
+                  </button>
                 </div>
               )}
+
               <div className="flex justify-end">
-                <button onClick={handleDetailsNext}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors">
+                <button
+                  onClick={handleDetailsNext}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors"
+                >
                   Continue <ArrowRight size={14} />
                 </button>
               </div>
             </motion.div>
           )}
 
-          {/* Step 2 — Configure */}
+          {/* ── Step 2: Configure ─────────────────────────────────────────── */}
           {step === 2 && (
-            <motion.div key="step2" initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -16 }} className="space-y-6">
+            <motion.div
+              key="step2"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-5"
+            >
               <div>
-                <h1 className="text-xl font-bold text-zinc-50">Configure Your Event</h1>
-                <p className="text-sm text-zinc-500 mt-1">Set photo quota, guest slots, and validity period</p>
+                <h2 className="text-lg font-bold text-zinc-100">Configure your event</h2>
+                <p className="text-xs text-zinc-500 mt-1">Set photo quota, guest slots, and validity period.</p>
               </div>
+
               <PricingCalculator
                 onProceed={handleConfigProceed}
                 ctaLabel="Continue to Payment"
@@ -197,24 +359,17 @@ function CreateEventForm() {
                 freeEventAvailable={freeAvail && isFreeMode}
                 onUseFreeEvent={handleFreeEvent}
               />
-              {error && (
-                <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/8 border border-red-500/20 rounded-lg px-3 py-2">
-                  <AlertCircle size={12} /> {error}
-                </div>
-              )}
-              <div className="flex justify-between">
-                <button onClick={() => setStep(1)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-                  <ArrowLeft size={12} /> Back
-                </button>
-              </div>
             </motion.div>
           )}
 
-          {/* Step 3 — Payment processing */}
+          {/* ── Step 3: Payment processing overlay ────────────────────────── */}
           {step === 3 && (
-            <motion.div key="step3" initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}
-              className="flex flex-col items-center gap-6 py-16 text-center">
+            <motion.div
+              key="step3"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="flex flex-col items-center gap-6 py-16 text-center"
+            >
               <div className="w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
                 <Loader2 size={22} className="text-blue-400 animate-spin" />
               </div>
@@ -241,7 +396,7 @@ function CreateEventForm() {
   );
 }
 
-// ── Default export wraps inner form in Suspense ────────────────────────────────
+// ── Default export — wraps with Suspense (useSearchParams requirement) ─────────
 
 export default function CreateEventPage() {
   return (
