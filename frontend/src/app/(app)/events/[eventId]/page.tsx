@@ -245,18 +245,22 @@ interface BulkUploadModalProps {
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const total = incoming.length;
     if (!total) return;
-    const CHUNK = 500;
+    const CHUNK = 200;                          // larger chunks = faster processing
     let offset  = 0;
     const processChunk = () => {
       const end      = Math.min(offset + CHUNK, total);
       const map      = filesRef.current;
+      // Always read map.size fresh — not stale closure value
       const maxSlots = Math.max(0, (planLimit - currentCount) - map.size);
-      if (maxSlots === 0) return;
+      if (maxSlots <= 0) return;
       let addedBytes = 0, addedCount = 0;
-      for (let i = offset; i < end && addedCount < maxSlots; i++) {
+      for (let i = offset; i < end; i++) {
+        // Re-check maxSlots every iteration so we never exceed quota
+        if (map.size >= (planLimit - currentCount)) break;
         const f = incoming instanceof FileList ? incoming.item(i) : incoming[i];
         if (!f) continue;
         if (!f.type.startsWith("image/") && !ACCEPTED_EXT.test(f.name)) continue;
+        // Use index as tiebreaker so same-name files from different folders are unique
         const key = `${f.name}_${f.size}_${f.lastModified}_${offset + i}`;
         if (map.has(key)) continue;
         map.set(key, { id: uid(), file: f, status: "pending" });
@@ -264,8 +268,13 @@ interface BulkUploadModalProps {
         addedCount++;
       }
       offset = end;
-      if (addedCount > 0) { totalBytesRef.current += addedBytes; setFileCount(map.size); }
-      if (offset < total) setTimeout(processChunk, 0);
+      // Always update size counter, even if addedCount is 0 (keeps UI in sync)
+      totalBytesRef.current += addedBytes;
+      setFileCount(map.size);
+      // Always continue to next chunk regardless of addedCount
+      if (offset < total && map.size < (planLimit - currentCount)) {
+        setTimeout(processChunk, 0);
+      }
     };
     processChunk();
   }, [planLimit, currentCount]);
@@ -381,10 +390,19 @@ interface BulkUploadModalProps {
     let presignedMap = new Map<string, PresignedSlot>();
     let usePresign   = true;
     try {
+      // Build id→filename map so we can look up by unique ID not filename
+      const idToFile = new Map(allFiles.map(f => [f.id, f]));
       const allNames = allFiles.map(f => f.file.name);
       for (let ci = 0; ci < allNames.length; ci += PRESIGN_CHUNK) {
-        const result = await presignChunk(allNames.slice(ci, ci + PRESIGN_CHUNK));
-        for (const [k, v] of result.entries()) presignedMap.set(k, v);
+        const chunk     = allFiles.slice(ci, ci + PRESIGN_CHUNK);
+        const names     = chunk.map(f => f.file.name);
+        const result    = await presignChunk(names);
+        // Map by position index → file ID (not filename) to avoid collision
+        let ri = 0;
+        for (const [, slot] of result.entries()) {
+          if (chunk[ri]) presignedMap.set(chunk[ri].id, slot);
+          ri++;
+        }
       }
     } catch (e) {
       console.warn("Presign failed, falling back to multipart:", e);
@@ -403,7 +421,7 @@ interface BulkUploadModalProps {
       const worker = async () => {
         while (queue.length > 0) {
           const bulkFile = queue.shift()!;
-          const slot     = presignedMap.get(bulkFile.file.name);
+          const slot = presignedMap.get(bulkFile.id);
           if (!slot) {
             updFile(bulkFile.id, { status: "failed", error: "No presigned URL (quota or type)" }, showList);
             failed++; setFailedCount(failed);
@@ -506,10 +524,16 @@ interface BulkUploadModalProps {
     try {
     let retryPresigned = new Map<string, PresignedSlot>();
     try {
-      const names = failedFiles.map(f => f.file.name);
-      for (let ci = 0; ci < names.length; ci += PRESIGN_CHUNK) {
-        const result = await presignChunk(names.slice(ci, ci + PRESIGN_CHUNK));
-        for (const [k, v] of result.entries()) retryPresigned.set(k, v);
+      for (let ci = 0; ci < failedFiles.length; ci += PRESIGN_CHUNK) {
+        const chunk  = failedFiles.slice(ci, ci + PRESIGN_CHUNK);
+        const names  = chunk.map(f => f.file.name);
+        const result = await presignChunk(names);
+        // Map by file ID (not filename) — avoids collision on duplicate names
+        let ri = 0;
+        for (const [, slot] of result.entries()) {
+          if (chunk[ri]) retryPresigned.set(chunk[ri].id, slot);
+          ri++;
+        }
       }
     } catch (e) { console.error("Retry presign failed:", e); return; }
 
@@ -523,7 +547,7 @@ interface BulkUploadModalProps {
     const worker = async () => {
       while (queue.length > 0) {
         const bulkFile = queue.shift()!;
-        const slot     = retryPresigned.get(bulkFile.file.name);
+        const slot = retryPresigned.get(bulkFile.id);
         if (!slot) {
           updFile(bulkFile.id, { status: "failed", error: "Still quota exceeded" }, showList);
           newFailed++; setFailedCount(newFailed); continue;
