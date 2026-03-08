@@ -9,7 +9,7 @@ import {
   ImageIcon, Users, Grid3X3, Search, Play, Trash2,
   ToggleLeft, ToggleRight, Copy, Check, AlertCircle, Clock,
   BarChart2, Layers, ArrowLeft, ExternalLink, ZoomIn,
-  Loader2, AlertTriangle,
+  ChevronDown, Loader2, AlertTriangle,
   CloudUpload, CheckCircle2, XCircle, ThumbsUp, ThumbsDown,
   RefreshCw, ImagePlus, Pause, RotateCcw, Zap,
   FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound,
@@ -104,35 +104,27 @@ interface SceneItem {
 
 type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 
-// ─── Bulk Upload Types & Constants ───────────────────────────────────────────
+// ─── Bulk Upload Types ────────────────────────────────────────────────────────
 
-// Each presign call gets up to PRESIGN_CHUNK filenames → backend generates URLs in parallel
-const PRESIGN_CHUNK = 200;   // filenames per presign request
-const CONCURRENCY   = 8;     // simultaneous PUT uploads to MinIO
-const MAX_RETRIES   = 3;     // per-file retry attempts
-const CONFIRM_CHUNK = 200;   // filenames per confirm request
+const BATCH_SIZE    = 40;   // UI display grouping only
+const MAX_RETRIES   = 3;
+const CONCURRENCY   = 5;    // upload 5 files in parallel to MinIO
 const ACCEPTED_EXT  = /\.(jpe?g|png|webp)$/i;
 
-type FileStatus = "pending" | "uploading" | "done" | "failed";
+type BulkFileStatus = "pending" | "uploading" | "done" | "failed";
 
 interface BulkFile {
-  id:      string;
-  file:    File;
-  status:  FileStatus;
-  error?:  string;
+  id: string;
+  file: File;
+  status: BulkFileStatus;
+  error?: string;
 }
 
-interface PresignEntry {
-  original_filename: string;
-  stored_filename:   string;
-  upload_url:        string;
-  error?:            string;
-}
-
-interface ConfirmEntry {
-  original_filename: string;
-  stored_filename:   string;
-  file_size_bytes:   number;
+interface BulkBatch {
+  index: number;
+  fileIds: string[];
+  status: "pending" | "uploading" | "done" | "failed";
+  error?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -164,288 +156,390 @@ const fmtETA = (s: number) => {
 };
 const uid = () => Math.random().toString(36).slice(2, 10);
 
-// ─── Bulk Upload Modal ────────────────────────────────────────────────────────
+// ─── Bulk Upload Modal (inline) ───────────────────────────────────────────────
 
 interface BulkUploadModalProps {
-  open:         boolean;
-  onClose:      () => void;
-  eventId:      string;
-  apiUrl:       string;
-  authToken:    string;
-  planLimit:    number;
+  open: boolean;
+  onClose: () => void;
+  eventId: string;
+  apiUrl: string;
+  authToken: string;
+  planLimit: number;
   currentCount: number;
-  onComplete:   (count: number) => void;
+  onComplete: (count: number) => void;
 }
 
 function BulkUploadModal({
   open, onClose, eventId, apiUrl, authToken, planLimit, currentCount, onComplete,
 }: BulkUploadModalProps) {
-  // ── Phase & file state ────────────────────────────────────────────────────
-  const [phase,         setPhase]         = useState<"select" | "uploading" | "done">("select");
-  const [files,         setFiles]         = useState<BulkFile[]>([]);
-  const [dragOver,      setDragOver]      = useState(false);
-  const [paused,        setPaused]        = useState(false);
-
-  // ── Progress state ────────────────────────────────────────────────────────
-  const [doneCount,     setDoneCount]     = useState(0);
-  const [failedCount,   setFailedCount]   = useState(0);
+  const [phase, setPhase]               = useState<"select" | "uploading" | "done">("select");
+  // ── files stored in a ref to avoid re-rendering on every addition ──────────
+  // Only fileCount (a number) lives in state — React re-renders are cheap.
+  // The actual File objects live in filesRef.current (a Map) and never cause renders.
+  const filesRef        = useRef<Map<string, BulkFile>>(new Map());
+  const [fileCount, setFileCount]       = useState(0);   // triggers render on count change only
+  const [batches, setBatches]           = useState<BulkBatch[]>([]);
+  const [dragOver, setDragOver]         = useState(false);
+  const [paused, setPaused]             = useState(false);
+  const [showList, setShowList]         = useState(false);
+  const [listRevision, setListRevision] = useState(0);   // bump to force list re-render
+  const [doneCount, setDoneCount]       = useState(0);
+  const [failedCount, setFailedCount]   = useState(0);
   const [uploadedBytes, setUploadedBytes] = useState(0);
-  const [speed,         setSpeed]         = useState(0);
-  const [eta,           setEta]           = useState(0);
-  const [statusMsg,     setStatusMsg]     = useState("");  // "Presigning…" / "Uploading…" / "Confirming…"
+  const [speed, setSpeed]               = useState(0);
+  const [eta, setEta]                   = useState(0);
+  const [currentBatch, setCurrentBatch] = useState(0);
 
-  // ── Refs (never cause re-renders) ─────────────────────────────────────────
-  const pausedRef     = useRef(false);
-  const abortedRef    = useRef(false);
-  const startTimeRef  = useRef(0);
-  const totalBytesRef = useRef(0);
-  const bytesDoneRef  = useRef(0);
-  const speedSamples  = useRef<number[]>([]);
-  const fileInputRef  = useRef<HTMLInputElement>(null);
+  // Derived — read from ref when needed, no state
+  const getFiles     = () => Array.from(filesRef.current.values());
+  const getFileCount = () => filesRef.current.size;
 
-  // Stable ref for onComplete so upload loop never re-creates
-  const onCompleteRef = useRef(onComplete);
-  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+  const pausedRef       = useRef(false);
+  const abortRef        = useRef<AbortController | null>(null);
+  const startTimeRef    = useRef(0);
+  const totalBytesRef   = useRef(0);
+  const fileInputRef    = useRef<HTMLInputElement>(null);
 
-  // ── Reset on open ─────────────────────────────────────────────────────────
+  // Reset on open + install unhandledrejection guard while modal is open
   useEffect(() => {
     if (!open) return;
-    setPhase("select"); setFiles([]); setDragOver(false);
-    setPaused(false); setDoneCount(0); setFailedCount(0);
-    setUploadedBytes(0); setSpeed(0); setEta(0); setStatusMsg("");
-    totalBytesRef.current = 0; bytesDoneRef.current = 0;
-    speedSamples.current = []; abortedRef.current = false;
+    filesRef.current = new Map();
+    setPhase("select"); setFileCount(0); setBatches([]);
+    setDragOver(false); setPaused(false); setShowList(false);
+    setDoneCount(0); setFailedCount(0); setUploadedBytes(0);
+    setSpeed(0); setEta(0); setCurrentBatch(0);
+    totalBytesRef.current = 0;
+
+    // Prevent any stray unhandled promise rejection from crashing the page
+    // while the upload modal is open (Next.js dev overlay or browser navigate-away)
+    const onUnhandled = (e: PromiseRejectionEvent) => {
+      e.preventDefault();
+      console.error("Suppressed unhandled rejection during upload:", e.reason);
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => window.removeEventListener("unhandledrejection", onUnhandled);
   }, [open]);
 
-  // ── File management ───────────────────────────────────────────────────────
-  const addFiles = useCallback((incoming: File[]) => {
-    const valid = incoming.filter(f =>
-      f.type.startsWith("image/") || ACCEPTED_EXT.test(f.name)
-    );
-    if (!valid.length) return;
-    setFiles(prev => {
-      const existing = new Set(prev.map(f => `${f.file.name}_${f.file.size}`));
-      const deduped  = valid.filter(f => !existing.has(`${f.name}_${f.size}`));
-      const slots    = planLimit - currentCount - prev.length;
-      const accepted = deduped.slice(0, Math.max(0, slots));
-      totalBytesRef.current += accepted.reduce((s, f) => s + f.size, 0);
-      return [...prev, ...accepted.map(f => ({ id: uid(), file: f, status: "pending" as FileStatus }))];
-    });
+  // Files live in a Map ref — ZERO React renders during file addition.
+  // Only setFileCount() triggers a render, and it's just updating a number.
+  const addFiles = useCallback((incoming: FileList | File[]) => {
+    const total = incoming.length;
+    if (!total) return;
+
+    const CHUNK  = 100;
+    let   offset = 0;
+
+    const processChunk = () => {
+      const end         = Math.min(offset + CHUNK, total);
+      let   addedBytes  = 0;
+      let   addedCount  = 0;
+      const map         = filesRef.current;
+      const maxSlots    = Math.max(0, (planLimit - currentCount) - map.size);
+      if (maxSlots === 0) return; // quota full, stop
+
+      for (let i = offset; i < end && addedCount < maxSlots; i++) {
+        const f = incoming instanceof FileList ? incoming.item(i) : incoming[i];
+        if (!f) continue;
+        if (!f.type.startsWith("image/") && !ACCEPTED_EXT.test(f.name)) continue;
+
+        const key = `${f.name}_${f.size}`;
+        if (map.has(key)) continue; // deduplicate
+
+        const entry: BulkFile = { id: uid(), file: f, status: "pending" };
+        map.set(key, entry);
+        addedBytes += f.size;
+        addedCount++;
+      }
+      offset = end;
+
+      if (addedCount > 0) {
+        totalBytesRef.current += addedBytes;
+        // Single cheap state update — just a number, no array diff
+        setFileCount(map.size);
+      }
+
+      if (offset < total) setTimeout(processChunk, 0);
+    };
+
+    processChunk();
   }, [planLimit, currentCount]);
 
   const removeFile = (id: string) => {
-    setFiles(prev => {
-      const f = prev.find(x => x.id === id);
-      if (f) totalBytesRef.current -= f.file.size;
-      return prev.filter(x => x.id !== id);
-    });
+    const map = filesRef.current;
+    for (const [key, f] of map.entries()) {
+      if (f.id === id) { map.delete(key); break; }
+    }
+    setFileCount(map.size);
+    setListRevision(r => r + 1);
   };
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); setDragOver(false);
-    addFiles(Array.from(e.dataTransfer.files));
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   }, [addFiles]);
 
-  // ── Speed tracker (called after each file completes) ─────────────────────
-  const trackProgress = useCallback((fileBytes: number) => {
-    bytesDoneRef.current += fileBytes;
-    setUploadedBytes(bytesDoneRef.current);
-    const elapsed = (Date.now() - startTimeRef.current) / 1000;
-    if (elapsed > 0.2) {
-      const inst = bytesDoneRef.current / elapsed;
-      speedSamples.current = [...speedSamples.current.slice(-6), inst];
-      const avg = speedSamples.current.reduce((a, b) => a + b, 0) / speedSamples.current.length;
-      setSpeed(avg);
-      setEta(avg > 0 ? (totalBytesRef.current - bytesDoneRef.current) / avg : 0);
-    }
-  }, []);
-
-  // ── Upload a single file with retry ──────────────────────────────────────
-  const uploadOne = useCallback(async (
-    bf: BulkFile,
-    presignEntry: PresignEntry,
-    onFileDone: (entry: ConfirmEntry) => void,
-    doneRef: { n: number },
-    failedRef: { n: number },
-  ) => {
-    setFiles(prev => prev.map(f => f.id === bf.id ? { ...f, status: "uploading" } : f));
-
-    let attempt = 0, lastErr = "";
-    while (attempt < MAX_RETRIES) {
-      if (abortedRef.current) return;
-      while (pausedRef.current) await new Promise(r => setTimeout(r, 200));
-      try {
-        const res = await fetch(presignEntry.upload_url, {
-          method:  "PUT",
-          headers: { "Content-Type": "application/octet-stream" },
-          body:    bf.file,
-        });
-        if (!res.ok) throw new Error(`PUT ${res.status}`);
-
-        trackProgress(bf.file.size);
-        doneRef.n++;
-        setDoneCount(doneRef.n);
-        setFiles(prev => prev.map(f => f.id === bf.id ? { ...f, status: "done" } : f));
-        onFileDone({
-          original_filename: bf.file.name,
-          stored_filename:   presignEntry.stored_filename,
-          file_size_bytes:   bf.file.size,
-        });
-        return; // success
-      } catch (e) {
-        attempt++;
-        lastErr = e instanceof Error ? e.message : "Upload failed";
-        if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, 600 * attempt));
-      }
-    }
-    // All retries exhausted
-    failedRef.n++;
-    setFailedCount(failedRef.n);
-    setFiles(prev => prev.map(f => f.id === bf.id ? { ...f, status: "failed", error: lastErr } : f));
-  }, [trackProgress]);
-
-  // ── Main upload orchestrator ──────────────────────────────────────────────
   const startUpload = useCallback(async () => {
-    if (!files.length) return;
-    setPhase("uploading"); setPaused(false);
-    pausedRef.current = false; abortedRef.current = false;
-    startTimeRef.current = Date.now();
-    bytesDoneRef.current = 0; speedSamples.current = [];
-
-    const snapshot = [...files]; // stable snapshot — no re-render deps
-    const doneRef   = { n: 0 };
-    const failedRef = { n: 0 };
-    const confirmed: ConfirmEntry[] = [];
-
-    // ── Step 1: Presign all files in chunks of PRESIGN_CHUNK ─────────────
-    setStatusMsg("Generating upload URLs…");
-    const presignMap = new Map<string, PresignEntry>();
-
-    for (let ci = 0; ci < snapshot.length; ci += PRESIGN_CHUNK) {
-      if (abortedRef.current) break;
-      const chunk = snapshot.slice(ci, ci + PRESIGN_CHUNK);
-      try {
-        const res = await fetch(`${apiUrl}/upload/${eventId}/presign`, {
-          method:  "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-          body:    JSON.stringify({ filenames: chunk.map(f => f.file.name) }),
-        });
-        if (!res.ok) throw new Error(`Presign HTTP ${res.status}`);
-        const data = await res.json();
-        for (const p of (data.files as PresignEntry[])) {
-          if (!p.error) presignMap.set(p.original_filename, p);
-        }
-      } catch {
-        // Mark this chunk as failed — presign unavailable
-        chunk.forEach(f => {
-          failedRef.n++;
-          setFailedCount(failedRef.n);
-          setFiles(prev => prev.map(x => x.id === f.id
-            ? { ...x, status: "failed", error: "Presign failed" } : x));
-        });
-      }
-    }
-
-    if (abortedRef.current) { setPhase("done"); onCompleteRef.current(doneRef.n); return; }
-
-    // ── Step 2: Upload files in parallel with CONCURRENCY workers ────────
-    setStatusMsg(`Uploading ${snapshot.length} files…`);
-    const queue = snapshot.filter(f => presignMap.has(f.file.name));
-    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-      while (queue.length > 0 && !abortedRef.current) {
-        const bf = queue.shift()!;
-        const entry = presignMap.get(bf.file.name)!;
-        await uploadOne(bf, entry, (c) => confirmed.push(c), doneRef, failedRef);
-      }
-    });
-    await Promise.all(workers);
-
-    if (abortedRef.current) { setPhase("done"); onCompleteRef.current(doneRef.n); return; }
-
-    // ── Step 3: Confirm all uploads in chunks of CONFIRM_CHUNK ───────────
-    if (confirmed.length > 0) {
-      setStatusMsg("Registering uploads…");
-      for (let ci = 0; ci < confirmed.length; ci += CONFIRM_CHUNK) {
-        if (abortedRef.current) break;
-        const chunk = confirmed.slice(ci, ci + CONFIRM_CHUNK);
-        try {
-          await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
-            method:  "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-            body:    JSON.stringify({ uploads: chunk }),
-          });
-        } catch {
-          // Non-fatal: files are in MinIO, can be confirmed on retry
-          console.warn("Confirm chunk failed — files still uploaded to storage");
-        }
-      }
-    }
-
-    setStatusMsg("");
-    setPhase("done");
-    onCompleteRef.current(doneRef.n);
-  }, [files, apiUrl, eventId, authToken, uploadOne]);
-
-  // ── Retry only failed files ───────────────────────────────────────────────
-  const retryFailed = useCallback(async () => {
-    const failedFiles = files.filter(f => f.status === "failed");
-    if (!failedFiles.length) return;
-    pausedRef.current = false; abortedRef.current = false;
-    setPaused(false); setPhase("uploading");
+    if (!filesRef.current.size) return;
+    setPhase("uploading"); setPaused(false); pausedRef.current = false;
     startTimeRef.current = Date.now();
 
-    const doneRef   = { n: doneCount };
-    const failedRef = { n: 0 };
-    const confirmed: ConfirmEntry[] = [];
+    // Hoisted so the outer catch block can reference them safely
+    const allFiles   = getFiles();
+    const batchCount = Math.ceil(allFiles.length / BATCH_SIZE);
+    const batchList: BulkBatch[] = Array.from({ length: batchCount }, (_, i) => ({
+      index: i,
+      fileIds: allFiles.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE).map(f => f.id),
+      status: "pending",
+    }));
+    let done = 0;
 
-    setStatusMsg("Re-generating URLs for failed files…");
-    const presignMap = new Map<string, PresignEntry>();
-    for (let ci = 0; ci < failedFiles.length; ci += PRESIGN_CHUNK) {
-      const chunk = failedFiles.slice(ci, ci + PRESIGN_CHUNK);
-      try {
-        const res = await fetch(`${apiUrl}/upload/${eventId}/presign`, {
-          method:  "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-          body:    JSON.stringify({ filenames: chunk.map(f => f.file.name) }),
+    try {  // ── outer guard — catches any unexpected crash, never lets the page die
+
+    setBatches(batchList);
+
+    let failed = 0, bytesDone = 0;
+    let speedSamples: number[] = [];
+
+    const updFile  = (id: string, patch: Partial<BulkFile>) => {
+      const map = filesRef.current;
+      for (const [key, f] of map.entries()) {
+        if (f.id === id) { map.set(key, { ...f, ...patch }); break; }
+      }
+      // Only bump listRevision if list is visible — avoids useless renders
+      if (showList) setListRevision(r => r + 1);
+    };
+    const updBatch = (i: number, patch: Partial<BulkBatch>) =>
+      setBatches(prev => prev.map(b => b.index === i ? { ...b, ...patch } : b));
+
+    // ── Step 1: Get presigned PUT URLs for all files ───────────────────────
+    let presignedMap = new Map<string, { stored_filename: string; upload_url: string }>();
+    let usePresign = true;
+
+    try {
+      const presignRes = await fetch(`${apiUrl}/upload/${eventId}/presign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ filenames: getFiles().map(f => f.file.name) }),
+      });
+      if (!presignRes.ok) throw new Error(`Presign HTTP ${presignRes.status}`);
+      const presignData = await presignRes.json();
+      for (const pf of presignData.files) {
+        if (!pf.error) presignedMap.set(pf.original_filename, pf);
+      }
+    } catch {
+      usePresign = false; // fall back to legacy multipart
+    }
+
+    // ── Step 2: Upload files ───────────────────────────────────────────────
+    const confirmedUploads: Array<{ original_filename: string; stored_filename: string; file_size_bytes: number }> = [];
+
+    for (let bi = 0; bi < batchList.length; bi++) {
+      setCurrentBatch(bi);
+      updBatch(bi, { status: "uploading" });
+
+      const batch      = batchList[bi];
+      const fileIdSet  = new Set(batch.fileIds);
+      const batchFiles = getFiles().filter(f => fileIdSet.has(f.id));
+
+      if (usePresign) {
+        // ── Direct PUT to MinIO — PARALLEL (CONCURRENCY files at once) ────
+        const uploadOne = async (bulkFile: BulkFile) => {
+          while (pausedRef.current) await new Promise(r => setTimeout(r, 250));
+
+          const presigned = presignedMap.get(bulkFile.file.name);
+          if (!presigned) {
+            updFile(bulkFile.id, { status: "failed", error: "No presigned URL" });
+            failed++; setFailedCount(failed);
+            return;
+          }
+
+          updFile(bulkFile.id, { status: "uploading" });
+          let success = false, attempt = 0, lastErr = "";
+
+          while (attempt <= MAX_RETRIES && !success) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
+            try {
+              const ctrl = new AbortController();
+              // Store array of controllers so cancel-all still works
+              abortRef.current = ctrl;
+              // Content-Type MUST match what was signed in the presigned URL
+              // Backend signs with application/octet-stream to work for all image types
+              const putRes = await fetch(presigned.upload_url, {
+                method: "PUT",
+                headers: { "Content-Type": "application/octet-stream" },
+                body: bulkFile.file,
+                signal: ctrl.signal,
+              });
+              if (!putRes.ok) throw new Error(`PUT failed: HTTP ${putRes.status}`);
+
+              bytesDone += bulkFile.file.size;
+              setUploadedBytes(bytesDone);
+              const elapsed = (Date.now() - startTimeRef.current) / 1000;
+              if (elapsed > 0.1) {
+                const inst = bytesDone / elapsed;
+                speedSamples = [...speedSamples.slice(-4), inst];
+                const avg = speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length;
+                setSpeed(avg);
+                setEta(avg > 0 ? (totalBytesRef.current - bytesDone) / avg : 0);
+              }
+              confirmedUploads.push({
+                original_filename: bulkFile.file.name,
+                stored_filename:   presigned.stored_filename,
+                file_size_bytes:   bulkFile.file.size,
+              });
+              done++; setDoneCount(done);
+              updFile(bulkFile.id, { status: "done" });
+              success = true;
+            } catch (e: unknown) {
+              attempt++;
+              lastErr = e instanceof Error ? e.message : "Unknown error";
+              if (e instanceof Error && e.name === "AbortError") break;
+            }
+          }
+          if (!success) {
+            failed++; setFailedCount(failed);
+            updFile(bulkFile.id, { status: "failed", error: lastErr });
+          }
+        };
+
+        // Run CONCURRENCY workers pulling from a shared queue
+        const queue = [...batchFiles];
+        const workers = Array.from({ length: Math.min(CONCURRENCY, batchFiles.length) }, async () => {
+          while (queue.length > 0) {
+            const file = queue.shift()!;
+            await uploadOne(file);
+          }
         });
-        if (res.ok) {
-          const data = await res.json();
-          for (const p of (data.files as PresignEntry[])) {
-            if (!p.error) presignMap.set(p.original_filename, p);
+        await Promise.all(workers);
+
+      } else {
+        // ── Legacy multipart fallback ──────────────────────────────────────
+        batchFiles.forEach(f => updFile(f.id, { status: "uploading" }));
+        let success = false, attempt = 0, lastErr = "";
+        while (attempt <= MAX_RETRIES && !success) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 800 * attempt));
+          try {
+            const ctrl = new AbortController();
+            abortRef.current = ctrl;
+            const form = new FormData();
+            batchFiles.forEach(f => form.append("files", f.file));
+            const res = await fetch(`${apiUrl}/upload/${eventId}`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${authToken}` },
+              body: form,
+              signal: ctrl.signal,
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({ detail: "Upload failed" }));
+              throw new Error(err.detail ?? `HTTP ${res.status}`);
+            }
+            bytesDone += batchFiles.reduce((s, f) => s + f.file.size, 0);
+            setUploadedBytes(bytesDone);
+            done += batchFiles.length; setDoneCount(done);
+            updBatch(bi, { status: "done" });
+            batchFiles.forEach(f => updFile(f.id, { status: "done" }));
+            success = true;
+          } catch (e: unknown) {
+            attempt++;
+            lastErr = e instanceof Error ? e.message : "Unknown error";
+            if (e instanceof Error && e.name === "AbortError") break;
           }
         }
-      } catch { /* skip chunk */ }
+        if (!success) {
+          failed += batchFiles.length; setFailedCount(failed);
+          updBatch(bi, { status: "failed", error: lastErr });
+          batchFiles.forEach(f => updFile(f.id, { status: "failed", error: lastErr }));
+          continue;
+        }
+      }
+
+      updBatch(bi, { status: "done" });
     }
 
-    setStatusMsg(`Retrying ${failedFiles.length} failed files…`);
-    const queue = failedFiles.filter(f => presignMap.has(f.file.name));
-    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-      while (queue.length > 0) {
-        const bf = queue.shift()!;
-        const entry = presignMap.get(bf.file.name)!;
-        await uploadOne(bf, entry, (c) => confirmed.push(c), doneRef, failedRef);
-      }
-    });
-    await Promise.all(workers);
-
-    if (confirmed.length > 0) {
-      for (let ci = 0; ci < confirmed.length; ci += CONFIRM_CHUNK) {
+    // ── Step 3: Confirm uploads with backend in chunks of 200 ──────────────
+    // Sending all 2000 at once can hit Cloudflare's request body limit.
+    if (usePresign && confirmedUploads.length > 0) {
+      const CONFIRM_CHUNK = 200;
+      for (let ci = 0; ci < confirmedUploads.length; ci += CONFIRM_CHUNK) {
+        const chunk = confirmedUploads.slice(ci, ci + CONFIRM_CHUNK);
         try {
           await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
-            method:  "POST",
+            method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-            body:    JSON.stringify({ uploads: confirmed.slice(ci, ci + CONFIRM_CHUNK) }),
+            body: JSON.stringify({ uploads: chunk }),
           });
-        } catch { /* non-fatal */ }
+        } catch (e) {
+          console.error(`Confirm chunk ${ci}–${ci + chunk.length} failed:`, e);
+          // Non-fatal — photos are already in MinIO, can be retried later
+        }
       }
     }
 
-    setDoneCount(doneRef.n);
-    setFailedCount(failedRef.n);
-    setStatusMsg("");
-    if (failedRef.n === 0) { setPhase("done"); onCompleteRef.current(doneRef.n); }
-    else setPhase("done");
-  }, [files, doneCount, apiUrl, eventId, authToken, uploadOne]);
+    setPhase("done");
+    onComplete(done);
+
+    } catch (fatalErr: unknown) {
+      // Outer safety net — something completely unexpected happened.
+      // Show error state instead of letting the page crash/refresh.
+      const msg = fatalErr instanceof Error ? fatalErr.message : "Unexpected upload error";
+      console.error("startUpload fatal error:", fatalErr);
+      setPhase("done");  // get out of uploading state
+      setFailedCount(prev => prev + (filesRef.current.size - done));
+      onComplete(done);
+    }
+  }, [apiUrl, eventId, authToken, onComplete, showList]);
+
+  const retryFailed = useCallback(async () => {
+    const failed = batches.filter(b => b.status === "failed");
+    if (!failed.length) return;
+    pausedRef.current = false; setPaused(false);
+    try {
+
+    const updFile  = (id: string, patch: Partial<BulkFile>) => {
+      const map = filesRef.current;
+      for (const [key, f] of map.entries()) {
+        if (f.id === id) { map.set(key, { ...f, ...patch }); break; }
+      }
+      // Only bump listRevision if list is visible — avoids useless renders
+      if (showList) setListRevision(r => r + 1);
+    };
+    const updBatch = (i: number, patch: Partial<BulkBatch>) =>
+      setBatches(prev => prev.map(b => b.index === i ? { ...b, ...patch } : b));
+
+    let newDone = doneCount, newFailed = failedCount;
+
+    for (const batch of failed) {
+      const fileIdSet  = new Set(batch.fileIds);
+      const batchFiles = getFiles().filter(f => fileIdSet.has(f.id));
+      updBatch(batch.index, { status: "uploading", error: undefined });
+      batchFiles.forEach(f => updFile(f.id, { status: "uploading", error: undefined }));
+      try {
+        const form = new FormData();
+        batchFiles.forEach(f => form.append("files", f.file));
+        const res = await fetch(`${apiUrl}/upload/${eventId}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+          body: form,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: "Upload failed" }));
+          throw new Error(err.detail ?? `HTTP ${res.status}`);
+        }
+        newDone += batchFiles.length; newFailed -= batchFiles.length;
+        updBatch(batch.index, { status: "done" });
+        batchFiles.forEach(f => updFile(f.id, { status: "done" }));
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Unknown error";
+        updBatch(batch.index, { status: "failed", error: msg });
+        batchFiles.forEach(f => updFile(f.id, { status: "failed", error: msg }));
+      }
+    }
+    setDoneCount(newDone); setFailedCount(newFailed);
+    if (newFailed === 0) { setPhase("done"); onComplete(newDone); }
+    } catch (fatalErr: unknown) {
+      console.error("retryFailed fatal error:", fatalErr);
+    }
+  }, [batches, apiUrl, eventId, authToken, doneCount, failedCount, onComplete, showList]);
 
   const togglePause = () => {
     if (paused) { pausedRef.current = false; setPaused(false); }
@@ -455,17 +549,18 @@ function BulkUploadModal({
   const handleClose = () => {
     if (phase === "uploading") {
       if (!confirm("Cancel the upload in progress?")) return;
-      abortedRef.current = true;
-      pausedRef.current  = false;
+      abortRef.current?.abort();
+      pausedRef.current = false;
     }
     onClose();
   };
 
-  const totalFiles  = files.length;
-  const progressPct = totalFiles > 0 ? Math.round((doneCount / totalFiles) * 100) : 0;
-  const totalSizeMB = (totalBytesRef.current / 1024 / 1024).toFixed(1);
-  const uploadedMB  = (uploadedBytes / 1024 / 1024).toFixed(1);
-  const slotsLeft   = planLimit - currentCount;
+  const totalFiles   = fileCount;  // from ref-backed counter, never array length
+  const totalBatches = batches.length || Math.ceil(totalFiles / BATCH_SIZE);
+  const progressPct  = totalFiles > 0 ? Math.round((doneCount / totalFiles) * 100) : 0;
+  const totalSizeMB  = (totalBytesRef.current / 1024 / 1024).toFixed(1);
+  const uploadedMB   = (uploadedBytes / 1024 / 1024).toFixed(1);
+  const slotsLeft    = planLimit - currentCount;
 
   if (!open) return null;
 
@@ -548,21 +643,21 @@ function BulkUploadModal({
                     <div className="absolute top-3 right-3 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold"
                       style={{ background: "rgba(99,102,241,0.2)", color: "#818cf8" }}>
                       <FileImage size={10} />
-                      {totalFiles.toLocaleString()} files · {CONCURRENCY} parallel
+                      {totalFiles.toLocaleString()} files · {Math.ceil(totalFiles / BATCH_SIZE)} batches
                     </div>
                   )}
                   <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp"
                     className="hidden"
-                    onChange={e => { if (e.target.files) addFiles(Array.from(e.target.files)); e.target.value = ""; }} />
+                    onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }} />
                 </div>
 
                 {/* Stats */}
                 {totalFiles > 0 && (
                   <div className="grid grid-cols-3 gap-3">
                     {[
-                      { label: "Files",   value: totalFiles.toLocaleString(),  icon: FileImage },
-                      { label: "Workers", value: `${CONCURRENCY} parallel`,    icon: Zap       },
-                      { label: "Size",    value: `${totalSizeMB} MB`,          icon: Upload    },
+                      { label: "Files",   value: totalFiles.toLocaleString(),              icon: FileImage },
+                      { label: "Batches", value: Math.ceil(totalFiles / BATCH_SIZE).toString(), icon: Zap     },
+                      { label: "Size",    value: `${totalSizeMB} MB`,                       icon: Upload   },
                     ].map(({ label, value, icon: Icon }) => (
                       <div key={label} className="rounded-xl p-3"
                         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
@@ -582,29 +677,48 @@ function BulkUploadModal({
                     style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.14)" }}>
                     <Zap size={13} className="text-indigo-400 mt-0.5 shrink-0" />
                     <div className="text-zinc-400 leading-relaxed">
-                      Files upload <strong className="text-zinc-300">{CONCURRENCY} at a time</strong> directly
-                      to storage. Each file is retried up to {MAX_RETRIES}× on failure. You can pause at any time.
+                      Files upload in <strong className="text-zinc-300">{Math.ceil(totalFiles / BATCH_SIZE)} batches of {BATCH_SIZE}</strong>.
+                      Failed batches can be retried individually. You can pause at any time.
                     </div>
                   </div>
                 )}
 
-                {/* File list preview */}
-                {totalFiles > 0 && (
-                  <div className="rounded-xl overflow-hidden max-h-48 overflow-y-auto"
-                    style={{ border: "1px solid rgba(255,255,255,0.06)" }}>
-                    {files.map(f => (
-                      <div key={f.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02] group"
-                        style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                        <FileImage size={11} className="text-zinc-600 shrink-0" />
-                        <span className="text-[11px] text-zinc-400 truncate flex-1">{f.file.name}</span>
-                        <span className="text-[10px] text-zinc-600">{fmtBytes(f.file.size)}</span>
-                        <button onClick={() => removeFile(f.id)}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-600 hover:text-red-400">
-                          <Trash2 size={11} />
-                        </button>
+                {/* File list preview — hidden when > 200 files to avoid browser freeze */}
+                {fileCount > 0 && fileCount <= 200 && (
+                  <>
+                    <button onClick={() => setShowList(v => !v)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-[12px] font-medium text-zinc-400 hover:text-zinc-200 transition-colors"
+                      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                      <span>Preview file list ({totalFiles})</span>
+                      {showList ? <ChevronDown size={13} className="rotate-180" /> : <ChevronDown size={13} />}
+                    </button>
+                    {showList && (() => {
+                      const visibleFiles = getFiles().slice(0, 50);
+                      return (
+                      <div className="rounded-xl overflow-hidden max-h-52 overflow-y-auto"
+                        style={{ border: "1px solid rgba(255,255,255,0.06)" }}>
+                        {visibleFiles.map(f => (
+                          <div key={f.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02] group"
+                            style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                            <FileImage size={11} className="text-zinc-600 shrink-0" />
+                            <span className="text-[11px] text-zinc-400 truncate flex-1">{f.file.name}</span>
+                            <span className="text-[10px] text-zinc-600">{fmtBytes(f.file.size)}</span>
+                            <button onClick={() => removeFile(f.id)}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-600 hover:text-red-400">
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        ))}
+                        {fileCount > 50 && (
+                          <div className="px-4 py-2.5 text-[11px] text-zinc-500 text-center"
+                            style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                            + {(fileCount - 50).toLocaleString()} more files not shown
+                          </div>
+                        )}
                       </div>
-                    ))}
-                  </div>
+                      );
+                    })()}
+                  </>
                 )}
               </div>
             )}
@@ -612,15 +726,7 @@ function BulkUploadModal({
             {/* ── UPLOADING phase ── */}
             {phase === "uploading" && (
               <div className="p-6 flex flex-col gap-5">
-                {/* Status message */}
-                {statusMsg && (
-                  <div className="flex items-center gap-2 text-[12px] text-indigo-300">
-                    <Loader2 size={12} className="animate-spin shrink-0" />
-                    {statusMsg}
-                  </div>
-                )}
-
-                {/* Main progress bar */}
+                {/* Main bar */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-semibold text-zinc-200">
@@ -638,7 +744,7 @@ function BulkUploadModal({
                       }}
                       initial={{ width: 0 }}
                       animate={{ width: `${progressPct}%` }}
-                      transition={{ ease: "easeOut", duration: 0.3 }} />
+                      transition={{ ease: "easeOut", duration: 0.4 }} />
                   </div>
                   <div className="flex items-center justify-between mt-2 text-[11px] text-zinc-500">
                     <span>{doneCount.toLocaleString()} / {totalFiles.toLocaleString()} files</span>
@@ -646,12 +752,12 @@ function BulkUploadModal({
                   </div>
                 </div>
 
-                {/* Speed / ETA / Parallel */}
+                {/* Speed / ETA / Batch */}
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { label: "Speed",    value: paused ? "—" : fmtSpeed(speed), color: "#818cf8", icon: Zap    },
-                    { label: "ETA",      value: paused ? "—" : fmtETA(eta),     color: "#34d399", icon: Clock  },
-                    { label: "Parallel", value: `${CONCURRENCY} workers`,       color: "#f59e0b", icon: Upload },
+                    { label: "Speed", value: paused ? "—" : fmtSpeed(speed),          color: "#818cf8", icon: Zap    },
+                    { label: "ETA",   value: paused ? "—" : fmtETA(eta),              color: "#34d399", icon: Clock  },
+                    { label: "Batch", value: `${currentBatch + 1} / ${totalBatches}`, color: "#f59e0b", icon: Upload },
                   ].map(({ label, value, color, icon: Icon }) => (
                     <div key={label} className="rounded-xl p-3"
                       style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
@@ -664,24 +770,29 @@ function BulkUploadModal({
                   ))}
                 </div>
 
-                {/* Per-file live status */}
+                {/* Batch list */}
                 <div>
-                  <p className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-2">File Progress</p>
+                  <p className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-2">Batch Progress</p>
                   <div className="rounded-xl overflow-hidden max-h-52 overflow-y-auto"
                     style={{ border: "1px solid rgba(255,255,255,0.06)" }}>
-                    {files.map(f => (
-                      <div key={f.id} className="flex items-center gap-3 px-4 py-2"
+                    {batches.map(b => (
+                      <div key={b.index} className="flex items-center gap-3 px-4 py-2.5"
                         style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                        <div className="w-4 h-4 shrink-0 flex items-center justify-center">
-                          {f.status === "done"      && <CheckCircle2 size={13} className="text-emerald-400" />}
-                          {f.status === "failed"    && <XCircle      size={13} className="text-red-400"     />}
-                          {f.status === "uploading" && <Loader2      size={13} className="text-indigo-400 animate-spin" />}
-                          {f.status === "pending"   && <div className="w-2 h-2 rounded-full bg-zinc-700" />}
+                        <div className="w-5 h-5 shrink-0 flex items-center justify-center">
+                          {b.status === "done"      && <CheckCircle2 size={14} className="text-emerald-400" />}
+                          {b.status === "failed"    && <XCircle      size={14} className="text-red-400"     />}
+                          {b.status === "uploading" && <Loader2      size={14} className="text-indigo-400 animate-spin" />}
+                          {b.status === "pending"   && <div className="w-2 h-2 rounded-full bg-zinc-700" />}
                         </div>
-                        <span className="text-[11px] text-zinc-400 truncate flex-1">{f.file.name}</span>
-                        <span className="text-[10px] text-zinc-600">{fmtBytes(f.file.size)}</span>
-                        {f.status === "failed" && f.error && (
-                          <span className="text-[10px] text-red-400 truncate max-w-[120px]" title={f.error}>{f.error}</span>
+                        <span className="text-[12px] text-zinc-400 flex-1">
+                          Batch {b.index + 1}
+                          <span className="text-zinc-600 ml-2">({b.fileIds.length} files)</span>
+                        </span>
+                        {b.status === "failed"  && b.error  && (
+                          <span className="text-[10px] text-red-400 truncate max-w-[130px]" title={b.error}>{b.error}</span>
+                        )}
+                        {b.status === "done" && (
+                          <span className="text-[10px] text-emerald-500 font-medium">Done</span>
                         )}
                       </div>
                     ))}
@@ -692,7 +803,7 @@ function BulkUploadModal({
                   <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl text-[12px]"
                     style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
                     <AlertTriangle size={13} className="text-red-400 shrink-0" />
-                    <span className="text-red-300">{failedCount} files failed — will retry automatically up to {MAX_RETRIES}×.</span>
+                    <span className="text-red-300">{failedCount} files failed — you can retry after upload completes.</span>
                   </div>
                 )}
               </div>

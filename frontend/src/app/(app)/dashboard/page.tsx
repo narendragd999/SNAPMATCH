@@ -8,7 +8,7 @@ import {
   PlusCircle, Rocket, AlertTriangle, Crown, TrendingUp, Zap,
   Eye, Trash2, Settings, Share2, CheckCircle2, Loader2, X,
   AlertCircle, FolderOpen, Images, Clock, ChevronRight,
-  RefreshCw, Gift,
+  RefreshCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
@@ -25,7 +25,6 @@ interface Stats {
   max_events:           number;
   max_images_per_event: number;
   unprocessed_photos?:  number;
-  free_event_available?: boolean;  // ← ADD THIS
 }
 
 interface EventItem {
@@ -203,14 +202,9 @@ export default function DashboardPage() {
     const token = localStorage.getItem("token");
     if (!token) { router.replace("/login"); return; }
 
-    Promise.all([
-      API.get("/events/dashboard/stats"),
-      API.get("/billing/user-status"),
-    ])
-      .then(([statsRes, billingRes]) => {
-        setStats({ ...statsRes.data, ...billingRes.data });
-      })
-      .catch(() => router.replace("/login"))
+    API.get("/events/dashboard/stats")
+      .then(res  => setStats(res.data))
+      .catch(()  => router.replace("/login"))
       .finally(() => setLoading(false));
   }, [router]);
 

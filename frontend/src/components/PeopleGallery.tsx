@@ -67,7 +67,7 @@ interface Props {
   authH: () => { Authorization: string };
   showToast: (msg: string) => void;
   onLoadMore: () => void;
-  sentinelRef: React.RefObject<HTMLDivElement | null>;
+  sentinelRef: React.RefObject<HTMLDivElement>;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
