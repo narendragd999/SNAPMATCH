@@ -1,13 +1,22 @@
 """
 app/api/bulk_upload_routes.py
 
-Bulk photo upload (batched, with progress tracking).
-Replaces direct disk writes with storage_service calls.
-All existing business logic (plan limits, slot counting, etc.) preserved.
+Bulk photo upload — owner-initiated, batched, with progress tracking.
+Uses storage_service for all file writes (no direct disk access).
+
+All existing business logic preserved:
+  - Plan-level slot cap (PLANS["max_images_per_event"])
+  - Per-batch size guard (MAX_FILES_PER_BATCH = 50)
+  - File type + size validation
+  - Bulk DB insert with event.image_count update
+
+NOTE: For uploads > 1 000 files prefer the direct-to-MinIO presign/confirm
+flow in upload_routes.py.  This endpoint remains available for programmatic
+bulk ingestion where the caller controls batching.
 """
 import os
 import uuid
-import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -21,12 +30,16 @@ from app.core.dependencies import get_current_user
 from app.core.plans import PLANS
 from app.services import storage_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
 
-ACCEPTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
-MAX_FILE_SIZE_MB    = int(os.getenv("MAX_PHOTO_SIZE_MB", "20"))
-MAX_FILES_PER_BATCH = 50
+ACCEPTED_EXTENSIONS  = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+MAX_FILE_SIZE_MB      = int(os.getenv("MAX_PHOTO_SIZE_MB", "20"))
+MAX_FILES_PER_BATCH   = 50
 
+
+# ─── DB dependency ────────────────────────────────────────────────────────────
 
 def get_db():
     db = SessionLocal()
@@ -40,12 +53,7 @@ def _ext(filename: str) -> str:
     return Path(filename).suffix.lower()
 
 
-def _sync_read(file: UploadFile) -> bytes:
-    """Sync wrapper — UploadFile.read() must be awaited in async context."""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(file.read())
-
+# ─── Endpoint ─────────────────────────────────────────────────────────────────
 
 @router.post("/{event_id}")
 async def bulk_upload(
@@ -68,48 +76,59 @@ async def bulk_upload(
 
     # ── 3. Batch size guard ───────────────────────────────────────────────────
     if len(files) > MAX_FILES_PER_BATCH:
-        raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_BATCH} files per request")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Max {MAX_FILES_PER_BATCH} files per request.",
+        )
 
     # ── 4. Process files ──────────────────────────────────────────────────────
-    photo_records  = []
-    result_files   = []
-    uploaded_count = 0
-    skipped_count  = 0
+    photo_records:  list[Photo] = []
+    result_files:   list[dict]  = []
+    uploaded_count  = 0
+    skipped_count   = 0
 
     for idx, file in enumerate(files):
+        # Stop processing once the plan limit is consumed
         if uploaded_count >= slots_left:
             skipped_count += len(files) - idx
-            result_files.append({
-                "original_filename": file.filename,
-                "stored_filename":   None,
-                "status":            "skipped",
-                "reason":            "plan_limit_reached",
-            })
-            continue
+            # Mark remaining files as skipped without reading them
+            for remaining_file in files[idx:]:
+                result_files.append({
+                    "original_filename": remaining_file.filename,
+                    "stored_filename":   None,
+                    "status":            "skipped",
+                    "reason":            "plan_limit_reached",
+                })
+            break
 
-        if _ext(file.filename or "") not in ACCEPTED_EXTENSIONS:
+        original_name = file.filename or ""
+        ext           = _ext(original_name)
+
+        # ── Type check ────────────────────────────────────────────────────────
+        if ext not in ACCEPTED_EXTENSIONS:
             result_files.append({
-                "original_filename": file.filename,
+                "original_filename": original_name,
                 "stored_filename":   None,
                 "status":            "failed",
                 "reason":            "invalid_file_type",
             })
             continue
 
-        content = await file.read()
+        # ── Read + size check ─────────────────────────────────────────────────
+        content   = await file.read()
         file_size = len(content)
 
         if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
             result_files.append({
-                "original_filename": file.filename,
+                "original_filename": original_name,
                 "stored_filename":   None,
                 "status":            "failed",
                 "reason":            f"file_too_large_max_{MAX_FILE_SIZE_MB}mb",
             })
             continue
 
-        # Store raw file
-        raw_filename = f"raw_{uuid.uuid4().hex}{_ext(file.filename or '.jpg')}"
+        # ── Store in MinIO via storage_service ────────────────────────────────
+        raw_filename = f"raw_{uuid.uuid4().hex}{ext}"
         try:
             storage_service.upload_file(
                 data=content,
@@ -117,25 +136,20 @@ async def bulk_upload(
                 filename=raw_filename,
                 content_type=file.content_type or "image/jpeg",
             )
-        except Exception as e:
+        except Exception as exc:
+            logger.error("bulk_upload storage error for %s: %s", original_name, exc)
             result_files.append({
-                "original_filename": file.filename,
+                "original_filename": original_name,
                 "stored_filename":   None,
                 "status":            "failed",
-                "reason":            f"storage_error: {e}",
+                "reason":            f"storage_error: {exc}",
             })
             continue
 
-    #After the loop that approves all photos, add: for incremental    
-    guest_count = sum(1 for p in approved_photos if p.uploaded_by == "guest")
-    if guest_count > 0:
-        event = db.query(Event).filter(Event.id == event_id).first()
-        if event:
-            event.guest_uploads_used = (event.guest_uploads_used or 0) + guest_count    
-
+        # ── Queue Photo record for bulk insert ────────────────────────────────
         photo_records.append(Photo(
             event_id=event_id,
-            original_filename=file.filename,
+            original_filename=original_name,
             stored_filename=raw_filename,
             file_size_bytes=file_size,
             uploaded_by="owner",
@@ -143,7 +157,7 @@ async def bulk_upload(
             status="uploaded",
         ))
         result_files.append({
-            "original_filename": file.filename,
+            "original_filename": original_name,
             "stored_filename":   raw_filename,
             "status":            "ok",
             "reason":            None,
@@ -155,11 +169,20 @@ async def bulk_upload(
         db.add_all(photo_records)
         event.image_count = (event.image_count or 0) + len(photo_records)
         db.commit()
+        db.refresh(event)
+
+    # ── 6. Increment guest_uploads_used for any guest-sourced photos ──────────
+    # (bulk_upload is owner-only so this block stays 0, but the hook is here
+    #  in case the endpoint is ever extended to accept guest uploads.)
+    guest_count = sum(1 for p in photo_records if p.uploaded_by == "guest")
+    if guest_count > 0:
+        event.guest_uploads_used = (event.guest_uploads_used or 0) + guest_count
+        db.commit()
 
     return {
-        "uploaded":    uploaded_count,
-        "skipped":     skipped_count,
-        "failed":      sum(1 for r in result_files if r["status"] == "failed"),
-        "results":     result_files,
+        "uploaded":          uploaded_count,
+        "skipped":           skipped_count,
+        "failed":            sum(1 for r in result_files if r["status"] == "failed"),
+        "results":           result_files,
         "event_image_count": event.image_count,
     }

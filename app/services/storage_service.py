@@ -174,6 +174,45 @@ def thumbnail_exists(event_id: int, filename: str) -> bool:
     return _exists(key)
 
 
+def generate_presigned_put_url(
+    event_id: int,
+    filename: str,
+    content_type: str = "application/octet-stream",
+    expires_in: int = 3600,
+) -> str:
+    """
+    Return a presigned PUT URL so the browser can upload a file directly
+    to MinIO / R2 without routing bytes through FastAPI.
+
+    The URL is signed with ContentType=application/octet-stream.
+    The browser MUST send that exact Content-Type header or MinIO/S3 will
+    return a SignatureDoesNotMatch 403.
+
+    Local backend: raises NotImplementedError — presigned uploads make no
+    sense against a local filesystem. upload_routes /presign endpoint catches
+    this and returns an error entry for the file; the frontend falls back to
+    legacy multipart automatically, so local dev continues to work unchanged.
+    """
+    if STORAGE_BACKEND == "local":
+        raise NotImplementedError(
+            "Presigned PUT URLs are not supported for STORAGE_BACKEND=local. "
+            "The frontend will fall back to legacy multipart upload automatically."
+        )
+
+    key = _key(event_id, filename)
+    url = _get_s3().generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket":      MINIO_BUCKET,
+            "Key":         key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=expires_in,
+        HttpMethod="PUT",
+    )
+    return url
+
+
 # ── Public URL ────────────────────────────────────────────────────────────────
 
 def get_file_url(event_id: int, filename: str) -> str:
