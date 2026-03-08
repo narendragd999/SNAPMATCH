@@ -291,6 +291,36 @@ interface BulkUploadModalProps {
     if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   }, [addFiles]);
 
+  const pickFolder = useCallback(async () => {
+    // Modern File System Access API — no browser file count limit
+    if ('showDirectoryPicker' in window) {
+      try {
+        const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
+        const files: File[] = [];
+        const walkDir = async (handle: any) => {
+          for await (const entry of handle.values()) {
+            if (entry.kind === 'file') {
+              const file = await entry.getFile();
+              if (ACCEPTED_EXT.test(file.name) || file.type.startsWith('image/')) {
+                files.push(file);
+              }
+            } else if (entry.kind === 'directory') {
+              await walkDir(entry);
+            }
+          }
+        };
+        await walkDir(dirHandle);
+        if (files.length) addFiles(files);
+      } catch (e: any) {
+        // User cancelled — do nothing. Any other error → fall back.
+        if (e.name !== 'AbortError') folderInputRef.current?.click();
+      }
+    } else {
+      // Firefox / Safari fallback
+      folderInputRef.current?.click();
+    }
+  }, [addFiles]);
+
   // ── Core helpers ───────────────────────────────────────────────────────────
   const updFile = useCallback((id: string, patch: Partial<BulkFile>, repaint = false) => {
     const map = filesRef.current;
@@ -304,7 +334,7 @@ interface BulkUploadModalProps {
     setBatches(prev => prev.map(b => b.index === i ? { ...b, ...patch } : b)), []);
 
   /** Presign a chunk of filenames → Map<filename, PresignedSlot> */
-  const presignChunk = useCallback(async (filenames: string[]): Promise<Map<string, PresignedSlot>> => {
+  const presignChunk = useCallback(async (filenames: string[]): Promise<(PresignedSlot | null)[]> => {
     const res = await fetch(`${apiUrl}/upload/${eventId}/presign`, {
       method:  "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
@@ -316,7 +346,10 @@ interface BulkUploadModalProps {
     for (const pf of data.files as Array<{ original_filename: string; stored_filename: string; upload_url: string; error: string | null }>) {
       if (!pf.error) map.set(pf.original_filename, { stored_filename: pf.stored_filename, upload_url: pf.upload_url });
     }
-    return map;
+    // Return array in same order as input filenames — null for errored/quota entries
+    return data.files.map((pf: { stored_filename: string; upload_url: string; error: string | null }) =>
+      pf.error ? null : { stored_filename: pf.stored_filename, upload_url: pf.upload_url }
+    ) as (PresignedSlot | null)[];
   }, [apiUrl, eventId, authToken]);
 
   /** PUT one file directly to MinIO. Returns true on success. */
@@ -390,9 +423,7 @@ interface BulkUploadModalProps {
     let presignedMap = new Map<string, PresignedSlot>();
     let usePresign   = true;
     try {
-      // Build id→filename map so we can look up by unique ID not filename
-      const idToFile = new Map(allFiles.map(f => [f.id, f]));
-      const allNames = allFiles.map(f => f.file.name);
+      // Build id→filename map so we can look up by unique ID not filename      
       for (let ci = 0; ci < allNames.length; ci += PRESIGN_CHUNK) {
         const chunk     = allFiles.slice(ci, ci + PRESIGN_CHUNK);
         const names     = chunk.map(f => f.file.name);
@@ -659,7 +690,7 @@ interface BulkUploadModalProps {
                   onDragOver={e => { e.preventDefault(); setDragOver(true); }}
                   onDragLeave={() => setDragOver(false)}
                   onDrop={onDrop}
-                  onClick={() => folderInputRef.current?.click()}
+                  onClick={() => pickFolder()}
                   className="relative rounded-xl cursor-pointer flex flex-col items-center justify-center gap-3 py-12 px-8 text-center select-none transition-all duration-200"
                   style={{
                     border: `1.5px dashed ${dragOver ? "rgba(99,102,241,0.6)" : "rgba(255,255,255,0.09)"}`,
@@ -682,7 +713,7 @@ interface BulkUploadModalProps {
                       or{" "}
                       <span
                         className="text-indigo-400 font-medium cursor-pointer hover:text-indigo-300"
-                        onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
+                        onClick={e => { e.stopPropagation(); pickFolder(); }}
                       >
                         select folder
                       </span>
@@ -2052,7 +2083,7 @@ export default function OwnerEventDetailPage() {
                           select files
                         </button>
                         {" "}or{" "}
-                        <button onClick={() => folderInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300">
+                        <button onClick={() => pickFolder()} className="text-indigo-400 hover:text-indigo-300">
                           select entire folder
                         </button>
                         {" "}· JPG, PNG, WebP, HEIC · up to 1,000 files
