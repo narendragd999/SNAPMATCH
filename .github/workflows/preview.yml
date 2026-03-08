@@ -118,20 +118,47 @@ jobs:
         cloudflared --version
 
 
-    # 9 Start Cloudflare quick tunnel
+    # 9 Start Cloudflare quick tunnel (with retry)
     - name: Start Cloudflare Tunnel
       run: |
         echo "Starting Cloudflare tunnel..."
 
-        cloudflared tunnel --url http://localhost:80 \
-          > tunnel.log 2>&1 &
+        # Try up to 5 times — trycloudflare.com API is occasionally flaky
+        for attempt in 1 2 3 4 5; do
+          echo "Attempt $attempt..."
 
-        sleep 10
+          # Kill any previous failed attempt
+          pkill cloudflared || true
+          rm -f tunnel.log
+          sleep 3
 
-        echo "Tunnel log:"
-        cat tunnel.log
+          cloudflared tunnel --url http://localhost:80 \
+            > tunnel.log 2>&1 &
 
-        PREVIEW_URL=$(grep -o 'https://.*trycloudflare.com' tunnel.log | head -n 1)
+          # Wait up to 30s for a valid URL to appear in the log
+          for i in $(seq 1 30); do
+            sleep 1
+            PREVIEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' tunnel.log | head -n 1)
+            if [ -n "$PREVIEW_URL" ]; then
+              break
+            fi
+          done
+
+          if [ -n "$PREVIEW_URL" ]; then
+            echo "Tunnel established on attempt $attempt"
+            break
+          fi
+
+          echo "Attempt $attempt failed. Tunnel log:"
+          cat tunnel.log
+          echo "---"
+        done
+
+        if [ -z "$PREVIEW_URL" ]; then
+          echo "ERROR: Could not establish Cloudflare tunnel after 5 attempts"
+          cat tunnel.log
+          exit 1
+        fi
 
         echo ""
         echo "================================="
