@@ -8,7 +8,7 @@ import {
   PlusCircle, Rocket, AlertTriangle, Crown, TrendingUp, Zap,
   Eye, Trash2, Settings, Share2, CheckCircle2, Loader2, X,
   AlertCircle, FolderOpen, Images, Clock, ChevronRight,
-  RefreshCw,
+  RefreshCw, Gift,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
