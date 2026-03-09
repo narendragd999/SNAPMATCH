@@ -263,8 +263,13 @@ export default function DashboardPage() {
     () => formatBytes((stats?.total_images || 0) * 2 * 1024 * 1024),
     [stats?.total_images]
   );
-  const eventUsagePct = stats ? Math.min((stats.total_events / stats.max_events) * 100, 100)           : 0;
-  const imageUsagePct = stats ? Math.min((stats.total_images / stats.max_images_per_event) * 100, 100) : 0;
+  const eventUsagePct = stats
+    ? Math.min(((stats.total_events ?? 0) / (stats.max_events ?? 1)) * 100, 100)
+    : 0;
+
+  const imageUsagePct = stats
+    ? Math.min(((stats.total_images ?? 0) / (stats.max_images_per_event ?? 1)) * 100, 100)
+    : 0;
 
   // ─── Full-page loading skeleton ───────────────────────────────────────────
   if (loading || !stats) {
@@ -431,7 +436,7 @@ export default function DashboardPage() {
             icon={ImageIcon}
             title="Image Limit"
             percentage={imageUsagePct}
-            subtitle={`${stats.total_images.toLocaleString()} of ${stats.max_images_per_event.toLocaleString()} images`}
+            subtitle={`${(stats.total_images ?? 0).toLocaleString()} of ${(stats.max_images_per_event ?? 0).toLocaleString()} images`}
           />
           <UsageCard
             icon={TrendingUp}
