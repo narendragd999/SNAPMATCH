@@ -1539,7 +1539,7 @@ export default function OwnerEventDetailPage() {
 
   // ─── Photo quota: use event.photo_quota (pay-per-event) with plan fallback ──
   // AFTER — just this:
-  const planLimit = event.photo_quota;
+  const planLimit = event?.photo_quota ?? 0;
   // event.photo_quota is ALWAYS set at creation:
   //   free event  → FREE_TIER_CONFIG["photo_quota"]  (500, from pricing.py)
   //   paid event  → owner's chosen quota at purchase (e.g. 2000)
