@@ -65,7 +65,7 @@ VALID_VALIDITY_DAYS = (30, 90, 365)
 
 FREE_TIER_CONFIG = {
     "photo_quota":   500,
-    "guest_quota":   100,
+    "guest_quota":   20,
     "validity_days": 7,
     "is_free_tier":  True,
     "amount_paise":  0,
