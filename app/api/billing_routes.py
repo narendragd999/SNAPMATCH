@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user, get_db
 from app.core.pricing import (
-    FREE_TIER_CONFIG,
+    get_free_tier_config,   # ← replaces FREE_TIER_CONFIG
     VALID_VALIDITY_DAYS,
     VALIDITY_ADDON_PAISE,
     PHOTO_TIERS,
@@ -396,21 +396,21 @@ def create_free_event(
 
     slug         = _make_slug(body.event_name, db)
     public_token = Event.generate_token()
-
+    cfg = get_free_tier_config(db)   # reads live values from PlatformSetting DB
     event = Event(
         name=body.event_name,
         description=body.description,
         slug=slug,
         public_token=public_token,
         owner_id=current_user.id,
-        photo_quota=FREE_TIER_CONFIG["photo_quota"],
-        guest_quota=FREE_TIER_CONFIG["guest_quota"],
-        validity_days=FREE_TIER_CONFIG["validity_days"],
+        photo_quota=cfg["photo_quota"],
+        guest_quota=cfg["guest_quota"],
+        validity_days=cfg["validity_days"],
+        expires_at=datetime.utcnow() + timedelta(days=cfg["validity_days"]),
         is_free_tier=True,
         payment_status="free",
         amount_paid_paise=0,
-        guest_upload_enabled=False,
-        expires_at=datetime.utcnow() + timedelta(days=FREE_TIER_CONFIG["validity_days"]),
+        guest_upload_enabled=False,        
         public_status="active",
     )
     db.add(event)

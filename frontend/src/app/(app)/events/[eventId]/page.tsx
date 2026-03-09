@@ -1538,10 +1538,13 @@ export default function OwnerEventDetailPage() {
   const canDownload = !isFree;
 
   // ─── Photo quota: use event.photo_quota (pay-per-event) with plan fallback ──
-  const planLimit = event?.photo_quota
-    ?? (event?.plan_type === "enterprise" ? 100000
-      : event?.plan_type === "pro"        ? 10000
-      : 1000);
+  // AFTER — just this:
+  const planLimit = event.photo_quota;
+  // event.photo_quota is ALWAYS set at creation:
+  //   free event  → FREE_TIER_CONFIG["photo_quota"]  (500, from pricing.py)
+  //   paid event  → owner's chosen quota at purchase (e.g. 2000)
+  // No fallback needed. If it's somehow null, the modal shows 0 slots
+  // which correctly prevents uploading rather than silently allowing it.
 
   // ═══════════════════════════════════════════════════════════════
   // 🎨 WATERMARK SAVE TO BACKEND API
