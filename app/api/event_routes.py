@@ -230,6 +230,13 @@ def get_event(
         "cover_image_url":      storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
         "public_status":        event.public_status,
         "plan_type":            current_user.plan_type,
+        # Billing / quota details used by owner dashboard controls
+        "photo_quota":          event.photo_quota,
+        "guest_quota":          event.guest_quota,
+        "guest_uploads_used":   event.guest_uploads_used,
+        "payment_status":       event.payment_status,
+        "is_free_tier":         event.is_free_tier,
+        "validity_days":        event.validity_days,
         "photo_status":         photo_status_counts,
         "unprocessed_count":    unprocessed,
         "has_new_photos":       unprocessed > 0,
