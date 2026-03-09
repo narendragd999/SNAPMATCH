@@ -69,10 +69,13 @@ async def bulk_upload(
     if event.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    # ── 2. Plan cap ───────────────────────────────────────────────────────────
-    plan_config = PLANS.get(current_user.plan_type, PLANS["free"])
-    max_imgs    = plan_config["max_images_per_event"]
-    slots_left  = max(max_imgs - (event.image_count or 0), 0)
+    # ── 2. Per-event photo quota (set at purchase time) ───────────────────────
+    # event.photo_quota holds the exact quota the owner purchased (e.g. 5 000).
+    # Using PLANS["max_images_per_event"] was wrong — it's the plan-level ceiling,
+    # not the per-event purchased limit.
+    max_imgs   = event.photo_quota or 0
+    slots_left = max(max_imgs - (event.image_count or 0), 0)
+
 
     # ── 3. Batch size guard ───────────────────────────────────────────────────
     if len(files) > MAX_FILES_PER_BATCH:

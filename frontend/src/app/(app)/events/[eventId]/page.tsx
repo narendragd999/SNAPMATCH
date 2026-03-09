@@ -12,7 +12,7 @@ import {
   ChevronDown, Loader2, AlertTriangle,
   CloudUpload, CheckCircle2, XCircle, ThumbsUp, ThumbsDown,
   RefreshCw, ImagePlus, Pause, RotateCcw, Zap,
-  FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound,
+  FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound, UserCheck, FolderOpen
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 import PeopleGallery from "@/components/PeopleGallery";
@@ -219,7 +219,8 @@ interface BulkUploadModalProps {
   const startTimeRef  = useRef(0);
   const totalBytesRef = useRef(0);
   const fileInputRef  = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef  = useRef<HTMLInputElement>(null);
+  const [foldersAdded, setFoldersAdded] = useState(0);   // track count of folders added
   const getFiles = () => Array.from(filesRef.current.values());
 
   // ── Reset when modal opens ─────────────────────────────────────────────────
@@ -230,9 +231,9 @@ interface BulkUploadModalProps {
     setPhase("select"); setFileCount(0); setBatches([]);
     setDragOver(false); setPaused(false); setShowList(false);
     setDoneCount(0); setFailedCount(0); setUploadedBytes(0);
-    setSpeed(0); setEta(0); setCurrentBatch(0);
+    setSpeed(0); setEta(0); setCurrentBatch(0);setFoldersAdded(0);
     totalBytesRef.current = 0;
-
+    
     const onUnhandled = (e: PromiseRejectionEvent) => {
       e.preventDefault();
       console.error("Suppressed unhandled rejection during upload:", e.reason);
@@ -291,8 +292,7 @@ interface BulkUploadModalProps {
     if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   }, [addFiles]);
 
-  const pickFolder = useCallback(async () => {
-    // Modern File System Access API — no browser file count limit
+  const pickFolder = useCallback(async (addMore = false) => {
     if ('showDirectoryPicker' in window) {
       try {
         const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
@@ -310,13 +310,14 @@ interface BulkUploadModalProps {
           }
         };
         await walkDir(dirHandle);
-        if (files.length) addFiles(files);
+        if (files.length) {
+          addFiles(files);
+          setFoldersAdded(prev => prev + 1);
+        }
       } catch (e: any) {
-        // User cancelled — do nothing. Any other error → fall back.
         if (e.name !== 'AbortError') folderInputRef.current?.click();
       }
     } else {
-      // Firefox / Safari fallback
       folderInputRef.current?.click();
     }
   }, [addFiles]);
@@ -711,19 +712,25 @@ interface BulkUploadModalProps {
                     <p className="text-xs text-zinc-500 mt-1">
                       {/* AFTER */}
                       or{" "}
-                      <span
-                        className="text-indigo-400 font-medium cursor-pointer hover:text-indigo-300"
-                        onClick={e => { e.stopPropagation(); pickFolder(); }}
-                      >
-                        select folder
-                      </span>
+                      <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300">
+                        select files
+                      </button>
                       {" "}or{" "}
-                      <span
-                        className="text-indigo-400 font-medium cursor-pointer hover:text-indigo-300"
-                        onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
-                      >
-                        individual files
-                      </span>
+                      <button onClick={() => pickFolder()} className="text-indigo-400 hover:text-indigo-300">
+                        select folder
+                      </button>
+                      {foldersAdded > 0 && (
+                        <>
+                          {" "}
+                          <span className="text-zinc-600">·</span>
+                          {" "}
+                          <button onClick={() => pickFolder(true)} className="text-violet-400 hover:text-violet-300 font-medium">
+                            + add another folder
+                          </button>
+                          {" "}
+                          <span className="text-emerald-500 text-[10px]">({foldersAdded} folder{foldersAdded !== 1 ? "s" : ""} added)</span>
+                        </>
+                      )}
                       {" "}· JPG, PNG, WebP, HEIC
                     </p>
                   </div>
@@ -1836,12 +1843,23 @@ export default function OwnerEventDetailPage() {
                 exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
 
                 {/* Stat cards */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
                   {[
                     { l: "Photos",   v: (event.image_count   ?? 0).toLocaleString(), icon: <ImageIcon size={16} />, c: "blue"    },
                     { l: "Faces",    v: (event.total_faces    ?? 0).toLocaleString(), icon: <Users     size={16} />, c: "violet"  },
                     { l: "Clusters", v: (event.total_clusters ?? 0).toLocaleString(), icon: <Layers    size={16} />, c: "indigo"  },
                     { l: "Progress", v: `${Math.min(Math.max(event.processing_progress, 0), 100)}%`, icon: <BarChart2 size={16} />, c: "emerald" },
+                    {
+                      l: "Guests",
+                      v: event.guest_quota != null && event.guest_quota > 0
+                        ? `${Math.max(0, (event.guest_quota ?? 0) - (event.guest_uploads_used ?? 0))} left`
+                        : "N/A",
+                      icon: <UserCheck size={16} />,
+                      c: "amber",
+                      sublabel: event.guest_upload_enabled
+                        ? (event.guest_quota ? "Enabled" : "No quota")
+                        : "Disabled",
+                    },                   
                   ].map(s => (
                     <div key={s.l} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-3 ${
@@ -1878,7 +1896,8 @@ export default function OwnerEventDetailPage() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold">Upload Photos</p>
                       <p className="text-xs text-zinc-500 mt-0.5">
-                        Add images · {(event.image_count ?? 0).toLocaleString()} uploaded so far · up to {planLimit.toLocaleString()} quota
+                        Add images · {(event.image_count ?? 0).toLocaleString()} uploaded so far
+                          · up to {(event.photo_quota ?? planLimit).toLocaleString()} quota
                       </p>
                       <p className="text-xs text-amber-400 mt-1 flex items-center gap-1">
                         <AlertTriangle size={11} />
@@ -2095,6 +2114,22 @@ export default function OwnerEventDetailPage() {
                         e.target.value = "";
                       }} />
                   </label>
+
+                  {phase === "select" && fileCount > 0 && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={() => pickFolder()}
+                        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-700 hover:border-indigo-500/50 text-zinc-400 hover:text-indigo-400 transition-colors"
+                      >
+                        <FolderOpen size={12} /> Add Folder {foldersAdded > 0 ? `#${foldersAdded + 1}` : ""}
+                      </button>
+                      {foldersAdded > 0 && (
+                        <span className="flex items-center text-[11px] text-emerald-400 font-medium gap-1">
+                          <CheckCircle2 size={11} /> {foldersAdded} folder{foldersAdded !== 1 ? "s" : ""} added
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   <div className="flex items-center gap-3 px-5 py-3">
                     <div className="flex-1 h-px bg-zinc-800" />
