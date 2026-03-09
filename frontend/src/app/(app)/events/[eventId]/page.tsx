@@ -2661,4 +2661,4 @@ export default function OwnerEventDetailPage() {
 
     </div>
   );
-}
+} 
