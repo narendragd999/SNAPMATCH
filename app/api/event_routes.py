@@ -49,7 +49,6 @@ from app.services.storage_service import STORAGE_BACKEND
 from app.services.storage_cleanup import delete_event_storage
 from datetime import datetime, timedelta
 from app.models.user import User
-from app.core.plans import PLANS
 import uuid
 import secrets
 import os
@@ -103,16 +102,7 @@ def create_event(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    plan = PLANS.get(current_user.plan_type, PLANS["free"])
-
-    user_event_count = db.query(Event).filter(
-        Event.owner_id == current_user.id
-    ).count()
-
-    if user_event_count >= plan["max_events"]:
-        raise HTTPException(status_code=403, detail="Event limit reached for your plan")
-
-    expires_at = datetime.utcnow() + timedelta(days=plan.get("event_validity_days", 30))
+    expires_at = datetime.utcnow() + timedelta(days=30)
 
     while True:
         slug = str(uuid.uuid4())[:8]
@@ -498,9 +488,8 @@ def owner_cluster_download(
     if event.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    plan = PLANS.get(current_user.plan_type, PLANS["free"])
-    if current_user.plan_type == "free":
-        raise HTTPException(status_code=403, detail="Download not available on free plan")
+    if event.is_free_tier:
+       raise HTTPException(status_code=403, detail="Download not available on free events")
 
     cluster_rows = (
         db.query(Cluster.image_name)
@@ -875,15 +864,14 @@ def get_dashboard_stats(
             Photo.approval_status == "approved",
         ).count()
 
-    plan = PLANS.get(current_user.plan_type, PLANS["free"])
-
+    
     return {
         "total_events":          total_events,
         "total_images":          total_images,
         "total_process_runs":    int(total_process_runs),
         "plan_type":             current_user.plan_type,
-        "max_events":            plan.get("max_events", 0),
-        "max_images_per_event":  plan.get("max_images_per_event", 0),
+        "max_events":           None,   # unlimited — enforced per-event via billing
+        "max_images_per_event": None,   # quota lives on event.photo_quota
         "unprocessed_photos":    unprocessed_count,
     }
 
