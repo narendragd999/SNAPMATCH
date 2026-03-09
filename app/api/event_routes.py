@@ -926,8 +926,7 @@ def get_watermark_config(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     # Check plan - watermark is Pro feature
-    plan = PLANS.get(current_user.plan_type, PLANS["free"])
-    is_pro = current_user.plan_type not in ["free", None]
+    is_pro = not event.is_free_tier
 
     config = event.get_watermark_config()
 
