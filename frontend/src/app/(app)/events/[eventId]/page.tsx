@@ -2177,17 +2177,6 @@ export default function OwnerEventDetailPage() {
                         {searchResult ? "Upload a different photo" : "Drop your photo here"}
                       </p>
                       <p className="text-xs text-zinc-500 mt-0.5">or click to browse · JPG, PNG, WEBP</p>
-                      <p className="text-[11px] text-zinc-500 mt-1">
-                        or{" "}
-                        <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300">
-                          select files
-                        </button>
-                        {" "}or{" "}
-                        <button onClick={() => pickFolder()} className="text-indigo-400 hover:text-indigo-300">
-                          select entire folder
-                        </button>
-                        {" "}· JPG, PNG, WebP, HEIC · up to 1,000 files
-                    </p>
                     </div>
                     <input type="file" hidden accept="image/*"
                       onChange={e => {
@@ -2195,22 +2184,6 @@ export default function OwnerEventDetailPage() {
                         e.target.value = "";
                       }} />
                   </label>
-
-                  {phase === "select" && fileCount > 0 && (
-                    <div className="flex gap-2 mt-2">
-                      <button
-                        onClick={() => pickFolder()}
-                        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-700 hover:border-indigo-500/50 text-zinc-400 hover:text-indigo-400 transition-colors"
-                      >
-                        <FolderOpen size={12} /> Add Folder {foldersAdded > 0 ? `#${foldersAdded + 1}` : ""}
-                      </button>
-                      {foldersAdded > 0 && (
-                        <span className="flex items-center text-[11px] text-emerald-400 font-medium gap-1">
-                          <CheckCircle2 size={11} /> {foldersAdded} folder{foldersAdded !== 1 ? "s" : ""} added
-                        </span>
-                      )}
-                    </div>
-                  )}
 
                   <div className="flex items-center gap-3 px-5 py-3">
                     <div className="flex-1 h-px bg-zinc-800" />
