@@ -1,4 +1,4 @@
-name: SnapFind Preview
+name: SnapFind Preview-Updated 20-Parallel
 
 on:
   workflow_dispatch:

@@ -1,4 +1,4 @@
-name: SnapFind Preview
+name: SnapFind Preview - Backup
 
 on:
   workflow_dispatch:
