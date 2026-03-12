@@ -117,7 +117,7 @@ services:
     image: snapfind-backend:latest   # reuses backend image — no rebuild
     #container_name: event_celery_photo
     shm_size: '2gb'                    # ← ADD THIS LINE
-    command: celery -A app.workers.celery_worker worker -Q photo_processing --concurrency=3 --pool=prefork --loglevel=info --time-limit=180 --soft-time-limit=150 --without-mingle --without-gossip
+    command: celery -A app.workers.celery_worker worker -Q photo_processing --concurrency=2 --pool=prefork --loglevel=info --time-limit=180 --soft-time-limit=150 --without-mingle --without-gossip
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
