@@ -1,4 +1,4 @@
-name: SnapFind Preview -UPdated
+name: SnapFind Preview
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
         RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
         RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
       run: |
-        docker compose up -d --build  --scale celery_photo=4
+        docker compose up -d --build
         docker ps
 
     # 5 Wait for backend
