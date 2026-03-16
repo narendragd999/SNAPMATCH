@@ -118,15 +118,25 @@ services:
     restart: unless-stopped
 
   # ── Photo Worker ─────────────────────────────────────────
+  # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
+  #
+  # --concurrency=2   → 1 worker per real CPU core. More workers = thrashing
+  #                     on a 2-core machine. Each InsightFace worker needs
+  #                     ~500MB RAM, so 2 workers = ~1GB — safe given constraints.
+  # --prefetch-multiplier=1 → don't pre-fetch; avoids holding tasks in memory
+  #                     when RAM is tight.
+  # OMP_NUM_THREADS=2 → each worker gets both logical cores for ONNX math.
+  #                     2 workers × 2 threads = 4 (all logical processors used).
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
-    shm_size: '2gb'
+    shm_size: '512mb'
     command: >
       celery -A app.workers.celery_worker worker
       -Q photo_processing
-      --concurrency=3
+      --concurrency=2
       --pool=prefork
+      --prefetch-multiplier=1
       --loglevel=info
       --time-limit=180
       --soft-time-limit=150
@@ -151,10 +161,19 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
-    mem_limit: 4g
+      # 2 workers × 2 threads = 4 logical processors fully used, no over-subscription
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - ONNXRUNTIME_NUM_THREADS=2
+    mem_limit: 2g
     restart: unless-stopped
 
   # ── Finalizer Worker ─────────────────────────────────────
+  # Builds FAISS index from processed face embeddings.
+  # solo pool (single process) is correct here — FAISS index build is
+  # single-threaded by design. OMP threads let it use all cores for the
+  # actual vector math during index construction.
   celery_finalize:
     image: snapfind-backend:latest
     container_name: event_celery_finalize
@@ -187,10 +206,15 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
+      # Give finalizer full CPU for FAISS index build
+      - OMP_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
     mem_limit: 6g
     restart: unless-stopped
 
   # ── AI Enrichment Worker ─────────────────────────────────
+  # Runs YOLO + Places365. Solo pool is correct (models loaded once in memory).
   celery_ai:
     image: snapfind-backend:latest
     container_name: event_celery_ai
@@ -224,6 +248,10 @@ services:
       - MINIO_PUBLIC_URL=/storage
       - PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
       - YOLO_MODEL_PATH=yolov8n.pt
+      # YOLO and Places365 are both single-process — give them full CPU
+      - OMP_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
     mem_limit: 4g
     restart: unless-stopped
 
@@ -273,17 +301,22 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
     restart: unless-stopped
 
-  # ── Frontend ──────────────────────────────────────────────
+  # Frontend
   # NEXT_PUBLIC_* vars are BAKED INTO the JS bundle at build time via args.
-  # They must be absolute URLs the browser can reach — not Docker-internal names.
-  # Using nginx on :8080 as the single entry point for both API and storage.
+  # They must be absolute URLs the browser can reach, not Docker-internal names.
+  #
+  # LOCAL (Windows): set in .env:
+  #   NGINX_PORT=8080
+  #   NEXT_PUBLIC_APP_URL=http://127.0.0.1:8080
+  #
+  # GHA (Linux): leave both unset -> defaults to port 80 / http://localhost
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=http://127.0.0.1:8080/api
-        - NEXT_PUBLIC_STORAGE_URL=http://127.0.0.1:8080/storage
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/api
+        - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/storage
         - NEXT_PUBLIC_STORAGE_BACKEND=minio
     image: snapfind-frontend:latest
     container_name: event_frontend
@@ -292,24 +325,22 @@ services:
     depends_on:
       - backend
     environment:
-      - NEXT_PUBLIC_API_URL=http://127.0.0.1:8080/api
-      - NEXT_PUBLIC_STORAGE_URL=http://127.0.0.1:8080/storage
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/api
+      - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/storage
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
-  # ── Nginx (reverse proxy) ─────────────────────────────────
-  # Routes:
-  #   /        → frontend:3000
-  #   /api/    → backend:8000
-  #   /storage/→ minio:9000/snapfind/  (read — thumbnails / photos)
-  #   /minio-upload/ → minio:9000/     (browser presigned PUT uploads)
-  # Local URL: http://localhost:8080
-  # NOTE: Port 80 is reserved on Windows without admin rights.
-  # Using 8080 → maps to nginx internal port 80 (no config change needed).
+  # Nginx reverse proxy
+  # Routes: /  -> frontend:3000
+  #         /api/ -> backend:8000
+  #         /storage/ -> minio:9000/snapfind/
+  #         /minio-upload/ -> minio:9000/
+  # LOCAL:  NGINX_PORT=8080 in .env  -> http://127.0.0.1:8080
+  # GHA:    NGINX_PORT unset         -> port 80 -> http://localhost
   nginx:
     image: nginx:alpine
     container_name: event_proxy
     ports:
-      - "8080:80"
+      - "${NGINX_PORT:-80}:80"
     volumes:
       - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf
     depends_on:
