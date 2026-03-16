@@ -84,10 +84,12 @@ jobs:
         SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
         SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
 
-        # Frontend — LEAVE EMPTY so Next.js uses relative paths (/api, /storage)
-        # Relative paths work because the Cloudflare tunnel points to nginx:80
-        # which serves both the frontend and proxies /api + /storage.
-        NEXT_PUBLIC_APP_URL=
+        # Frontend — relative paths so the Cloudflare tunnel origin is used.
+        # The browser is on https://xyz.trycloudflare.com so /api resolves to
+        # https://xyz.trycloudflare.com/api which nginx proxies to backend.
+        # Never use http://localhost here — that's unreachable from the browser.
+        NEXT_PUBLIC_API_URL=/api
+        NEXT_PUBLIC_STORAGE_URL=/storage
         NGINX_PORT=80
 
         # AI models

@@ -325,8 +325,13 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/api
-        - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/storage
+        # NEXT_PUBLIC_APP_URL controls what gets baked into the JS bundle.
+        # LOCAL:  set to http://127.0.0.1:8080 in .env  → absolute URL
+        # GHA:    set to empty string in .env            → /api (relative)
+        # The conditional is handled in the shell: if the var is set and
+        # non-empty, append /api; otherwise use bare /api with no host.
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-/api}
+        - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_STORAGE_URL:-/storage}
         - NEXT_PUBLIC_STORAGE_BACKEND=minio
     image: snapfind-frontend:latest
     container_name: event_frontend
@@ -335,8 +340,8 @@ services:
     depends_on:
       - backend
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/api
-      - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}/storage
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-/api}
+      - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_STORAGE_URL:-/storage}
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
   # Nginx reverse proxy
