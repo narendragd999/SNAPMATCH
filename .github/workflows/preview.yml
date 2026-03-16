@@ -154,7 +154,34 @@ jobs:
         docker compose logs nginx
         exit 1
 
-    # 9 Install cloudflared
+    # 9 Debug routing
+    - name: Debug routes and nginx
+      run: |
+        echo "==== FastAPI registered routes ===="
+        curl -s http://localhost:8000/openapi.json | python3 -c "
+        import json,sys
+        d=json.load(sys.stdin)
+        for path in sorted(d.get('paths',{}).keys()):
+            print(path)
+        "
+
+        echo ""
+        echo "==== nginx POST /api/auth/register ===="
+        curl -s -o /dev/null -w "HTTP %{http_code}" -X POST http://localhost/api/auth/register           -H "Content-Type: application/json"           -d '{"email":"debug@test.com","password":"debug123"}'
+
+        echo ""
+        echo "==== backend direct POST /auth/register ===="
+        curl -s -o /dev/null -w "HTTP %{http_code}" -X POST http://localhost:8000/auth/register           -H "Content-Type: application/json"           -d '{"email":"debug@test.com","password":"debug123"}'
+
+        echo ""
+        echo "==== backend direct POST /api/auth/register ===="
+        curl -s -o /dev/null -w "HTTP %{http_code}" -X POST http://localhost:8000/api/auth/register           -H "Content-Type: application/json"           -d '{"email":"debug@test.com","password":"debug123"}'
+
+        echo ""
+        echo "==== backend direct POST /auth/users/register (alt path) ===="
+        curl -s -o /dev/null -w "HTTP %{http_code}" -X POST http://localhost:8000/auth/users/register           -H "Content-Type: application/json"           -d '{"email":"debug@test.com","password":"debug123"}'
+
+    # 10 Install cloudflared
     - name: Install Cloudflare tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
