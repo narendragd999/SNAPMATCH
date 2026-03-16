@@ -1,10 +1,8 @@
-version: "3.9"
-
 # ============================================================
 # SnapFind AI — Docker Compose  (localhost-compatible)
 # ============================================================
 # KEY CHANGES vs GitHub-Actions version:
-#   1. nginx → ports: "80:80"  (same as GHA runner; needs no tunnel)
+#   1. nginx port driven by NGINX_PORT env var (8080 local, 80 on GHA)
 #   2. backend ALLOWED_ORIGINS includes localhost:80 + localhost:3000
 #   3. MINIO_PRESIGN_ENDPOINT defaults to http://localhost:9000 so
 #      boto3 presigned URLs are signed with a host the BROWSER can reach.
@@ -90,16 +88,28 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    env_file:
-      - .env                            # ← picks up all vars from .env
     environment:
       # These override / supplement .env for Docker-internal wiring
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
       # Allow requests from nginx (port 80), direct frontend (3000), and
       # direct backend access (8000) — all used during local development.
-      - ALLOWED_ORIGINS=http://127.0.0.1:8080,http://127.0.0.1:3000,http://127.0.0.1:8000,http://localhost:8080,http://localhost:3000
-      - ENV=dev
+      # On GHA nginx is port 80 (localhost), locally port 8080 (127.0.0.1:8080)
+      - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://localhost:3000,http://localhost:8000,http://127.0.0.1:8080,http://127.0.0.1:3000,http://127.0.0.1:8000
+      - ENV=${ENV:-dev}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - FRONTEND_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}
+      # SMTP (optional — app works without it, just no emails)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      # AI models
+      - MAX_PHOTO_SIZE_MB=${MAX_PHOTO_SIZE_MB:-20}
+      - PLACES365_MODEL_PATH=${PLACES365_MODEL_PATH:-/app/models/resnet50_places365.pth.tar}
+      - YOLO_MODEL_PATH=${YOLO_MODEL_PATH:-yolov8n.pt}
+      - DEFAULT_EVENT_PIN=${DEFAULT_EVENT_PIN:-0000}
       # ── Storage ──
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000          # internal Docker host
