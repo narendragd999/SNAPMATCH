@@ -44,17 +44,70 @@ jobs:
         docker system prune -af || true
         df -h
 
-    # 4 Start Docker stack
+    # 4 Write GHA .env
+    # .env is gitignored (contains secrets) so it never exists on the runner.
+    # We create it here with GHA-specific values so docker-compose variable
+    # substitution works correctly at build time.
+    #
+    # KEY POINTS:
+    #   NGINX_PORT        → unset (omitted) so docker-compose defaults to 80
+    #   NEXT_PUBLIC_APP_URL → empty string so Next.js uses RELATIVE paths
+    #                         (/api, /storage) — works because the Cloudflare
+    #                         tunnel hits nginx on port 80, which is the same
+    #                         origin the browser sees. No absolute URL needed.
+    #   MINIO_PRESIGN_ENDPOINT → set to empty here; injected after tunnels
+    #                            start (step 10) with the real Cloudflare URL.
+    - name: Write GHA .env
+      run: |
+        cat > .env << 'EOF'
+        SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
+        ENV=prod
+
+        # Storage
+        STORAGE_BACKEND=minio
+        MINIO_ENDPOINT=http://minio:9000
+        MINIO_ACCESS_KEY=minioadmin
+        MINIO_SECRET_KEY=minioadmin
+        MINIO_BUCKET=snapfind
+        MINIO_PUBLIC_URL=/storage
+        MINIO_PRESIGN_ENDPOINT=
+
+        # Payments
+        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
+        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
+        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+
+        # SMTP
+        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
+        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+        SMTP_USER=${{ secrets.SMTP_USER || '' }}
+        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
+        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
+
+        # Frontend — LEAVE EMPTY so Next.js uses relative paths (/api, /storage)
+        # Relative paths work because the Cloudflare tunnel points to nginx:80
+        # which serves both the frontend and proxies /api + /storage.
+        NEXT_PUBLIC_APP_URL=
+        NGINX_PORT=80
+
+        # AI models
+        MAX_PHOTO_SIZE_MB=20
+        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
+        YOLO_MODEL_PATH=yolov8n.pt
+        DEFAULT_EVENT_PIN=0000
+        EOF
+        # Remove leading whitespace from heredoc lines
+        sed -i 's/^[[:space:]]*//' .env
+        echo "--- .env written ---"
+        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
+
+    # 5 Start Docker stack
     - name: Start Docker containers
-      env:
-        RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
-        RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
-        RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
       run: |
         docker compose up -d --build
         docker ps
 
-    # 5 Wait for backend
+    # 6 Wait for backend
     - name: Wait for backend
       run: |
         echo "Waiting for backend API..."
@@ -69,7 +122,7 @@ jobs:
         docker compose logs backend
         exit 1
 
-    # 6 Wait for frontend
+    # 7 Wait for frontend
     - name: Wait for frontend
       run: |
         echo "Waiting for frontend..."
@@ -84,7 +137,7 @@ jobs:
         docker compose logs frontend
         exit 1
 
-    # 7 Wait for nginx
+    # 8 Wait for nginx
     - name: Wait for nginx proxy
       run: |
         echo "Waiting for proxy..."
@@ -99,7 +152,7 @@ jobs:
         docker compose logs nginx
         exit 1
 
-    # 8 Install cloudflared
+    # 9 Install cloudflared
     - name: Install Cloudflare tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -107,7 +160,7 @@ jobs:
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
         cloudflared --version
 
-    # 9 Start Cloudflare tunnels — one for the app, one for MinIO direct PUT
+    # 10 Start Cloudflare tunnels — one for the app, one for MinIO direct PUT
     #
     # Why two tunnels?
     #   The app tunnel (localhost:80) goes through nginx and is fine for API
@@ -131,7 +184,7 @@ jobs:
           local LOGFILE="$3"
           local URL_VAR="$4"
 
-          echo "Starting $NAME tunnel → $TARGET ..."
+          echo "Starting $NAME tunnel -> $TARGET ..."
           for attempt in 1 2 3 4 5; do
             echo "  Attempt $attempt..."
             pkill -f "cloudflared tunnel.*$TARGET" || true
@@ -161,7 +214,7 @@ jobs:
           return 1
         }
 
-        # App tunnel (nginx → frontend + backend API)
+        # App tunnel (nginx -> frontend + backend API)
         start_tunnel "App"   "http://localhost:80"   "tunnel-app.log"   "PREVIEW_URL"
 
         # MinIO tunnel (direct to MinIO for presigned PUT uploads)
@@ -172,17 +225,12 @@ jobs:
         echo " SnapFind Preview is LIVE"
         echo "================================="
         echo ""
-        echo "Frontend:      $PREVIEW_URL"
+        echo "App URL:       $PREVIEW_URL"
         echo "Backend docs:  $PREVIEW_URL/api/docs"
         echo "MinIO tunnel:  $MINIO_TUNNEL_URL  (presigned PUT target)"
         echo ""
 
-    # 10 Inject MINIO_PRESIGN_ENDPOINT into the running backend container.
-    #
-    # IMPORTANT: docker-compose.yml must declare
-    #   - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-}
-    # in the backend's environment block. Without that line, Docker Compose
-    # never passes the variable into the container even though it's in .env.
+    # 11 Inject MINIO_PRESIGN_ENDPOINT into the running backend container.
     #
     # storage_service.py uses a dedicated presigning boto3 client with
     # endpoint_url=MINIO_PRESIGN_ENDPOINT so signatures are computed with
@@ -191,9 +239,8 @@ jobs:
       run: |
         echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
 
-        # Append to the repo .env file so every subsequent docker compose
-        # command in this job sees the var automatically.
-        echo "MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL" >> .env
+        # Update the .env file so subsequent docker compose commands see it.
+        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
 
         # Recreate ONLY the backend container with the updated env.
         #   --no-deps        : don't touch db/redis/minio/nginx/frontend
@@ -215,7 +262,7 @@ jobs:
         BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
         if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
-          echo "✓ MINIO_PRESIGN_ENDPOINT confirmed inside container: $LIVE"
+          echo "MINIO_PRESIGN_ENDPOINT confirmed inside container: $LIVE"
         else
           echo "ERROR: var not found in container."
           echo "  Got:      '$LIVE'"
@@ -224,7 +271,7 @@ jobs:
           echo "Check that docker-compose.yml backend environment includes:"
           echo "  - MINIO_PRESIGN_ENDPOINT=\${MINIO_PRESIGN_ENDPOINT:-}"
           docker exec "$BACKEND" printenv | grep -i minio || true
-          exit 1   # ← Fail fast so the issue is visible immediately
+          exit 1
         fi
 
         # Smoke-test: verify that the presign endpoint generates an HTTPS URL
@@ -234,26 +281,36 @@ jobs:
           -d '{"filenames":["test.jpg"]}' \
           http://localhost:8000/uploads/1/presign 2>/dev/null || true)
         if echo "$PRESIGN_RESP" | grep -q "https://"; then
-          echo "✓ Presign endpoint returns HTTPS URLs"
+          echo "Presign endpoint returns HTTPS URLs"
         else
           echo "WARNING: Presign smoke-test inconclusive (may need auth or event ID 1)."
           echo "Response: $PRESIGN_RESP"
         fi
 
-    # 11 Keep preview alive
+    # 12 Keep preview alive
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
       run: |
-        SECONDS=$(( PREVIEW_DURATION * 3600 ))
-        for ((i=0;i<$SECONDS;i+=60)); do
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo " App:          $PREVIEW_URL"
+        echo " API docs:     $PREVIEW_URL/api/docs"
+        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
+        echo "================================="
+        echo ""
+
+        SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
+        for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
-          REM=$(( (SECONDS-i)/60 ))
-          echo "Preview running... $REM minutes remaining"
-          curl -sf http://localhost/api/docs >/dev/null || echo "Backend check failed"
+          REM=$(( (SECONDS_LEFT - i) / 60 ))
+          echo "[$REM min remaining] App: $PREVIEW_URL"
+          curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
         done
 
-    # 12 Show logs if failure
+    # 13 Show logs if failure
     - name: Show logs on failure
       if: failure()
       run: |
@@ -263,7 +320,7 @@ jobs:
         cat tunnel-app.log   || true
         cat tunnel-minio.log || true
 
-    # 13 Cleanup
+    # 14 Cleanup
     - name: Cleanup
       if: always()
       run: |
@@ -271,23 +328,17 @@ jobs:
         docker compose down -v
         echo "Cleanup complete"
 
+    # 15 Show system resources
     - name: Show System Resources
       run: |
         echo "================ CPU ================="
-        echo "Number of CPU cores:"
         nproc
-        echo ""
-        echo "CPU Details:"
         lscpu
-        echo ""
         echo "================ RAM ================="
         free -h
-        echo ""
         echo "================ DISK ================="
         df -h
-        echo ""
         echo "================ DOCKER CONTAINERS ================="
         docker ps
-        echo ""
         echo "================ DOCKER RESOURCE USAGE ================="
         docker stats --no-stream
