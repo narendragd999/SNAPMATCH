@@ -139,7 +139,7 @@ type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Constants (unchanged) ─────────────────────────────────────────────────────
-const BATCH_SIZE    = 40;
+const BATCH_SIZE    = 100;
 const MAX_RETRIES   = 3;
 const CONCURRENCY   = 8;
 const PRESIGN_CHUNK = 500;

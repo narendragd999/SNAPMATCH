@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.core.config import STORAGE_PATH
 from app.services.face_model import face_app
 
-MAX_DIM = 800
+MAX_DIM = 640
 
 # PERF: Raised from 1 → 4 workers.
 # InsightFace releases the GIL during the native C++/ONNX inference, so
@@ -14,7 +14,7 @@ MAX_DIM = 800
 # face_app model (read-only during inference — thread-safe).
 # Tune down to 2 if you see memory pressure (each thread holds a decoded
 # image in RAM simultaneously).
-MAX_WORKERS = 4
+MAX_WORKERS = 2
 
 # PERF: Hard cap on faces returned per image.
 # A 7-face group photo produces 7 embeddings × recognition overhead.
