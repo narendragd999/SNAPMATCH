@@ -13,6 +13,14 @@ on:
           - "2"
           - "3"
           - "5"
+      reset_processing:
+        description: "Reset processing state (keep photos, re-process)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   preview:
@@ -108,6 +116,17 @@ jobs:
       run: |
         docker compose up -d --build
         docker ps
+
+    # 5.1 Check celery concurrency
+    - name: Check celery concurrency
+      run: |
+        echo "Waiting for celery_photo to start..."
+        sleep 15
+        echo "=== celery_photo logs ==="
+        docker logs event_celery_photo 2>&1 | grep -E "concurrency|ready|worker|ERROR" | head -20
+        echo ""
+        echo "=== CELERY_CONCURRENCY env var in container ==="
+        docker exec event_celery_photo printenv CELERY_CONCURRENCY || echo "NOT SET"
 
     # 6 Wait for backend
     - name: Wait for backend
@@ -316,7 +335,32 @@ jobs:
           echo "Response: $PRESIGN_RESP"
         fi
 
-    # 12 Keep preview alive
+    # 12 Reset processing state (optional — only runs if reset_processing=true)
+    # Keeps all uploaded photos in MinIO and DB, just resets processing status.
+    # Use this when you want to re-process without re-uploading.
+    - name: Reset processing state
+      if: ${{ github.event.inputs.reset_processing == 'true' }}
+      run: |
+        echo "Resetting processing state — keeping photos..."
+        docker exec -i event_postgres psql -U postgres -d event_ai << 'SQL'
+          UPDATE photos
+          SET status='uploaded', optimized_filename=NULL, faces_detected=0
+          WHERE status IN ('processed','failed');
+
+          DELETE FROM clusters;
+
+          UPDATE events
+          SET processing_status='pending', processing_progress=0,
+              processing_started_at=NULL, processing_completed_at=NULL,
+              total_clusters=0, total_faces=0
+          WHERE processing_status IN ('completed','processing','failed');
+
+          SELECT id, name, processing_status, total_clusters, total_faces FROM events;
+          SELECT event_id, status, COUNT(*) FROM photos GROUP BY event_id, status;
+        SQL
+        echo "Reset complete — photos kept, processing state cleared"
+
+    # 13 Keep preview alive
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
