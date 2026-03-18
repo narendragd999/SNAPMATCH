@@ -10,7 +10,9 @@ Changes:
 import threading
 from insightface.app import FaceAnalysis
 
-USE_GPU   = False
+# Reads USE_GPU env var — "true" = GPU, anything else = CPU
+USE_GPU = os.getenv("USE_GPU", "false").lower() == "true"
+
 _face_app = None
 _lock     = threading.Lock()
 
