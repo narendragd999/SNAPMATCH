@@ -573,11 +573,15 @@ function BulkUploadModal({
       // ── Step 3: Confirm uploads ───────────────────────────────────────────
       if (usePresign && confirmedUploads.length > 0) {
         for (let ci = 0; ci < confirmedUploads.length; ci += CONFIRM_CHUNK) {
+          const isLastChunk = ci + CONFIRM_CHUNK >= confirmedUploads.length; // ← ADD
           try {
             await fetch(`${apiUrl}/upload/${eventId}/confirm`, {
-              method:  "POST",
+              method: "POST",
               headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
-              body:    JSON.stringify({ uploads: confirmedUploads.slice(ci, ci + CONFIRM_CHUNK) }),
+              body: JSON.stringify({
+                uploads: confirmedUploads.slice(ci, ci + CONFIRM_CHUNK),
+                is_last_chunk: isLastChunk,   // ← ADD this field
+              }),
             });
           } catch (e) { console.error(`Confirm chunk ${ci} failed:`, e); }
         }
@@ -2472,6 +2476,7 @@ export default function OwnerEventDetailPage() {
           if (count > 0) {
             showToast(`✓ ${count} photo${count !== 1 ? "s" : ""} uploaded`);
             setUploadSuccess(true);
+            fetchEvent();        // ← ADD — re-fetch event data to update photo count
             await loadEvent();
           }
           setBulkUploadOpen(false);

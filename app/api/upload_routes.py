@@ -296,6 +296,9 @@ async def confirm_uploads(
         db.refresh(event)
 
     # ── FIX 2: Auto-trigger processing on final chunk ─────────────────────────
+    # Add these two lines BEFORE the if block
+    task_id           = None
+    processing_status = None
     if body.is_last_chunk and accepted > 0:
         task = process_event.apply_async(args=[event_id], queue="default")
         task_id = task.id
