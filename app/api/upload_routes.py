@@ -311,7 +311,7 @@ async def confirm_uploads(
 
         logger.info("Auto-triggered processing for event %s — task %s", event_id, task_id)
 
-    return ConfirmResponse(
+    return ConfirmResponse( 
         accepted=accepted,
         rejected=rejected,
         event_image_count=event.image_count or 0,

@@ -2475,8 +2475,7 @@ export default function OwnerEventDetailPage() {
         onComplete={async (count) => {
           if (count > 0) {
             showToast(`✓ ${count} photo${count !== 1 ? "s" : ""} uploaded`);
-            setUploadSuccess(true);
-            fetchEvent();        // ← ADD — re-fetch event data to update photo count
+            setUploadSuccess(true);            
             await loadEvent();
           }
           setBulkUploadOpen(false);
