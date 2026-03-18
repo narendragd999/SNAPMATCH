@@ -24,7 +24,7 @@ def get_face_app() -> FaceAnalysis:
         with _lock:
             if _face_app is None:
                 app = FaceAnalysis(
-                    name="buffalo_l",                       # ← was buffalo_s (+6% accuracy)
+                    name="buffalo_s",                       # ← was buffalo_s (+6% accuracy)
                     allowed_modules=["detection", "recognition"],
                 )
                 app.prepare(
