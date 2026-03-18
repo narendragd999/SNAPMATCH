@@ -18,8 +18,8 @@ from typing import TypedDict
 
 # ── Free tier defaults (used when DB rows not yet set) ───────────────────────
 FREE_TIER_DEFAULTS: dict[str, int] = {
-    "free_photo_quota":   500,
-    "free_guest_quota":   20,
+    "free_photo_quota":   5000,
+    "free_guest_quota":   200,
     "free_validity_days": 7,
 }
 
