@@ -335,6 +335,134 @@ jobs:
           echo "Response: $PRESIGN_RESP"
         fi
 
+    # 12 Expose Redis + PostgreSQL via HTTP proxy for Colab GPU worker
+    - name: Expose Redis and PostgreSQL for Colab GPU
+      run: |
+        # Install redis-http-proxy
+        pip install redis-py flask 2>/dev/null || true
+
+        # ── Simple Redis HTTP proxy ───────────────────────────────────────
+        cat > /tmp/redis_proxy.py << 'EOF'
+import redis, json
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'redis': r.ping()})
+
+@app.route('/lpush', methods=['POST'])
+def lpush():
+    d = request.json
+    r.lpush(d['key'], *[json.dumps(v) for v in d['values']])
+    return jsonify({'ok': True})
+
+@app.route('/brpop', methods=['POST'])
+def brpop():
+    d    = request.json
+    val  = r.brpop(d['key'], timeout=d.get('timeout', 5))
+    return jsonify({'value': val[1].decode() if val else None})
+
+@app.route('/get', methods=['POST'])
+def get():
+    d = request.json
+    v = r.get(d['key'])
+    return jsonify({'value': v.decode() if v else None})
+
+@app.route('/set', methods=['POST'])
+def set_key():
+    d = request.json
+    r.set(d['key'], d['value'], ex=d.get('ex'))
+    return jsonify({'ok': True})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=6380)
+EOF
+
+        python /tmp/redis_proxy.py &
+        sleep 3
+        curl -sf http://localhost:6380/health && echo "Redis proxy up" || echo "Redis proxy failed"
+
+        # ── Expose Redis proxy via Cloudflare ─────────────────────────────
+        cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
+        sleep 8
+        REDIS_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/redis-tunnel.log | head -1)
+        echo "REDIS_TUNNEL_URL=$REDIS_TUNNEL" >> $GITHUB_ENV
+        echo "Redis tunnel: $REDIS_TUNNEL"
+
+        # ── Expose PostgreSQL via pgREST-style HTTP proxy ─────────────────
+        cat > /tmp/db_proxy.py << 'EOF'
+import psycopg2, json
+from flask import Flask, request, jsonify
+
+app  = Flask(__name__)
+DSN  = 'postgresql://postgres:admin123@localhost:5432/event_ai'
+
+def get_conn():
+    return psycopg2.connect(DSN)
+
+@app.route('/health')
+def health():
+    conn = get_conn()
+    conn.close()
+    return jsonify({'status': 'ok'})
+
+@app.route('/query', methods=['POST'])
+def query():
+    d    = request.json
+    sql  = d['sql']
+    args = d.get('args', [])
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(sql, args)
+    if sql.strip().upper().startswith('SELECT'):
+        cols = [desc[0] for desc in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        conn.close()
+        return jsonify({'rows': rows})
+    conn.commit()
+    rowcount = cur.rowcount
+    conn.close()
+    return jsonify({'rowcount': rowcount})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5433)
+EOF
+
+        python /tmp/db_proxy.py &
+        sleep 3
+        curl -sf http://localhost:5433/health && echo "DB proxy up" || echo "DB proxy failed"
+
+        # ── Expose DB proxy via Cloudflare ────────────────────────────────
+        cloudflared tunnel --url http://localhost:5433 > /tmp/db-tunnel.log 2>&1 &
+        sleep 8
+        DB_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/db-tunnel.log | head -1)
+        echo "DB_TUNNEL_URL=$DB_TUNNEL" >> $GITHUB_ENV
+        echo "DB tunnel: $DB_TUNNEL"
+
+    # 13 Print all tunnel URLs including GPU worker config
+    - name: Print Colab GPU Worker Config
+      run: |
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo " App:          $PREVIEW_URL"
+        echo " API docs:     $PREVIEW_URL/api/docs"
+        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
+        echo " Redis tunnel: $REDIS_TUNNEL_URL"
+        echo " DB tunnel:    $DB_TUNNEL_URL"
+        echo "================================="
+        echo ""
+        echo "=== COLAB GPU WORKER CONFIG ==="
+        echo "BACKEND_URL  = $PREVIEW_URL/api"
+        echo "MINIO_URL    = $MINIO_TUNNEL_URL"
+        echo "REDIS_URL    = $REDIS_TUNNEL_URL"
+        echo "DB_URL       = $DB_TUNNEL_URL"
+        echo "================================="
+
     # 12 Reset processing state (optional — only runs if reset_processing=true)
     # Keeps all uploaded photos in MinIO and DB, just resets processing status.
     # Use this when you want to re-process without re-uploading.
