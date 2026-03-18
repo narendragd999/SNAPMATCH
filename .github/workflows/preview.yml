@@ -190,81 +190,87 @@ EOF
       run: |
         pip install flask redis psycopg2-binary -q
 
-        # ── Redis HTTP proxy ──────────────────────────────────────────────
-        cat > /tmp/redis_proxy.py << 'PYEOF'
-import redis, json
-from flask import Flask, request, jsonify
+        # ── Write Redis HTTP proxy using python3 directly ─────────────────
+        python3 - << 'PYEOF'
+import textwrap, pathlib
+code = textwrap.dedent("""
+    import redis, json
+    from flask import Flask, request, jsonify
+    app = Flask(__name__)
+    r = redis.Redis(host='127.0.0.1', port=6379, db=0)
 
-app = Flask(__name__)
-# Redis runs in Docker but port 6379 is mapped to host
-r   = redis.Redis(host='127.0.0.1', port=6379, db=0)
+    @app.route('/health')
+    def health():
+        return jsonify({'status': 'ok', 'redis': str(r.ping())})
 
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok', 'redis': str(r.ping())})
+    @app.route('/execute', methods=['POST'])
+    def execute():
+        d = request.json
+        cmd = d['cmd']
+        args = d.get('args', [])
+        result = getattr(r, cmd)(*args)
+        if isinstance(result, bytes):
+            result = result.decode()
+        elif isinstance(result, (list, tuple)):
+            result = [x.decode() if isinstance(x, bytes) else x for x in result]
+        return jsonify({'result': result})
 
-@app.route('/execute', methods=['POST'])
-def execute():
-    d      = request.json
-    cmd    = d['cmd']
-    args   = d.get('args', [])
-    result = getattr(r, cmd)(*args)
-    if isinstance(result, bytes):
-        result = result.decode()
-    elif isinstance(result, list):
-        result = [x.decode() if isinstance(x, bytes) else x for x in result]
-    elif isinstance(result, tuple):
-        result = [x.decode() if isinstance(x, bytes) else x for x in result]
-    return jsonify({'result': result})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=6380, threaded=True)
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=6380, threaded=True)
+""").strip()
+pathlib.Path('/tmp/redis_proxy.py').write_text(code)
+print('Redis proxy written')
 PYEOF
 
-        python /tmp/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
-        sleep 3
-        curl -sf http://localhost:6380/health && echo "✅ Redis proxy up" || echo "❌ Redis proxy failed"
+        # ── Write PostgreSQL HTTP proxy ───────────────────────────────────
+        python3 - << 'PYEOF'
+import textwrap, pathlib
+code = textwrap.dedent("""
+    import psycopg2, psycopg2.extras
+    from flask import Flask, request, jsonify
+    app = Flask(__name__)
+    DSN = 'postgresql://postgres:admin123@127.0.0.1:5432/event_ai'
 
-        # ── PostgreSQL HTTP proxy ─────────────────────────────────────────
-        cat > /tmp/db_proxy.py << 'PYEOF'
-import psycopg2, psycopg2.extras, json
-from flask import Flask, request, jsonify
+    def get_conn():
+        return psycopg2.connect(DSN)
 
-app = Flask(__name__)
-DSN = 'postgresql://postgres:admin123@127.0.0.1:5432/event_ai'
+    @app.route('/health')
+    def health():
+        conn = get_conn(); conn.close()
+        return jsonify({'status': 'ok'})
 
-def get_conn():
-    return psycopg2.connect(DSN)
-
-@app.route('/health')
-def health():
-    conn = get_conn(); conn.close()
-    return jsonify({'status': 'ok'})
-
-@app.route('/query', methods=['POST'])
-def query():
-    d    = request.json
-    sql  = d['sql']
-    args = d.get('args', [])
-    conn = get_conn()
-    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(sql, args)
-    if sql.strip().upper().startswith('SELECT'):
-        rows = [dict(r) for r in cur.fetchall()]
+    @app.route('/query', methods=['POST'])
+    def query():
+        d = request.json
+        sql = d['sql']
+        args = d.get('args', [])
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, args)
+        if sql.strip().upper().startswith('SELECT'):
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            return jsonify({'rows': rows})
+        conn.commit()
+        rc = cur.rowcount
         conn.close()
-        return jsonify({'rows': rows})
-    conn.commit()
-    rc = cur.rowcount
-    conn.close()
-    return jsonify({'rowcount': rc})
+        return jsonify({'rowcount': rc})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5433, threaded=True)
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=5433, threaded=True)
+""").strip()
+pathlib.Path('/tmp/db_proxy.py').write_text(code)
+print('DB proxy written')
 PYEOF
 
-        python /tmp/db_proxy.py > /tmp/db_proxy.log 2>&1 &
+        # ── Start both proxies ────────────────────────────────────────────
+        python3 /tmp/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
         sleep 3
-        curl -sf http://localhost:5433/health && echo "✅ DB proxy up" || echo "❌ DB proxy failed"
+        curl -sf http://localhost:6380/health && echo "Redis proxy up" || echo "Redis proxy failed"
+
+        python3 /tmp/db_proxy.py > /tmp/db_proxy.log 2>&1 &
+        sleep 3
+        curl -sf http://localhost:5433/health && echo "DB proxy up" || echo "DB proxy failed"
 
         # ── Cloudflare tunnel for Redis proxy ─────────────────────────────
         cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
