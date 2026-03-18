@@ -304,7 +304,7 @@ async def confirm_uploads(
     task_id           = None
     processing_status = None
     if body.is_last_chunk and accepted > 0:
-        task = process_event.apply_async(args=[event_id], queue="default")
+        task = process_event.apply_async(args=[event_id], queue="photo_processing")
         task_id = task.id
         processing_status = "queued"
 
