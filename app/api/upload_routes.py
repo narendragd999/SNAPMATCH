@@ -303,17 +303,17 @@ async def confirm_uploads(
     # Add these two lines BEFORE the if block
     task_id           = None
     processing_status = None
-    if body.is_last_chunk and accepted > 0:
-        task = process_event.apply_async(args=[event_id], queue="photo_processing")
-        task_id = task.id
-        processing_status = "queued"
+    # if body.is_last_chunk and accepted > 0:
+    #     task = process_event.apply_async(args=[event_id], queue="photo_processing")
+    #     task_id = task.id
+    #     processing_status = "queued"
 
-        # Update event status
-        event.processing_status   = "queued"
-        event.processing_progress = 0
-        db.commit()
+    #     # Update event status
+    #     event.processing_status   = "queued"
+    #     event.processing_progress = 0
+    #     db.commit()
 
-        logger.info("Auto-triggered processing for event %s — task %s", event_id, task_id)
+    #     logger.info("Auto-triggered processing for event %s — task %s", event_id, task_id)
 
     return ConfirmResponse( 
         accepted=accepted,
