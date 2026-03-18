@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import select          # ← ADD THIS LINE
 
 from app.database.db import SessionLocal
 from app.models.event import Event
