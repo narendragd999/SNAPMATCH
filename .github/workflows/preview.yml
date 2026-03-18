@@ -56,35 +56,35 @@ jobs:
     - name: Write GHA .env
       run: |
         cat > .env << 'EOF'
-        SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
-        ENV=prod
+SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
+ENV=prod
 
-        # Storage
-        STORAGE_BACKEND=minio
-        MINIO_ENDPOINT=http://minio:9000
-        MINIO_ACCESS_KEY=minioadmin
-        MINIO_SECRET_KEY=minioadmin
-        MINIO_BUCKET=snapfind
-        MINIO_PUBLIC_URL=/storage
-        MINIO_PRESIGN_ENDPOINT=
+# Storage
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=snapfind
+MINIO_PUBLIC_URL=/storage
+MINIO_PRESIGN_ENDPOINT=
 
-        # Payments
-        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
-        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
-        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+# Payments
+RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
+RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
+RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
 
-        # SMTP
-        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
-        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
-        SMTP_USER=${{ secrets.SMTP_USER || '' }}
-        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
-        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
+# SMTP
+SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
+SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+SMTP_USER=${{ secrets.SMTP_USER || '' }}
+SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
+SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
 
-        # Frontend — relative paths so the Cloudflare tunnel origin is used
-        NEXT_PUBLIC_API_URL=/api
-        NEXT_PUBLIC_STORAGE_URL=/storage
-        NEXT_PUBLIC_STORAGE_BACKEND=minio
-        EOF
+# Frontend — relative paths so the Cloudflare tunnel origin is used
+NEXT_PUBLIC_API_URL=/api
+NEXT_PUBLIC_STORAGE_URL=/storage
+NEXT_PUBLIC_STORAGE_BACKEND=minio
+EOF
 
     # 5 Start Docker stack
     - name: Start containers
@@ -196,7 +196,8 @@ import redis, json
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-r   = redis.Redis(host='localhost', port=6379, db=0)
+# Redis runs in Docker but port 6379 is mapped to host
+r   = redis.Redis(host='127.0.0.1', port=6379, db=0)
 
 @app.route('/health')
 def health():
@@ -230,7 +231,7 @@ import psycopg2, psycopg2.extras, json
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-DSN = 'postgresql://postgres:admin123@localhost:5432/event_ai'
+DSN = 'postgresql://postgres:admin123@127.0.0.1:5432/event_ai'
 
 def get_conn():
     return psycopg2.connect(DSN)
