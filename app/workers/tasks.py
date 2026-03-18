@@ -55,7 +55,7 @@ def _get_redis():
 # TASK 1 — ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-@celery.task(bind=True, queue="default")
+@celery.task(bind=True, queue="photo_processing")
 def process_event(self, event_id: int):
     """
     Dispatch one process_single_photo task per unprocessed photo,

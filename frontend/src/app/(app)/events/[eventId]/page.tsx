@@ -1179,17 +1179,29 @@ export default function OwnerEventDetailPage() {
 
   // ─── Auto-reload event for progress ────────────────────────────────────
   useEffect(() => {
-    if (event?.processing_status !== "processing") return;
+    // Poll when queued OR processing
+    if (
+      event?.processing_status !== "processing" &&
+      event?.processing_status !== "queued"        // ← ADD THIS
+    ) return;
+
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${API}/events/${eventId}`, { headers: authH() });
         if (res.ok) {
           const data = await res.json();
           setEvent(data);
-          if (data.processing_status !== "processing") clearInterval(interval);
+          // Stop polling when done
+          if (
+            data.processing_status !== "processing" &&
+            data.processing_status !== "queued"
+          ) {
+            clearInterval(interval);
+          }
         }
       } catch (e) { console.error("Failed to reload event progress", e); }
-    }, 5000);
+    }, 3000);   // poll every 3s
+
     return () => clearInterval(interval);
   }, [event?.processing_status, eventId]);
 
