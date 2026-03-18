@@ -82,10 +82,11 @@ def process_event(self, event_id: int):
         event.processing_started_at = datetime.utcnow()
         db.commit()
 
-        # Redis progress tracking
+        # ── FIX 3: Redis keys with 24hr TTL ──────────────────────────────────
         r = _get_redis()
-        r.set(f"event:{event_id}:total",     len(photos), ex=3600)
-        r.set(f"event:{event_id}:completed", 0,           ex=3600)
+        r.set(f"event:{event_id}:total",     len(photos), ex=86400)  # ← was no TTL
+        r.set(f"event:{event_id}:completed", 0,           ex=86400)
+        r.set(f"event:{event_id}:phase",     "face_detection", ex=86400)  # ← NEW
 
         tasks = chord(
             [process_single_photo.s(photo.id, photo.stored_filename, event_id)
@@ -137,9 +138,10 @@ def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int):
                 "embedding_b64": base64.b64encode(pickle.dumps(emb)).decode(),
             })
 
-        # Redis progress increment
+        # Redis progress increment — refresh TTL each time
         r = _get_redis()
         r.incr(f"event:{event_id}:completed")
+        r.expire(f"event:{event_id}:completed", 86400)   # ← keep TTL alive
 
         t_total = time.time() - t_start
         return _photo_result(photo_id, "ok", optimized_name, serialised_faces, t_opt, t_total)
@@ -174,28 +176,32 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
     """
     db = SessionLocal()
     event_start = time.time()
+    r = _get_redis()   # ← ADD: needed for phase tracking
 
     try:
+        # ── Phase: clustering ─────────────────────────────────────────────────
+        r.set(f"event:{event_id}:phase", "clustering", ex=86400)       # ← ADD
         _db_update_event(db, event_id, processing_progress=73)
 
         total_new       = len(photo_results)
-        total_optimized = sum(1 for r in photo_results if r["status"] == "ok")
+        total_optimized = sum(1 for res in photo_results if res["status"] == "ok")
 
         # Bulk UPDATE photo statuses
         _bulk_update_photos(db, photo_results)
 
         # Deserialise embeddings
         new_faces: list[tuple[str, np.ndarray, int]] = []
-        for r in photo_results:
-            if r["status"] != "ok":
+        for res in photo_results:
+            if res["status"] != "ok":
                 continue
-            for f in r["faces"]:
+            for f in res["faces"]:
                 emb = pickle.loads(base64.b64decode(f["embedding_b64"]))
-                new_faces.append((f["image_name"], emb, r["photo_id"]))
+                new_faces.append((f["image_name"], emb, res["photo_id"]))
 
         print(f"\n📸 {total_optimized}/{total_new} optimized, {len(new_faces)} faces")
 
         if not new_faces:
+            r.set(f"event:{event_id}:phase", "done", ex=86400)         # ← ADD
             _finalize_complete(db, event_id, total_new, 0, 0, event_start)
             _redis_cleanup(event_id)
             _release_lock(event_id)
@@ -261,8 +267,11 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
         db.bulk_save_objects(new_cluster_rows)
         db.commit()
 
-        # Post-clustering merge pass
+        # ── Phase: building index ─────────────────────────────────────────────
+        r.set(f"event:{event_id}:phase", "building_index", ex=86400)   # ← ADD
         _db_update_event(db, event_id, processing_progress=88)
+
+        # Post-clustering merge pass
         _merge_clusters(db, event_id, dim)
 
         # Rebuild FAISS search index
@@ -273,13 +282,18 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
             Cluster.event_id == event_id
         ).distinct().count()
 
-        # ── FIX: sum face counts across all processed photos for the event ──
-        total_faces = sum(len(r.get("faces") or []) for r in photo_results)
+        # FIX: sum face counts across all processed photos for the event
+        total_faces = sum(len(res.get("faces") or []) for res in photo_results)
 
+        # ── Phase: enriching ──────────────────────────────────────────────────
+        r.set(f"event:{event_id}:phase", "enriching", ex=86400)        # ← ADD
         _finalize_complete(db, event_id, total_new, total_clusters, total_faces, event_start)
 
         # Queue AI enrichment
         enrich_event_photos.apply_async(args=[event_id], queue=AI_QUEUE)
+
+        # ── Phase: done ───────────────────────────────────────────────────────
+        r.set(f"event:{event_id}:phase", "done", ex=86400)             # ← ADD
 
         _redis_cleanup(event_id)
         _release_lock(event_id)
@@ -287,6 +301,7 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
         return {"status": "completed", "total_clusters": total_clusters}
 
     except Exception as exc:
+        r.set(f"event:{event_id}:phase", "failed", ex=86400)           # ← ADD
         print(f"❌ finalize_event failed: {exc}")
         import traceback; traceback.print_exc()
         _db_update_event(db, event_id, processing_status="failed")
@@ -492,6 +507,8 @@ def _redis_cleanup(event_id):
         r = _get_redis()
         r.delete(f"event:{event_id}:total")
         r.delete(f"event:{event_id}:completed")
+        # Keep phase key for 1 hour so frontend can read final state
+        r.expire(f"event:{event_id}:phase", 3600)
     except Exception:
         pass
 

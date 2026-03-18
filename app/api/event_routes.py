@@ -49,6 +49,7 @@ from app.services.storage_service import STORAGE_BACKEND
 from app.services.storage_cleanup import delete_event_storage
 from datetime import datetime, timedelta
 from app.models.user import User
+import redis as redis_lib
 import uuid
 import secrets
 import os
@@ -560,6 +561,80 @@ def start_processing(
 
     return {"message": "Processing started", "event_id": event_id}
 
+
+_redis_client = None
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis_lib.Redis.from_url(
+            os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+            decode_responses=True
+        )
+    return _redis_client
+
+
+# ── GET /events/{event_id}/processing-status ──────────────────────────────────
+@router.get("/{event_id}/processing-status")
+def get_processing_status(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Polling endpoint for frontend — returns current processing phase + progress.
+    Phases: queued → face_detection → clustering → building_index → enriching → done
+    """
+    event = db.query(Event).filter(
+        Event.id == event_id,
+        Event.owner_id == current_user.id
+    ).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    r         = _get_redis()
+    total     = int(r.get(f"event:{event_id}:total")     or 0)
+    completed = int(r.get(f"event:{event_id}:completed") or 0)
+    phase     = r.get(f"event:{event_id}:phase") or event.processing_status or "unknown"
+
+    # Human-readable phase labels for frontend display
+    phase_labels = {
+        "queued":         "Waiting to start...",
+        "face_detection": "Detecting faces in photos",
+        "clustering":     "Grouping people together",
+        "building_index": "Building search index",
+        "enriching":      "Detecting scenes & objects",
+        "done":           "Ready!",
+        "failed":         "Processing failed",
+        "completed":      "Ready!",
+        "processing":     "Processing photos...",
+    }
+
+    # Calculate percent — face_detection drives 0-70%, rest is 70-100%
+    if phase == "face_detection" and total > 0:
+        percent = int((completed / total) * 70)
+    elif phase == "clustering":
+        percent = 75
+    elif phase == "building_index":
+        percent = 88
+    elif phase == "enriching":
+        percent = 95
+    elif phase in ("done", "completed"):
+        percent = 100
+    elif phase == "queued":
+        percent = 0
+    else:
+        percent = int(event.processing_progress or 0)
+
+    return {
+        "status":       event.processing_status,
+        "phase":        phase,
+        "phase_label":  phase_labels.get(phase, phase),
+        "total":        total,
+        "completed":    completed,
+        "percent":      percent,
+        "total_clusters": event.total_clusters or 0,
+        "total_faces":    event.total_faces or 0,
+    }
 
 # --------------------------------------------------
 # Get Clusters  ← paginated, sorted largest first

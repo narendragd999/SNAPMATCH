@@ -229,6 +229,20 @@ async def confirm_uploads(
     if len(body.uploads) > 200:
         raise HTTPException(status_code=400, detail="Max 200 uploads per confirm call.")
 
+    # ── FIX 1: Row lock — only one confirm runs at a time per event ───────────
+    event = db.execute(
+        select(Event)
+        .where(Event.id == event_id, Event.owner_id == current_user.id)
+        .with_for_update()              # ← prevents quota race condition
+    ).scalar_one_or_none()
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found or not authorized")
+    if event.payment_status not in ("paid", "free"):
+        raise HTTPException(status_code=402, detail="Complete payment before uploading.")
+    if event.expires_at and datetime.utcnow() > event.expires_at:
+        raise HTTPException(status_code=410, detail="Event has expired.")
+
     quota_remaining = max(0, (event.photo_quota or 0) - (event.image_count or 0))
     photo_records: list[Photo] = []
     rejected = 0
@@ -281,12 +295,27 @@ async def confirm_uploads(
         db.commit()
         db.refresh(event)
 
+    # ── FIX 2: Auto-trigger processing on final chunk ─────────────────────────
+    if body.is_last_chunk and accepted > 0:
+        task = process_event.apply_async(args=[event_id], queue="default")
+        task_id = task.id
+        processing_status = "queued"
+
+        # Update event status
+        event.processing_status   = "queued"
+        event.processing_progress = 0
+        db.commit()
+
+        logger.info("Auto-triggered processing for event %s — task %s", event_id, task_id)
+
     return ConfirmResponse(
         accepted=accepted,
         rejected=rejected,
         event_image_count=event.image_count or 0,
         photo_quota=event.photo_quota or 0,
         photos_remaining=max(0, (event.photo_quota or 0) - (event.image_count or 0)),
+        task_id=task_id,
+        processing_status=processing_status,
     )
 
 
