@@ -341,45 +341,45 @@ jobs:
         # Install redis-http-proxy
         pip install redis-py flask 2>/dev/null || true
 
-        # ── Simple Redis HTTP proxy ───────────────────────────────────────
-        cat > /tmp/redis_proxy.py << 'EOF'
-import redis, json
-from flask import Flask, request, jsonify
+                # ── Simple Redis HTTP proxy ───────────────────────────────────────
+                cat > /tmp/redis_proxy.py << 'EOF'
+        import redis, json
+        from flask import Flask, request, jsonify
 
-app = Flask(__name__)
-r = redis.Redis(host='localhost', port=6379, db=0)
+        app = Flask(__name__)
+        r = redis.Redis(host='localhost', port=6379, db=0)
 
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok', 'redis': r.ping()})
+        @app.route('/health')
+        def health():
+            return jsonify({'status': 'ok', 'redis': r.ping()})
 
-@app.route('/lpush', methods=['POST'])
-def lpush():
-    d = request.json
-    r.lpush(d['key'], *[json.dumps(v) for v in d['values']])
-    return jsonify({'ok': True})
+        @app.route('/lpush', methods=['POST'])
+        def lpush():
+            d = request.json
+            r.lpush(d['key'], *[json.dumps(v) for v in d['values']])
+            return jsonify({'ok': True})
 
-@app.route('/brpop', methods=['POST'])
-def brpop():
-    d    = request.json
-    val  = r.brpop(d['key'], timeout=d.get('timeout', 5))
-    return jsonify({'value': val[1].decode() if val else None})
+        @app.route('/brpop', methods=['POST'])
+        def brpop():
+            d    = request.json
+            val  = r.brpop(d['key'], timeout=d.get('timeout', 5))
+            return jsonify({'value': val[1].decode() if val else None})
 
-@app.route('/get', methods=['POST'])
-def get():
-    d = request.json
-    v = r.get(d['key'])
-    return jsonify({'value': v.decode() if v else None})
+        @app.route('/get', methods=['POST'])
+        def get():
+            d = request.json
+            v = r.get(d['key'])
+            return jsonify({'value': v.decode() if v else None})
 
-@app.route('/set', methods=['POST'])
-def set_key():
-    d = request.json
-    r.set(d['key'], d['value'], ex=d.get('ex'))
-    return jsonify({'ok': True})
+        @app.route('/set', methods=['POST'])
+        def set_key():
+            d = request.json
+            r.set(d['key'], d['value'], ex=d.get('ex'))
+            return jsonify({'ok': True})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=6380)
-EOF
+        if __name__ == '__main__':
+            app.run(host='0.0.0.0', port=6380)
+        EOF
 
         python /tmp/redis_proxy.py &
         sleep 3
@@ -394,42 +394,42 @@ EOF
 
         # ── Expose PostgreSQL via pgREST-style HTTP proxy ─────────────────
         cat > /tmp/db_proxy.py << 'EOF'
-import psycopg2, json
-from flask import Flask, request, jsonify
+        import psycopg2, json
+        from flask import Flask, request, jsonify
 
-app  = Flask(__name__)
-DSN  = 'postgresql://postgres:admin123@localhost:5432/event_ai'
+        app  = Flask(__name__)
+        DSN  = 'postgresql://postgres:admin123@localhost:5432/event_ai'
 
-def get_conn():
-    return psycopg2.connect(DSN)
+        def get_conn():
+            return psycopg2.connect(DSN)
 
-@app.route('/health')
-def health():
-    conn = get_conn()
-    conn.close()
-    return jsonify({'status': 'ok'})
+        @app.route('/health')
+        def health():
+            conn = get_conn()
+            conn.close()
+            return jsonify({'status': 'ok'})
 
-@app.route('/query', methods=['POST'])
-def query():
-    d    = request.json
-    sql  = d['sql']
-    args = d.get('args', [])
-    conn = get_conn()
-    cur  = conn.cursor()
-    cur.execute(sql, args)
-    if sql.strip().upper().startswith('SELECT'):
-        cols = [desc[0] for desc in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-        conn.close()
-        return jsonify({'rows': rows})
-    conn.commit()
-    rowcount = cur.rowcount
-    conn.close()
-    return jsonify({'rowcount': rowcount})
+        @app.route('/query', methods=['POST'])
+        def query():
+            d    = request.json
+            sql  = d['sql']
+            args = d.get('args', [])
+            conn = get_conn()
+            cur  = conn.cursor()
+            cur.execute(sql, args)
+            if sql.strip().upper().startswith('SELECT'):
+                cols = [desc[0] for desc in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                conn.close()
+                return jsonify({'rows': rows})
+            conn.commit()
+            rowcount = cur.rowcount
+            conn.close()
+            return jsonify({'rowcount': rowcount})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5433)
-EOF
+        if __name__ == '__main__':
+            app.run(host='0.0.0.0', port=5433)
+        EOF
 
         python /tmp/db_proxy.py &
         sleep 3
