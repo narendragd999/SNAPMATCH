@@ -45,57 +45,63 @@ from app.services.face_model import face_app   # lazy, thread-safe singleton
 
 STRICT_THRESHOLD   = 0.68   # high-confidence — "definitely this person"
 NORMAL_THRESHOLD   = 0.55   # good match     — "very likely"
-FALLBACK_THRESHOLD = 0.45   # lower confidence — "possible match"
+FALLBACK_THRESHOLD = 0.40   # lower confidence — "possible match"
 MIN_THRESHOLD      = FALLBACK_THRESHOLD  # nothing below this is returned
 
 # ── Search config ─────────────────────────────────────────────────────────────
-MAX_RESULTS = 100   # FAISS top-K candidates per embedding query (was 50)
+MAX_RESULTS = 1000   # FAISS top-K candidates per embedding query (was 50)
 MAX_DIM     = 640   # resize selfie before detection — matches face_service.py
 
 
 # ── Embedding extraction ──────────────────────────────────────────────────────
 
+# search_service.py — replace extract_all_embeddings()
+
 def extract_all_embeddings(image_bytes: bytes) -> list[np.ndarray]:
     """
-    Decode image bytes, detect all faces, return list of normalized embeddings.
-    Returns [] if no face is detected or image is unreadable.
+    Extract embeddings from selfie + augmented variants.
+    More query embeddings = catches more poses/lighting in event photos.
     """
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img    = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
     if img is None:
         return []
 
-    # Resize to detection cap — consistent with face_service.py MAX_DIM=640
     h, w = img.shape[:2]
     if max(h, w) > MAX_DIM:
         scale = MAX_DIM / max(h, w)
-        img = cv2.resize(
-            img,
-            (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
+        img   = cv2.resize(img, (int(w * scale), int(h * scale)), 
+                           interpolation=cv2.INTER_AREA)
 
-    # get_face_app() returns the lazily-initialized singleton.
-    # Safe to call from FastAPI async context — model is already warm by the
-    # time search requests arrive (Celery workers pre-warm it during indexing).
-    faces = face_app.get(img)
+    # Generate variants — original + 3 augmented
+    variants = [
+        img,                                    # original
+        cv2.flip(img, 1),                       # horizontal flip
+        img[5:-5, 5:-5] if h > 20 else img,    # slight center crop
+        cv2.convertScaleAbs(img, alpha=1.1, beta=10),  # slightly brighter
+    ]
 
-    try:
-        faces = face_app.get(img)
-    except Exception as e:
-        print(f"[search_service] InsightFace error: {e}")
-        return []
+    all_embeddings = []
+    seen_norms = set()
 
-    embeddings = []
-    for face in faces:
-        emb  = face.embedding
-        norm = np.linalg.norm(emb)
-        if norm == 0:
+    for variant in variants:
+        try:
+            faces = face_app.get(variant)
+            for face in faces:
+                emb  = face.embedding
+                norm = np.linalg.norm(emb)
+                if norm == 0:
+                    continue
+                normalized = emb / norm
+                # Deduplicate near-identical embeddings
+                key = round(float(normalized[0]), 3)
+                if key not in seen_norms:
+                    seen_norms.add(key)
+                    all_embeddings.append(normalized)
+        except Exception:
             continue
-        embeddings.append(emb / norm)
 
-    return embeddings
+    return all_embeddings
 
 
 # ── Core matching engine ──────────────────────────────────────────────────────

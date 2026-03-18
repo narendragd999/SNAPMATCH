@@ -5,7 +5,7 @@ USE_GPU = False
 
 #face_app = FaceAnalysis(name="buffalo_s")
 face_app = FaceAnalysis(
-    name="buffalo_s",
+    name="buffalo_l",
     allowed_modules=['detection', 'recognition']
 )
 
