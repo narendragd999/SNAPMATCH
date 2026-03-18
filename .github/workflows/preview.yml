@@ -13,14 +13,6 @@ on:
           - "2"
           - "3"
           - "5"
-      reset_processing:
-        description: "Reset processing state (keep photos, re-process)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 jobs:
   preview:
@@ -53,41 +45,66 @@ jobs:
         df -h
 
     # 4 Write GHA .env
+    # .env is gitignored (contains secrets) so it never exists on the runner.
+    # We create it here with GHA-specific values so docker-compose variable
+    # substitution works correctly at build time.
+    #
+    # KEY POINTS:
+    #   NGINX_PORT        → unset (omitted) so docker-compose defaults to 80
+    #   NEXT_PUBLIC_APP_URL → empty string so Next.js uses RELATIVE paths
+    #                         (/api, /storage) — works because the Cloudflare
+    #                         tunnel hits nginx on port 80, which is the same
+    #                         origin the browser sees. No absolute URL needed.
+    #   MINIO_PRESIGN_ENDPOINT → set to empty here; injected after tunnels
+    #                            start (step 10) with the real Cloudflare URL.
     - name: Write GHA .env
       run: |
         cat > .env << 'EOF'
-SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
-ENV=prod
+        SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
+        ENV=prod
 
-# Storage
-STORAGE_BACKEND=minio
-MINIO_ENDPOINT=http://minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=snapfind
-MINIO_PUBLIC_URL=/storage
-MINIO_PRESIGN_ENDPOINT=
+        # Storage
+        STORAGE_BACKEND=minio
+        MINIO_ENDPOINT=http://minio:9000
+        MINIO_ACCESS_KEY=minioadmin
+        MINIO_SECRET_KEY=minioadmin
+        MINIO_BUCKET=snapfind
+        MINIO_PUBLIC_URL=/storage
+        MINIO_PRESIGN_ENDPOINT=
 
-# Payments
-RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
-RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
-RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+        # Payments
+        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
+        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
+        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
 
-# SMTP
-SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
-SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
-SMTP_USER=${{ secrets.SMTP_USER || '' }}
-SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
-SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
+        # SMTP
+        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
+        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+        SMTP_USER=${{ secrets.SMTP_USER || '' }}
+        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
+        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
 
-# Frontend — relative paths so the Cloudflare tunnel origin is used
-NEXT_PUBLIC_API_URL=/api
-NEXT_PUBLIC_STORAGE_URL=/storage
-NEXT_PUBLIC_STORAGE_BACKEND=minio
-EOF
+        # Frontend — relative paths so the Cloudflare tunnel origin is used.
+        # The browser is on https://xyz.trycloudflare.com so /api resolves to
+        # https://xyz.trycloudflare.com/api which nginx proxies to backend.
+        # Never use http://localhost here — that's unreachable from the browser.
+        NEXT_PUBLIC_API_URL=/api
+        NEXT_PUBLIC_STORAGE_URL=/storage
+        NGINX_PORT=80
+
+        # AI models
+        MAX_PHOTO_SIZE_MB=20
+        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
+        YOLO_MODEL_PATH=yolov8n.pt
+        DEFAULT_EVENT_PIN=0000
+        EOF
+        # Remove leading whitespace from heredoc lines
+        sed -i 's/^[[:space:]]*//' .env
+        echo "--- .env written ---"
+        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
 
     # 5 Start Docker stack
-    - name: Start containers
+    - name: Start Docker containers
       run: |
         docker compose up -d --build
         docker ps
@@ -95,7 +112,7 @@ EOF
     # 6 Wait for backend
     - name: Wait for backend
       run: |
-        echo "Waiting for backend..."
+        echo "Waiting for backend API..."
         for i in {1..30}; do
           if curl -sf http://localhost:8000/docs >/dev/null; then
             echo "Backend ready"
@@ -104,7 +121,7 @@ EOF
           sleep 5
         done
         echo "Backend failed to start"
-        docker compose logs backend --tail=50
+        docker compose logs backend
         exit 1
 
     # 7 Wait for frontend
@@ -118,11 +135,26 @@ EOF
           fi
           sleep 5
         done
-        echo "Frontend failed to start"
-        docker compose logs frontend --tail=50
+        echo "Frontend failed"
+        docker compose logs frontend
         exit 1
 
-    # 8 Install cloudflared
+    # 8 Wait for nginx
+    - name: Wait for nginx proxy
+      run: |
+        echo "Waiting for proxy..."
+        for i in {1..20}; do
+          if curl -sf http://localhost >/dev/null; then
+            echo "Proxy ready"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "Proxy failed"
+        docker compose logs nginx
+        exit 1
+
+    # 9 Install cloudflared
     - name: Install Cloudflare tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -130,7 +162,22 @@ EOF
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
         cloudflared --version
 
-    # 9 Start Cloudflare tunnels — App + MinIO
+    # 10 Start Cloudflare tunnels — one for the app, one for MinIO direct PUT
+    #
+    # Why two tunnels?
+    #   The app tunnel (localhost:80) goes through nginx and is fine for API
+    #   calls and page loads. But presigned PUT URLs must point to MinIO
+    #   directly (localhost:9000) so the browser can PUT files without going
+    #   through the backend. Both tunnels are on HTTPS, so no Mixed Content.
+    #
+    # Why the MinIO tunnel URL must be used as the SIGNING endpoint (not just
+    # rewritten after signing):
+    #   S3 presigned URLs embed the host in X-Amz-SignedHeaders=content-type;host.
+    #   If boto3 signs with host=minio:9000 but the browser sends
+    #   Host=xxx.trycloudflare.com, MinIO returns 403 SignatureDoesNotMatch.
+    #   By passing MINIO_PRESIGN_ENDPOINT as the boto3 endpoint_url for a
+    #   presign-only client, the signature is computed with the public host —
+    #   matching what the browser will actually send. See storage_service.py.
     - name: Start Cloudflare Tunnels
       run: |
         start_tunnel() {
@@ -175,190 +222,99 @@ EOF
         # MinIO tunnel (direct to MinIO for presigned PUT uploads)
         start_tunnel "MinIO" "http://localhost:9000" "tunnel-minio.log" "MINIO_TUNNEL_URL"
 
-    # 10 Inject MinIO presign endpoint into backend
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo ""
+        echo "App URL:       $PREVIEW_URL"
+        echo "Backend docs:  $PREVIEW_URL/api/docs"
+        echo "MinIO tunnel:  $MINIO_TUNNEL_URL  (presigned PUT target)"
+        echo ""
+
+    # 11 Inject MINIO_PRESIGN_ENDPOINT into the running backend container.
+    #
+    # storage_service.py uses a dedicated presigning boto3 client with
+    # endpoint_url=MINIO_PRESIGN_ENDPOINT so signatures are computed with
+    # the public host — no URL rewriting needed or done.
     - name: Inject MinIO presign endpoint into backend
       run: |
         echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
+
+        # Update the .env file so subsequent docker compose commands see it.
         sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
-        echo "MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL" >> .env
-        docker compose up -d --no-deps backend
-        sleep 5
-        echo "Backend restarted with new presign endpoint"
+
+        # Recreate ONLY the backend container with the updated env.
+        #   --no-deps        : don't touch db/redis/minio/nginx/frontend
+        #   --force-recreate : always create fresh even if image unchanged
+        MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
+          docker compose up -d --no-deps --force-recreate backend
+
+        # Wait for backend to come back healthy
+        echo "Waiting for backend after recreate..."
+        for i in {1..30}; do
+          if curl -sf http://localhost:8000/docs >/dev/null; then
+            echo "Backend ready"
+            break
+          fi
+          sleep 3
+        done
+
+        # Confirm the var is live inside the new container
+        BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
+        LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
+        if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
+          echo "MINIO_PRESIGN_ENDPOINT confirmed inside container: $LIVE"
+        else
+          echo "ERROR: var not found in container."
+          echo "  Got:      '$LIVE'"
+          echo "  Expected: '$MINIO_TUNNEL_URL'"
+          echo ""
+          echo "Check that docker-compose.yml backend environment includes:"
+          echo "  - MINIO_PRESIGN_ENDPOINT=\${MINIO_PRESIGN_ENDPOINT:-}"
+          docker exec "$BACKEND" printenv | grep -i minio || true
+          exit 1
+        fi
+
+        # Smoke-test: verify that the presign endpoint generates an HTTPS URL
+        echo "Smoke-testing presign endpoint..."
+        PRESIGN_RESP=$(curl -sf -X POST \
+          -H "Content-Type: application/json" \
+          -d '{"filenames":["test.jpg"]}' \
+          http://localhost:8000/uploads/1/presign 2>/dev/null || true)
+        if echo "$PRESIGN_RESP" | grep -q "https://"; then
+          echo "Presign endpoint returns HTTPS URLs"
+        else
+          echo "WARNING: Presign smoke-test inconclusive (may need auth or event ID 1)."
+          echo "Response: $PRESIGN_RESP"
+        fi
 
     # 11 Start Redis + PostgreSQL HTTP proxies and tunnels for Colab GPU worker
     - name: Start Redis and DB proxies for Colab GPU
       run: |
         pip install flask redis psycopg2-binary -q
 
-        # ── Write Redis HTTP proxy using python3 directly ─────────────────
-        python3 - << 'PYEOF'
-import textwrap, pathlib
-code = textwrap.dedent("""
-    import redis, json
-    from flask import Flask, request, jsonify
-    app = Flask(__name__)
-    r = redis.Redis(host='127.0.0.1', port=6379, db=0)
-
-    @app.route('/health')
-    def health():
-        return jsonify({'status': 'ok', 'redis': str(r.ping())})
-
-    @app.route('/execute', methods=['POST'])
-    def execute():
-        d = request.json
-        cmd = d['cmd']
-        args = d.get('args', [])
-        result = getattr(r, cmd)(*args)
-        if isinstance(result, bytes):
-            result = result.decode()
-        elif isinstance(result, (list, tuple)):
-            result = [x.decode() if isinstance(x, bytes) else x for x in result]
-        return jsonify({'result': result})
-
-    if __name__ == '__main__':
-        app.run(host='0.0.0.0', port=6380, threaded=True)
-""").strip()
-pathlib.Path('/tmp/redis_proxy.py').write_text(code)
-print('Redis proxy written')
-PYEOF
-
-        # ── Write PostgreSQL HTTP proxy ───────────────────────────────────
-        python3 - << 'PYEOF'
-import textwrap, pathlib
-code = textwrap.dedent("""
-    import psycopg2, psycopg2.extras
-    from flask import Flask, request, jsonify
-    app = Flask(__name__)
-    DSN = 'postgresql://postgres:admin123@127.0.0.1:5432/event_ai'
-
-    def get_conn():
-        return psycopg2.connect(DSN)
-
-    @app.route('/health')
-    def health():
-        conn = get_conn(); conn.close()
-        return jsonify({'status': 'ok'})
-
-    @app.route('/query', methods=['POST'])
-    def query():
-        d = request.json
-        sql = d['sql']
-        args = d.get('args', [])
-        conn = get_conn()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, args)
-        if sql.strip().upper().startswith('SELECT'):
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.close()
-            return jsonify({'rows': rows})
-        conn.commit()
-        rc = cur.rowcount
-        conn.close()
-        return jsonify({'rowcount': rc})
-
-    if __name__ == '__main__':
-        app.run(host='0.0.0.0', port=5433, threaded=True)
-""").strip()
-pathlib.Path('/tmp/db_proxy.py').write_text(code)
-print('DB proxy written')
-PYEOF
-
-        # ── Start both proxies ────────────────────────────────────────────
-        python3 /tmp/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
+        python3 .github/scripts/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
         sleep 3
         curl -sf http://localhost:6380/health && echo "Redis proxy up" || echo "Redis proxy failed"
 
-        python3 /tmp/db_proxy.py > /tmp/db_proxy.log 2>&1 &
+        python3 .github/scripts/db_proxy.py > /tmp/db_proxy.log 2>&1 &
         sleep 3
         curl -sf http://localhost:5433/health && echo "DB proxy up" || echo "DB proxy failed"
 
-        # ── Cloudflare tunnel for Redis proxy ─────────────────────────────
         cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
         sleep 10
         REDIS_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/redis-tunnel.log | head -1)
         echo "REDIS_TUNNEL_URL=$REDIS_TUNNEL" >> $GITHUB_ENV
         echo "Redis tunnel: $REDIS_TUNNEL"
 
-        # ── Cloudflare tunnel for DB proxy ────────────────────────────────
         cloudflared tunnel --url http://localhost:5433 > /tmp/db-tunnel.log 2>&1 &
         sleep 10
         DB_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/db-tunnel.log | head -1)
         echo "DB_TUNNEL_URL=$DB_TUNNEL" >> $GITHUB_ENV
         echo "DB tunnel: $DB_TUNNEL"
-
-    # 12 Print all URLs including Colab GPU worker config
-    - name: Print all tunnel URLs
-      run: |
-        echo ""
-        echo "================================="
-        echo " SnapFind Preview is LIVE"
-        echo "================================="
-        echo " App:          $PREVIEW_URL"
-        echo " API docs:     $PREVIEW_URL/api/docs"
-        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
-        echo " Redis tunnel: $REDIS_TUNNEL_URL"
-        echo " DB tunnel:    $DB_TUNNEL_URL"
-        echo "================================="
-        echo ""
-        echo "=== COLAB GPU WORKER CONFIG ==="
-        echo " BACKEND_URL = $PREVIEW_URL/api"
-        echo " MINIO_URL   = $MINIO_TUNNEL_URL"
-        echo " REDIS_URL   = $REDIS_TUNNEL_URL"
-        echo " DB_URL      = $DB_TUNNEL_URL"
-        echo "================================="
-
-    # 13 Verify presign upload works
-    - name: Verify presign upload
-      run: |
-        sleep 5
-        REGISTER_RESP=$(curl -s -X POST http://localhost/api/auth/register \
-          -H "Content-Type: application/json" \
-          -d '{"email":"verify@test.com","password":"verify123"}')
-        echo "Register: $REGISTER_RESP"
-
-        TOKEN=$(echo "$REGISTER_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-
-        if [ -n "$TOKEN" ]; then
-          FREE_RESP=$(curl -s -X POST http://localhost/api/billing/create-free-event \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $TOKEN" \
-            -d '{"event_name":"verify-test"}')
-          EVENT_ID=$(echo "$FREE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('event_id',''))" 2>/dev/null || echo "")
-          echo "Event ID: $EVENT_ID"
-
-          if [ -n "$EVENT_ID" ]; then
-            PRESIGN_RESP=$(curl -s -X POST "http://localhost/api/upload/${EVENT_ID}/presign" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $TOKEN" \
-              -d '{"filenames":["test.jpg"]}')
-            echo "Presign response: $PRESIGN_RESP"
-          fi
-        fi
-
-    # 14 Reset processing state (optional)
-    - name: Reset processing state
-      if: ${{ github.event.inputs.reset_processing == 'true' }}
-      run: |
-        echo "Resetting processing state — keeping photos..."
-        docker exec -i event_postgres psql -U postgres -d event_ai << 'SQL'
-          UPDATE photos
-          SET status='uploaded', optimized_filename=NULL, faces_detected=0
-          WHERE status IN ('processed','failed');
-
-          DELETE FROM clusters;
-
-          UPDATE events
-          SET processing_status='pending', processing_progress=0,
-              processing_started_at=NULL, processing_completed_at=NULL,
-              total_clusters=0, total_faces=0
-          WHERE processing_status IN ('completed','processing','failed');
-
-          SELECT id, name, processing_status, total_clusters, total_faces FROM events;
-          SELECT event_id, status, COUNT(*) FROM photos GROUP BY event_id, status;
-        SQL
-        echo "Reset complete — photos kept, processing state cleared"
-
-    # 15 Keep preview alive
+    
+    # 12 Keep preview alive
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
@@ -370,8 +326,6 @@ PYEOF
         echo " App:          $PREVIEW_URL"
         echo " API docs:     $PREVIEW_URL/api/docs"
         echo " MinIO tunnel: $MINIO_TUNNEL_URL"
-        echo " Redis tunnel: $REDIS_TUNNEL_URL"
-        echo " DB tunnel:    $DB_TUNNEL_URL"
         echo "================================="
         echo ""
 
@@ -379,35 +333,29 @@ PYEOF
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
           REM=$(( (SECONDS_LEFT - i) / 60 ))
-          echo "[$REM min remaining] App: $PREVIEW_URL | Redis: $REDIS_TUNNEL_URL | DB: $DB_TUNNEL_URL"
+          echo "[$REM min remaining] App: $PREVIEW_URL"
           curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
         done
 
-    # 16 Show logs on failure
+    # 13 Show logs if failure
     - name: Show logs on failure
       if: failure()
       run: |
-        docker compose logs backend  --tail=50
+        docker compose logs backend --tail=50
         docker compose logs frontend --tail=50
-        docker compose logs nginx    --tail=50
+        docker compose logs nginx --tail=50
         cat tunnel-app.log   || true
         cat tunnel-minio.log || true
-        cat /tmp/redis-tunnel.log || true
-        cat /tmp/db-tunnel.log    || true
-        cat /tmp/redis_proxy.log  || true
-        cat /tmp/db_proxy.log     || true
 
-    # 17 Cleanup
+    # 14 Cleanup
     - name: Cleanup
       if: always()
       run: |
         pkill cloudflared || true
-        pkill -f redis_proxy || true
-        pkill -f db_proxy    || true
         docker compose down -v
         echo "Cleanup complete"
 
-    # 18 Show system resources
+    # 15 Show system resources
     - name: Show System Resources
       run: |
         echo "================ CPU ================="
