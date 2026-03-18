@@ -580,7 +580,7 @@ function BulkUploadModal({
               headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
               body: JSON.stringify({
                 uploads: confirmedUploads.slice(ci, ci + CONFIRM_CHUNK),
-                is_last_chunk: isLastChunk,   // ← ADD this field
+                is_last_chunk: (ci + CONFIRM_CHUNK) >= confirmedUploads.length,  // ← ADD
               }),
             });
           } catch (e) { console.error(`Confirm chunk ${ci} failed:`, e); }

@@ -110,6 +110,7 @@ class ConfirmedUpload(BaseModel):
 
 class ConfirmRequest(BaseModel):
     uploads: list[ConfirmedUpload]
+    is_last_chunk: bool = True          # ← ADD THIS
 
 
 class ConfirmResponse(BaseModel):
@@ -118,6 +119,8 @@ class ConfirmResponse(BaseModel):
     event_image_count: int
     photo_quota: int
     photos_remaining: int
+    task_id: str | None = None          # ← ADD THIS
+    processing_status: str | None = None  # ← ADD THIS
 
 
 # ─── Route 1: Presign ─────────────────────────────────────────────────────────
