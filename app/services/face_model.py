@@ -7,35 +7,30 @@ Changes:
   - Lazy singleton with threading.Lock — safe for Celery prefork workers
   - Module-level face_app alias kept so existing imports don't break
 """
+import os
 import threading
 from insightface.app import FaceAnalysis
-import os
 
-# Reads USE_GPU env var — "true" = GPU, anything else = CPU
 USE_GPU = os.getenv("USE_GPU", "false").lower() == "true"
 
 _face_app = None
 _lock     = threading.Lock()
 
-
 def get_face_app() -> FaceAnalysis:
-    """Load model once, reuse forever. Thread-safe."""
     global _face_app
     if _face_app is None:
         with _lock:
             if _face_app is None:
+                ctx_id   = 0 if USE_GPU else -1
+                det_size = (640, 640) if USE_GPU else (320, 320)
                 app = FaceAnalysis(
-                    name="buffalo_s",                       # ← was buffalo_s (+6% accuracy)
+                    name="buffalo_l",
                     allowed_modules=["detection", "recognition"],
                 )
-                app.prepare(
-                    ctx_id   = 0 if USE_GPU else -1,
-                    det_size = (320, 320),                  # ← 3x faster than (640,640)
-                )
+                app.prepare(ctx_id=ctx_id, det_size=det_size)
                 _face_app = app
-                print("✅ InsightFace buffalo_l loaded (det_size=320)")
+                mode = "GPU 🚀" if USE_GPU else "CPU"
+                print(f"✅ InsightFace buffalo_l ({mode}, det_size={det_size})")
     return _face_app
 
-
-# Backward-compat alias — face_service.py imports `face_app` directly
 face_app = get_face_app()
