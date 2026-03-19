@@ -91,7 +91,8 @@ services:
     environment:
       # These override / supplement .env for Docker-internal wiring
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       # Allow requests from nginx (port 80), direct frontend (3000), and
       # direct backend access (8000) — all used during local development.
       # On GHA nginx is port 80 (localhost), locally port 8080 (127.0.0.1:8080)
@@ -164,7 +165,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -209,7 +211,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -249,7 +252,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -287,7 +291,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -308,7 +313,8 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     restart: unless-stopped
 
   # Frontend
