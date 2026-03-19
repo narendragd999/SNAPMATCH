@@ -1,0 +1,380 @@
+%%capture
+!pip install celery redis insightface onnxruntime-gpu \
+    boto3 pillow opencv-python-headless sqlalchemy psycopg2-binary
+
+import subprocess
+out = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+for line in out.stdout.split('\n'):
+    if 'T4' in line or 'Tesla' in line or 'GPU' in line:
+        print(f"✅ GPU: {line.strip()}")
+        break
+else:
+    print("❌ No GPU — set T4 runtime first")
+
+=================================================================================
+
+
+import os
+!git clone https://github.com/narendragd999/SNAPMATCH.git /content/snapfind
+os.chdir('/content/snapfind')
+!git log --oneline -3
+
+=================================================================================
+
+import redis as redis_lib, boto3
+from botocore.config import Config
+
+# Test Upstash Redis
+try:
+    r = redis_lib.from_url(
+        os.environ["CELERY_BROKER_URL"],
+        ssl_cert_reqs=None
+    )
+    r.ping()
+    q = r.llen("photo_processing") or 0
+    print(f"✅ Upstash Redis connected")
+    print(f"   Tasks in photo_processing queue: {q}")
+except Exception as e:
+    print(f"❌ Redis failed: {e}")
+
+# Test MinIO
+try:
+    s3 = boto3.client(
+        "s3",
+        endpoint_url          = os.environ["MINIO_ENDPOINT"],
+        aws_access_key_id     = "minioadmin",
+        aws_secret_access_key = "minioadmin",
+        config                = Config(signature_version="s3v4"),
+        region_name           = "auto",
+        verify                = False,
+    )
+    buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    print(f"✅ MinIO connected — buckets: {buckets}")
+except Exception as e:
+    print(f"❌ MinIO failed: {e}")
+
+
+=================================================================================    
+
+
+import sys, numpy as np
+sys.path.insert(0, '/content/snapfind')
+
+print("Loading buffalo_l on GPU — first time ~2 min (326MB download)...")
+from app.services.face_model import get_face_app
+
+face_app = get_face_app()
+face_app.get(np.zeros((640, 640, 3), dtype=np.uint8))
+print("✅ GPU face detection ready")
+
+
+=================================================================================    
+
+
+
+
+Cell 1 — Set environment variables
+=================================================================================
+import os
+
+# ── Paste from GHA "Print Colab connection info" step output ──────────────────
+os.environ["APP_URL"]   = "https://age-innovation-exemption-tunes.trycloudflare.com"
+os.environ["MINIO_URL"] = "https://fragrance-zoloft-lands-discussing.trycloudflare.com"
+
+# ── Upstash Redis ─────────────────────────────────────────────────────────────
+UPSTASH_URL = "rediss://default:gQAAAAAAASngAAIncDFkZTM1MWY1OWY0YzQ0YTc5OWIwNjhhYTQ1YjhmODI5M3AxNzYyNTY@funny-macaque-76256.upstash.io:6379?ssl_cert_reqs=CERT_NONE"
+os.environ["CELERY_BROKER_URL"]     = UPSTASH_URL
+os.environ["CELERY_RESULT_BACKEND"] = UPSTASH_URL
+
+# ── App config ────────────────────────────────────────────────────────────────
+os.environ["DATABASE_URL"]           = "postgresql://postgres:admin123@postgres:5432/event_ai"
+os.environ["SECRET_KEY"]             = "gpu-test-secret"
+os.environ["ENV"]                    = "prod"
+os.environ["STORAGE_BACKEND"]        = "minio"
+os.environ["MINIO_ENDPOINT"]         = os.environ["MINIO_URL"]
+os.environ["MINIO_ACCESS_KEY"]       = "minioadmin"
+os.environ["MINIO_SECRET_KEY"]       = "minioadmin"
+os.environ["MINIO_BUCKET"]           = "snapfind"
+os.environ["MINIO_PRESIGN_ENDPOINT"] = os.environ["MINIO_URL"]
+os.environ["USE_GPU"]                = "true"
+os.environ["DEFAULT_EVENT_PIN"]      = "0000"
+os.environ["MAX_PHOTO_SIZE_MB"]      = "20"
+
+print("✓ Env vars set")
+print(f"  APP_URL            → {os.environ['APP_URL']}")
+print(f"  CELERY_BROKER_URL  → {os.environ['CELERY_BROKER_URL'][:60]}...")
+print(f"  DATABASE_URL       → {os.environ['DATABASE_URL'][:40]}...")
+print(f"  MINIO_ENDPOINT     → {os.environ['MINIO_ENDPOINT']}")
+
+
+=================================================================================
+
+
+Cell 2 — Clone repo
+
+=================================================================================
+
+import subprocess, os
+
+REPO_URL    = "https://github.com/YOUR_USERNAME/YOUR_REPO.git"
+CLONE_PATH  = "/content/snapfind"
+BRANCH      = "main"
+
+if not os.path.exists(CLONE_PATH):
+    result = subprocess.run(
+        ["git", "clone", "--branch", BRANCH, REPO_URL, CLONE_PATH],
+        capture_output=True, text=True
+    )
+    print(result.stdout or result.stderr)
+else:
+    result = subprocess.run(
+        ["git", "-C", CLONE_PATH, "pull"],
+        capture_output=True, text=True
+    )
+    print("Already cloned —", result.stdout.strip())
+
+print("✓ Repo ready at", CLONE_PATH)
+
+=================================================================================
+
+Cell 3 — Install dependencies + start GPU worker
+
+=================================================================================
+
+import subprocess, threading, time, os, sys
+
+# ── 1. Detect CUDA ────────────────────────────────────────────────────────────
+cuda_check = subprocess.run(["nvcc", "--version"], capture_output=True, text=True)
+cuda_ver   = "12" if "release 12" in cuda_check.stdout else "11"
+print(f"🖥  CUDA {cuda_ver}.x detected")
+
+# ── 2. Install dependencies ───────────────────────────────────────────────────
+DEPS = [
+    f"faiss-gpu-cu{cuda_ver}",
+    "celery[redis]",
+    "sqlalchemy",
+    "redis",
+    "numpy<2",
+    "insightface",
+    "onnxruntime-gpu",
+]
+
+print("\n📦 Installing dependencies...")
+failed = []
+for pkg in DEPS:
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", pkg],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"  ✗  {pkg}\n     {result.stderr.strip()[:200]}")
+        failed.append(pkg)
+    else:
+        print(f"  ✓  {pkg}")
+
+if failed:
+    raise SystemExit(f"Failed packages: {failed}")
+
+# ── 3. Verify imports ─────────────────────────────────────────────────────────
+print("\n🔍 Verifying imports...")
+missing = []
+for mod in ["faiss", "celery", "sqlalchemy", "redis", "numpy", "insightface"]:
+    r = subprocess.run(
+        [sys.executable, "-c", f"import {mod}; print('{mod} ok')"],
+        capture_output=True, text=True,
+        cwd='/content/snapfind',
+        env=os.environ.copy()
+    )
+    if f"{mod} ok" in r.stdout:
+        print(f"  ✓  {mod}")
+    else:
+        err = (r.stderr.strip().splitlines() or ["unknown"])[-1]
+        print(f"  ✗  {mod} — {err}")
+        missing.append(mod)
+
+if missing:
+    raise SystemExit(f"Missing: {missing}")
+
+# ── 4. GPU sanity checks ──────────────────────────────────────────────────────
+faiss_r = subprocess.run(
+    [sys.executable, "-c",
+     "import faiss; faiss.StandardGpuResources(); print('FAISS GPU OK')"],
+    capture_output=True, text=True, env=os.environ.copy()
+)
+print(f"\n  {'✓' if 'OK' in faiss_r.stdout else '⚠'}"
+      f"  FAISS: {faiss_r.stdout.strip() or faiss_r.stderr.strip()[-100:]}")
+
+ort_r = subprocess.run(
+    [sys.executable, "-c",
+     "import onnxruntime as ort; p = ort.get_available_providers(); "
+     "print('CUDA' if 'CUDAExecutionProvider' in p else 'CPU only')"],
+    capture_output=True, text=True, env=os.environ.copy()
+)
+print(f"  {'✓' if 'CUDA' in ort_r.stdout else '⚠'}"
+      f"  ONNX: {ort_r.stdout.strip()}")
+
+# ── 5. Validate required env vars ────────────────────────────────────────────
+print("\n🔑 Checking env vars...")
+REQUIRED = ["DATABASE_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND"]
+all_ok = True
+for var in REQUIRED:
+    val = os.environ.get(var, "")
+    if val:
+        print(f"  ✓  {var} = {val[:40]}...")
+    else:
+        print(f"  ✗  {var} = NOT SET")
+        all_ok = False
+
+if not all_ok:
+    raise SystemExit("Set missing env vars in Cell 1 and re-run")
+
+# ── 6. Start Celery worker ────────────────────────────────────────────────────
+print("\n🚀 Starting GPU Celery worker...")
+
+env = os.environ.copy()
+env["USE_GPU"]    = "true"
+env["PYTHONPATH"] = "/content/snapfind"
+
+proc = subprocess.Popen(
+    [
+        "celery", "-A", "app.workers.celery_worker", "worker",
+        "-Q", "photo_processing",
+        "--concurrency=2",
+        "--pool=prefork",
+        "--loglevel=info",
+        "--time-limit=300",
+        "--soft-time-limit=270",
+        "--without-mingle",
+        "--without-gossip",
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    cwd='/content/snapfind',
+    env=env,
+)
+
+def stream_logs(p):
+    for line in p.stdout:
+        prefix = "  ❌" if any(w in line for w in (
+            "ERROR", "Traceback", "ModuleNotFound",
+            "ImportError", "ArgumentError", "ValueError"
+        )) else "    "
+        print(f"{prefix}{line}", end='', flush=True)
+
+threading.Thread(target=stream_logs, args=(proc,), daemon=True).start()
+
+# ── 7. Health check ───────────────────────────────────────────────────────────
+time.sleep(12)
+
+if proc.poll() is None:
+    print()
+    print("=" * 55)
+    print("  GPU WORKER RUNNING")
+    print("=" * 55)
+    print(f"\n  App:   {os.environ.get('APP_URL', '(not set)')}")
+    print(f"  Queue: photo_processing")
+    print(f"  FAISS: GPU (faiss-gpu-cu{cuda_ver})")
+    print(f"  ONNX:  CUDAExecutionProvider")
+    print("""
+  Flow:
+    1. Open APP_URL in browser
+    2. Upload photos to an event
+    3. Click Process Images
+    4. Tasks → Upstash Redis → THIS worker
+    5. GPU face detection runs here
+    6. finalize_event → clusters written to DB
+    7. App shows clusters ✅
+    """)
+else:
+    print(f"\n❌ Worker crashed (exit code {proc.returncode}) — scroll up for traceback")
+
+
+
+ =================================================================================
+
+CELL 4 — Monitor (run anytime in new cell)
+
+=================================================================================
+
+import redis as redis_lib, os
+
+r = redis_lib.from_url(os.environ["CELERY_BROKER_URL"], ssl_cert_reqs=None)
+
+print("Queue Status:")
+print(f"  photo_processing : {r.llen('photo_processing') or 0} tasks")
+print(f"  event_finalize   : {r.llen('event_finalize') or 0} tasks")
+print(f"  default          : {r.llen('default') or 0} tasks")
+
+=================================================================================
+
+
+
+Clean error — Upstash rediss:// needs SSL params. Fix it in your env cell:
+=================================================================================
+import os
+
+# ── Fix: append ssl_cert_reqs to both Redis URLs ──────────────────────────────
+def fix_redis_ssl(url):
+    if url and url.startswith("rediss://") and "ssl_cert_reqs" not in url:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "ssl_cert_reqs=CERT_NONE"
+    return url
+
+os.environ["CELERY_BROKER_URL"]      = fix_redis_ssl(os.environ.get("CELERY_BROKER_URL", ""))
+os.environ["CELERY_RESULT_BACKEND"]  = fix_redis_ssl(os.environ.get("CELERY_RESULT_BACKEND", ""))
+
+print("✓ Redis SSL fixed")
+print(f"  BROKER  → {os.environ['CELERY_BROKER_URL'][-40:]}")
+print(f"  BACKEND → {os.environ['CELERY_RESULT_BACKEND'][-40:]}")
+=================================================================================
+
+
+
+Order of execution every session:
+
+Run GHA workflow → wait for "Print Colab connection info" step
+Copy APP_URL and MINIO_URL from GHA output into Cell 1 → run it
+Run Cell 2 (only needed once per Colab session if repo already cloned)
+Run Cell 3 — worker starts and stays alive
+
+
+
+=================================================================================
+
+
+# PHASE 4 — Every Testing Session
+
+## Step 11 — Checklist
+```
+BEFORE STARTING:
+
+□ 1. Go to GitHub repo → Actions → SnapFind GPU Preview
+□ 2. Click Run workflow → select 3 hours → Run workflow
+□ 3. Wait ~8 minutes for all steps to complete
+□ 4. Find Step 11 output → copy APP_URL and MINIO_URL
+
+COLAB SETUP:
+
+□ 5. Open colab.research.google.com → New notebook
+□ 6. Runtime → Change runtime type → T4 GPU → Save
+□ 7. Run Cell 1 (install) — wait 2-3 min
+□ 8. Run Cell 2 (clone) — check latest commits
+□ 9. Run Cell 3 — paste APP_URL, MINIO_URL, UPSTASH_URL
+□ 10. Run Cell 4 — both must show ✅
+□ 11. Run Cell 5 — must show GPU 🚀
+□ 12. Run Cell 6 — worker must show running
+
+TESTING:
+
+□ 13. Open APP_URL in browser
+□ 14. Login → upload photos → click Process Images
+□ 15. Watch Cell 6 logs — see GPU picking up tasks
+□ 16. Run Cell 7 — queue depth dropping = working
+□ 17. Check app — clusters appear when done ✅
+
+WHEN DONE:
+
+□ 18. Stop Cell 6 (click stop button)
+□ 19. GitHub Actions workflow auto-ends after chosen hours
+□ 20. Optionally cancel workflow early if done testing

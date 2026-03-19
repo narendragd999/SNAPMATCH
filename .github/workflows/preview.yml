@@ -25,22 +25,39 @@ jobs:
     - name: Free disk space
       run: |
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        docker system prune -af || true
         df -h
 
-    # ── 3. Write .env — ALL services use Upstash Redis ───────────────────────
+    # ── 3. Write .env ─────────────────────────────────────────────────────────
     - name: Write .env
+      env:
+        SECRET_KEY:              ${{ secrets.SECRET_KEY }}
+        UPSTASH_REDIS_URL:       ${{ secrets.UPSTASH_REDIS_URL }}
+        RAZORPAY_KEY_ID:         ${{ secrets.RAZORPAY_KEY_ID }}
+        RAZORPAY_KEY_SECRET:     ${{ secrets.RAZORPAY_KEY_SECRET }}
+        RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+        SMTP_HOST:               ${{ secrets.SMTP_HOST }}
+        SMTP_USER:               ${{ secrets.SMTP_USER }}
+        SMTP_PASSWORD:           ${{ secrets.SMTP_PASSWORD }}
+        SMTP_FROM:               ${{ secrets.SMTP_FROM }}
       run: |
-        cat > .env << 'EOF'
-        SECRET_KEY=${{ secrets.SECRET_KEY || 'gpu-test-secret' }}
+        if [ -z "$UPSTASH_REDIS_URL" ]; then
+          echo "❌ UPSTASH_REDIS_URL secret is not set — aborting"
+          exit 1
+        fi
+
+        # Append ssl_cert_reqs so both backend and Colab worker connect cleanly
+        REDIS_URL="${UPSTASH_REDIS_URL}?ssl_cert_reqs=CERT_NONE"
+
+        cat > .env << EOF
+        SECRET_KEY=${SECRET_KEY:-gpu-test-secret}
         ENV=prod
 
-        # ── Broker: Upstash Redis (shared with Colab GPU) ──
-        CELERY_BROKER_URL=${{ secrets.UPSTASH_REDIS_URL }}
+        CELERY_BROKER_URL=${REDIS_URL}
+        CELERY_RESULT_BACKEND=${REDIS_URL}
 
-        # ── App database: local PostgreSQL ─────────────────
         DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
 
-        # ── Storage: MinIO ─────────────────────────────────
         STORAGE_BACKEND=minio
         MINIO_ENDPOINT=http://minio:9000
         MINIO_ACCESS_KEY=minioadmin
@@ -49,20 +66,32 @@ jobs:
         MINIO_PUBLIC_URL=/storage
         MINIO_PRESIGN_ENDPOINT=
 
-        # ── Payments ───────────────────────────────────────
-        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
-        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
-        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+        RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+        RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
+        RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
 
-        # ── Frontend ───────────────────────────────────────
+        SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+        SMTP_PORT=587
+        SMTP_USER=${SMTP_USER}
+        SMTP_PASSWORD=${SMTP_PASSWORD}
+        SMTP_FROM=${SMTP_FROM}
+
         NEXT_PUBLIC_API_URL=/api
         NEXT_PUBLIC_STORAGE_URL=/storage
+        NEXT_PUBLIC_STORAGE_BACKEND=minio
+        NGINX_PORT=80
 
-        # ── GPU: disabled on GHA (no GPU hardware here) ────
         USE_GPU=false
+        DEFAULT_EVENT_PIN=0000
+        MAX_PHOTO_SIZE_MB=20
+        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
+        YOLO_MODEL_PATH=yolov8n.pt
         EOF
+
         sed -i 's/^[[:space:]]*//' .env
         echo "✅ .env written"
+        echo "--- key vars (secrets redacted) ---"
+        grep -v "SECRET\|PASSWORD\|KEY\|TOKEN" .env
 
     # ── 4. Start Docker stack ─────────────────────────────────────────────────
     - name: Start Docker containers
@@ -77,36 +106,50 @@ jobs:
           curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready" && exit 0
           sleep 5
         done
-        docker compose logs backend --tail=20
+        echo "❌ Backend failed — logs:"
+        docker compose logs backend --tail=50
+        echo "--- .env (redacted) ---"
+        grep -v "SECRET\|PASSWORD\|KEY\|TOKEN" .env
         exit 1
 
-    # ── 6. Wait for app ───────────────────────────────────────────────────────
-    - name: Wait for app
+    # ── 6. Wait for frontend ──────────────────────────────────────────────────
+    - name: Wait for frontend
+      run: |
+        for i in {1..30}; do
+          curl -sf http://localhost:3000 >/dev/null && echo "✅ Frontend ready" && exit 0
+          sleep 5
+        done
+        echo "❌ Frontend failed — logs:"
+        docker compose logs frontend --tail=30
+        exit 1
+
+    # ── 7. Wait for nginx ─────────────────────────────────────────────────────
+    - name: Wait for nginx
       run: |
         for i in {1..20}; do
-          curl -sf http://localhost >/dev/null && echo "✅ App ready" && exit 0
+          curl -sf http://localhost >/dev/null && echo "✅ Nginx ready" && exit 0
           sleep 3
         done
+        echo "❌ Nginx failed — logs:"
+        docker compose logs nginx --tail=30
         exit 1
 
-    # ── 7. STOP celery_photo — Colab GPU replaces it ─────────────────────────
+    # ── 8. Stop CPU photo worker — Colab GPU replaces it ─────────────────────
     - name: Stop CPU photo worker
       run: |
         docker compose stop celery_photo
-        echo ""
-        echo "✅ celery_photo STOPPED — Colab GPU will handle photo processing"
-        echo ""
-        echo "Running containers:"
+        echo "✅ celery_photo STOPPED — Colab GPU will handle photo_processing queue"
         docker compose ps --format "table {{.Name}}\t{{.Status}}"
 
-    # ── 8. Install cloudflared ────────────────────────────────────────────────
+    # ── 9. Install cloudflared ────────────────────────────────────────────────
     - name: Install cloudflared
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+        cloudflared --version
 
-    # ── 9. Start tunnels ──────────────────────────────────────────────────────
+    # ── 10. Start tunnels ─────────────────────────────────────────────────────
     - name: Start Cloudflare tunnels
       run: |
         start_tunnel() {
@@ -117,8 +160,7 @@ jobs:
             cloudflared tunnel --url "$TARGET" > "$LOGFILE" 2>&1 &
             for i in $(seq 1 30); do
               sleep 1
-              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
-                    "$LOGFILE" | head -1)
+              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$LOGFILE" | head -1)
               [ -n "$URL" ] && break
             done
             if [ -n "$URL" ]; then
@@ -126,42 +168,52 @@ jobs:
               echo "✅ $NAME tunnel: $URL"
               return 0
             fi
+            echo "  attempt $attempt failed"; cat "$LOGFILE"
           done
-          echo "❌ $NAME tunnel failed"
+          echo "❌ $NAME tunnel failed after 3 attempts"
           return 1
         }
 
         start_tunnel "App"   "http://localhost:80"   "tunnel-app.log"   "APP_URL"
         start_tunnel "MinIO" "http://localhost:9000" "tunnel-minio.log" "MINIO_URL"
 
-    # ── 10. Inject MinIO presign URL into backend ─────────────────────────────
+    # ── 11. Inject MinIO presign URL ──────────────────────────────────────────
     - name: Inject MinIO presign endpoint
       run: |
         sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_URL|" .env
-        docker compose up -d --no-deps --force-recreate backend
-        sleep 10
-        curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready"
+        MINIO_PRESIGN_ENDPOINT="$MINIO_URL" \
+          docker compose up -d --no-deps --force-recreate backend
+        for i in {1..20}; do
+          curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready" && break
+          sleep 3
+        done
 
-    # ── 11. Print everything Colab needs ──────────────────────────────────────
+        # Confirm var is live inside container
+        BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -1)
+        LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
+        echo "MINIO_PRESIGN_ENDPOINT in container: $LIVE"
+
+    # ── 12. Print Colab connection info ───────────────────────────────────────
     - name: Print Colab connection info
       run: |
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════╗"
-        echo "║        PASTE THESE INTO GOOGLE COLAB CELL 3             ║"
-        echo "╠══════════════════════════════════════════════════════════╣"
-        echo "║"
-        echo "║  APP_URL   = \"$APP_URL\""
-        echo "║  MINIO_URL = \"$MINIO_URL\""
-        echo "║"
-        echo "║  UPSTASH_URL = from your Upstash dashboard"
-        echo "║  (same value as UPSTASH_REDIS_URL secret)"
-        echo "║"
-        echo "╚══════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "Open app at: $APP_URL"
-        echo "Upload photos, click Process Images — Colab GPU processes them"
+        # Read broker URL back from .env (has ssl_cert_reqs already appended)
+        BROKER=$(grep "^CELERY_BROKER_URL=" .env | cut -d= -f2-)
 
-    # ── 12. Keep alive ────────────────────────────────────────────────────────
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║           PASTE THESE INTO GOOGLE COLAB CELL 1              ║"
+        echo "╠══════════════════════════════════════════════════════════════╣"
+        echo "║"
+        echo "║  APP_URL              = \"$APP_URL\""
+        echo "║  MINIO_URL            = \"$MINIO_URL\""
+        echo "║  CELERY_BROKER_URL    = \"$BROKER\""
+        echo "║  CELERY_RESULT_BACKEND= \"$BROKER\""
+        echo "║"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        echo "Open app: $APP_URL"
+
+    # ── 13. Keep alive ────────────────────────────────────────────────────────
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '3' }}
@@ -170,11 +222,21 @@ jobs:
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
           REM=$(( (SECONDS_LEFT - i) / 60 ))
-          echo "[$REM min left] App: $APP_URL | MinIO: $MINIO_URL"
-          curl -sf http://localhost:8000/docs >/dev/null || echo "⚠ Backend check failed"
+          echo "[$REM min left] $APP_URL"
+          curl -sf http://localhost:8000/docs >/dev/null || echo "  ⚠ backend check failed"
         done
 
-    # ── 13. Cleanup ───────────────────────────────────────────────────────────
+    # ── 14. Show logs on failure ──────────────────────────────────────────────
+    - name: Show logs on failure
+      if: failure()
+      run: |
+        docker compose logs backend  --tail=50
+        docker compose logs frontend --tail=30
+        docker compose logs nginx    --tail=30
+        cat tunnel-app.log   || true
+        cat tunnel-minio.log || true
+
+    # ── 15. Cleanup ───────────────────────────────────────────────────────────
     - name: Cleanup
       if: always()
       run: |
