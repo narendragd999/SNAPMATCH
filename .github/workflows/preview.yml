@@ -1,69 +1,46 @@
-name: SnapFind Preview
+name: SnapFind GPU Preview
 
 on:
   workflow_dispatch:
     inputs:
       duration_hours:
-        description: "Preview duration in hours"
+        description: "Hours to keep alive"
         required: false
-        default: "2"
+        default: "3"
         type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "5"
+        options: ["1", "2", "3", "5"]
 
 jobs:
-  preview:
+  gpu_preview:
     runs-on: ubuntu-latest
     timeout-minutes: 330
 
     steps:
 
-    # 1 Checkout repository
-    - name: Checkout repository
+    # ── 1. Checkout ──────────────────────────────────────────────────────────
+    - name: Checkout
       uses: actions/checkout@v4
 
-    # 2 System info
-    - name: System info
-      run: |
-        echo "CPU:"
-        nproc
-        echo "RAM:"
-        free -h
-        echo "Disk:"
-        df -h
-
-    # 3 Free disk
+    # ── 2. Free disk ─────────────────────────────────────────────────────────
     - name: Free disk space
       run: |
-        sudo rm -rf /usr/share/dotnet || true
-        sudo rm -rf /usr/local/lib/android || true
-        sudo rm -rf /opt/ghc || true
-        docker system prune -af || true
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
         df -h
 
-    # 4 Write GHA .env
-    # .env is gitignored (contains secrets) so it never exists on the runner.
-    # We create it here with GHA-specific values so docker-compose variable
-    # substitution works correctly at build time.
-    #
-    # KEY POINTS:
-    #   NGINX_PORT        → unset (omitted) so docker-compose defaults to 80
-    #   NEXT_PUBLIC_APP_URL → empty string so Next.js uses RELATIVE paths
-    #                         (/api, /storage) — works because the Cloudflare
-    #                         tunnel hits nginx on port 80, which is the same
-    #                         origin the browser sees. No absolute URL needed.
-    #   MINIO_PRESIGN_ENDPOINT → set to empty here; injected after tunnels
-    #                            start (step 10) with the real Cloudflare URL.
-    - name: Write GHA .env
+    # ── 3. Write .env — ALL services use Upstash Redis ───────────────────────
+    - name: Write .env
       run: |
         cat > .env << 'EOF'
-        SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
+        SECRET_KEY=${{ secrets.SECRET_KEY || 'gpu-test-secret' }}
         ENV=prod
 
-        # Storage
+        # ── Broker: Upstash Redis (shared with Colab GPU) ──
+        CELERY_BROKER_URL=${{ secrets.UPSTASH_REDIS_URL }}
+
+        # ── App database: local PostgreSQL ─────────────────
+        DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
+
+        # ── Storage: MinIO ─────────────────────────────────
         STORAGE_BACKEND=minio
         MINIO_ENDPOINT=http://minio:9000
         MINIO_ACCESS_KEY=minioadmin
@@ -72,300 +49,135 @@ jobs:
         MINIO_PUBLIC_URL=/storage
         MINIO_PRESIGN_ENDPOINT=
 
-        # Payments
+        # ── Payments ───────────────────────────────────────
         RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
         RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
         RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
 
-        # SMTP
-        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
-        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
-        SMTP_USER=${{ secrets.SMTP_USER || '' }}
-        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
-        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
-
-        # Frontend — relative paths so the Cloudflare tunnel origin is used.
-        # The browser is on https://xyz.trycloudflare.com so /api resolves to
-        # https://xyz.trycloudflare.com/api which nginx proxies to backend.
-        # Never use http://localhost here — that's unreachable from the browser.
+        # ── Frontend ───────────────────────────────────────
         NEXT_PUBLIC_API_URL=/api
         NEXT_PUBLIC_STORAGE_URL=/storage
-        NGINX_PORT=80
 
-        # AI models
-        MAX_PHOTO_SIZE_MB=20
-        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
-        YOLO_MODEL_PATH=yolov8n.pt
-        DEFAULT_EVENT_PIN=0000
+        # ── GPU: disabled on GHA (no GPU hardware here) ────
+        USE_GPU=false
         EOF
-        # Remove leading whitespace from heredoc lines
         sed -i 's/^[[:space:]]*//' .env
-        echo "--- .env written ---"
-        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
+        echo "✅ .env written"
 
-    # 5 Start Docker stack
+    # ── 4. Start Docker stack ─────────────────────────────────────────────────
     - name: Start Docker containers
       run: |
         docker compose up -d --build
         docker ps
 
-    # 6 Wait for backend
+    # ── 5. Wait for backend ───────────────────────────────────────────────────
     - name: Wait for backend
       run: |
-        echo "Waiting for backend API..."
         for i in {1..30}; do
-          if curl -sf http://localhost:8000/docs >/dev/null; then
-            echo "Backend ready"
-            exit 0
-          fi
+          curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready" && exit 0
           sleep 5
         done
-        echo "Backend failed to start"
-        docker compose logs backend
+        docker compose logs backend --tail=20
         exit 1
 
-    # 7 Wait for frontend
-    - name: Wait for frontend
+    # ── 6. Wait for app ───────────────────────────────────────────────────────
+    - name: Wait for app
       run: |
-        echo "Waiting for frontend..."
-        for i in {1..30}; do
-          if curl -sf http://localhost:3000 >/dev/null; then
-            echo "Frontend ready"
-            exit 0
-          fi
-          sleep 5
-        done
-        echo "Frontend failed"
-        docker compose logs frontend
-        exit 1
-
-    # 8 Wait for nginx
-    - name: Wait for nginx proxy
-      run: |
-        echo "Waiting for proxy..."
         for i in {1..20}; do
-          if curl -sf http://localhost >/dev/null; then
-            echo "Proxy ready"
-            exit 0
-          fi
+          curl -sf http://localhost >/dev/null && echo "✅ App ready" && exit 0
           sleep 3
         done
-        echo "Proxy failed"
-        docker compose logs nginx
         exit 1
 
-    # 9 Install cloudflared
-    - name: Install Cloudflare tunnel
+    # ── 7. STOP celery_photo — Colab GPU replaces it ─────────────────────────
+    - name: Stop CPU photo worker
+      run: |
+        docker compose stop celery_photo
+        echo ""
+        echo "✅ celery_photo STOPPED — Colab GPU will handle photo processing"
+        echo ""
+        echo "Running containers:"
+        docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+    # ── 8. Install cloudflared ────────────────────────────────────────────────
+    - name: Install cloudflared
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-        cloudflared --version
 
-    # 10 Start Cloudflare tunnels — one for the app, one for MinIO direct PUT
-    #
-    # Why two tunnels?
-    #   The app tunnel (localhost:80) goes through nginx and is fine for API
-    #   calls and page loads. But presigned PUT URLs must point to MinIO
-    #   directly (localhost:9000) so the browser can PUT files without going
-    #   through the backend. Both tunnels are on HTTPS, so no Mixed Content.
-    #
-    # Why the MinIO tunnel URL must be used as the SIGNING endpoint (not just
-    # rewritten after signing):
-    #   S3 presigned URLs embed the host in X-Amz-SignedHeaders=content-type;host.
-    #   If boto3 signs with host=minio:9000 but the browser sends
-    #   Host=xxx.trycloudflare.com, MinIO returns 403 SignatureDoesNotMatch.
-    #   By passing MINIO_PRESIGN_ENDPOINT as the boto3 endpoint_url for a
-    #   presign-only client, the signature is computed with the public host —
-    #   matching what the browser will actually send. See storage_service.py.
-    - name: Start Cloudflare Tunnels
+    # ── 9. Start tunnels ──────────────────────────────────────────────────────
+    - name: Start Cloudflare tunnels
       run: |
         start_tunnel() {
-          local NAME="$1"
-          local TARGET="$2"
-          local LOGFILE="$3"
-          local URL_VAR="$4"
-
-          echo "Starting $NAME tunnel -> $TARGET ..."
-          for attempt in 1 2 3 4 5; do
-            echo "  Attempt $attempt..."
+          local NAME="$1" TARGET="$2" LOGFILE="$3" VAR="$4"
+          for attempt in 1 2 3; do
             pkill -f "cloudflared tunnel.*$TARGET" || true
-            rm -f "$LOGFILE"
-            sleep 3
-
+            rm -f "$LOGFILE"; sleep 3
             cloudflared tunnel --url "$TARGET" > "$LOGFILE" 2>&1 &
-
             for i in $(seq 1 30); do
               sleep 1
-              FOUND=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$LOGFILE" | head -n 1)
-              if [ -n "$FOUND" ]; then break; fi
+              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
+                    "$LOGFILE" | head -1)
+              [ -n "$URL" ] && break
             done
-
-            if [ -n "$FOUND" ]; then
-              echo "  $NAME tunnel ready: $FOUND"
-              echo "${URL_VAR}=${FOUND}" >> "$GITHUB_ENV"
+            if [ -n "$URL" ]; then
+              echo "$VAR=$URL" >> $GITHUB_ENV
+              echo "✅ $NAME tunnel: $URL"
               return 0
             fi
-
-            echo "  Attempt $attempt failed. Log:"
-            cat "$LOGFILE"
           done
-
-          echo "ERROR: Could not establish $NAME tunnel after 5 attempts"
-          cat "$LOGFILE"
+          echo "❌ $NAME tunnel failed"
           return 1
         }
 
-        # App tunnel (nginx -> frontend + backend API)
-        start_tunnel "App"   "http://localhost:80"   "tunnel-app.log"   "PREVIEW_URL"
+        start_tunnel "App"   "http://localhost:80"   "tunnel-app.log"   "APP_URL"
+        start_tunnel "MinIO" "http://localhost:9000" "tunnel-minio.log" "MINIO_URL"
 
-        # MinIO tunnel (direct to MinIO for presigned PUT uploads)
-        start_tunnel "MinIO" "http://localhost:9000" "tunnel-minio.log" "MINIO_TUNNEL_URL"
-
-        echo ""
-        echo "================================="
-        echo " SnapFind Preview is LIVE"
-        echo "================================="
-        echo ""
-        echo "App URL:       $PREVIEW_URL"
-        echo "Backend docs:  $PREVIEW_URL/api/docs"
-        echo "MinIO tunnel:  $MINIO_TUNNEL_URL  (presigned PUT target)"
-        echo ""
-
-    # 11 Inject MINIO_PRESIGN_ENDPOINT into the running backend container.
-    #
-    # storage_service.py uses a dedicated presigning boto3 client with
-    # endpoint_url=MINIO_PRESIGN_ENDPOINT so signatures are computed with
-    # the public host — no URL rewriting needed or done.
-    - name: Inject MinIO presign endpoint into backend
+    # ── 10. Inject MinIO presign URL into backend ─────────────────────────────
+    - name: Inject MinIO presign endpoint
       run: |
-        echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
+        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_URL|" .env
+        docker compose up -d --no-deps --force-recreate backend
+        sleep 10
+        curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready"
 
-        # Update the .env file so subsequent docker compose commands see it.
-        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
-
-        # Recreate ONLY the backend container with the updated env.
-        #   --no-deps        : don't touch db/redis/minio/nginx/frontend
-        #   --force-recreate : always create fresh even if image unchanged
-        MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
-          docker compose up -d --no-deps --force-recreate backend
-
-        # Wait for backend to come back healthy
-        echo "Waiting for backend after recreate..."
-        for i in {1..30}; do
-          if curl -sf http://localhost:8000/docs >/dev/null; then
-            echo "Backend ready"
-            break
-          fi
-          sleep 3
-        done
-
-        # Confirm the var is live inside the new container
-        BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
-        LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-        if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
-          echo "MINIO_PRESIGN_ENDPOINT confirmed inside container: $LIVE"
-        else
-          echo "ERROR: var not found in container."
-          echo "  Got:      '$LIVE'"
-          echo "  Expected: '$MINIO_TUNNEL_URL'"
-          echo ""
-          echo "Check that docker-compose.yml backend environment includes:"
-          echo "  - MINIO_PRESIGN_ENDPOINT=\${MINIO_PRESIGN_ENDPOINT:-}"
-          docker exec "$BACKEND" printenv | grep -i minio || true
-          exit 1
-        fi
-
-        # Smoke-test: verify that the presign endpoint generates an HTTPS URL
-        echo "Smoke-testing presign endpoint..."
-        PRESIGN_RESP=$(curl -sf -X POST \
-          -H "Content-Type: application/json" \
-          -d '{"filenames":["test.jpg"]}' \
-          http://localhost:8000/uploads/1/presign 2>/dev/null || true)
-        if echo "$PRESIGN_RESP" | grep -q "https://"; then
-          echo "Presign endpoint returns HTTPS URLs"
-        else
-          echo "WARNING: Presign smoke-test inconclusive (may need auth or event ID 1)."
-          echo "Response: $PRESIGN_RESP"
-        fi
-
-    # 11 Start Redis + PostgreSQL HTTP proxies and tunnels for Colab GPU worker
-    - name: Start Redis and DB proxies for Colab GPU
+    # ── 11. Print everything Colab needs ──────────────────────────────────────
+    - name: Print Colab connection info
       run: |
-        pip install flask redis psycopg2-binary -q
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║        PASTE THESE INTO GOOGLE COLAB CELL 3             ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║"
+        echo "║  APP_URL   = \"$APP_URL\""
+        echo "║  MINIO_URL = \"$MINIO_URL\""
+        echo "║"
+        echo "║  UPSTASH_URL = from your Upstash dashboard"
+        echo "║  (same value as UPSTASH_REDIS_URL secret)"
+        echo "║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+        echo "Open app at: $APP_URL"
+        echo "Upload photos, click Process Images — Colab GPU processes them"
 
-        python3 .github/scripts/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
-        sleep 3
-        curl -sf http://localhost:6380/health && echo "Redis proxy up" || echo "Redis proxy failed"
-
-        python3 .github/scripts/db_proxy.py > /tmp/db_proxy.log 2>&1 &
-        sleep 3
-        curl -sf http://localhost:5433/health && echo "DB proxy up" || echo "DB proxy failed"
-
-        cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
-        sleep 10
-        REDIS_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/redis-tunnel.log | head -1)
-        echo "REDIS_TUNNEL_URL=$REDIS_TUNNEL" >> $GITHUB_ENV
-        echo "Redis tunnel: $REDIS_TUNNEL"
-
-        cloudflared tunnel --url http://localhost:5433 > /tmp/db-tunnel.log 2>&1 &
-        sleep 10
-        DB_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/db-tunnel.log | head -1)
-        echo "DB_TUNNEL_URL=$DB_TUNNEL" >> $GITHUB_ENV
-        echo "DB tunnel: $DB_TUNNEL"
-    
-    # 12 Keep preview alive
+    # ── 12. Keep alive ────────────────────────────────────────────────────────
     - name: Keep preview alive
       env:
-        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
+        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '3' }}
       run: |
-        echo ""
-        echo "================================="
-        echo " SnapFind Preview is LIVE"
-        echo "================================="
-        echo " App:          $PREVIEW_URL"
-        echo " API docs:     $PREVIEW_URL/api/docs"
-        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
-        echo "================================="
-        echo ""
-
         SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
           REM=$(( (SECONDS_LEFT - i) / 60 ))
-          echo "[$REM min remaining] App: $PREVIEW_URL"
-          curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
+          echo "[$REM min left] App: $APP_URL | MinIO: $MINIO_URL"
+          curl -sf http://localhost:8000/docs >/dev/null || echo "⚠ Backend check failed"
         done
 
-    # 13 Show logs if failure
-    - name: Show logs on failure
-      if: failure()
-      run: |
-        docker compose logs backend --tail=50
-        docker compose logs frontend --tail=50
-        docker compose logs nginx --tail=50
-        cat tunnel-app.log   || true
-        cat tunnel-minio.log || true
-
-    # 14 Cleanup
+    # ── 13. Cleanup ───────────────────────────────────────────────────────────
     - name: Cleanup
       if: always()
       run: |
         pkill cloudflared || true
         docker compose down -v
-        echo "Cleanup complete"
-
-    # 15 Show system resources
-    - name: Show System Resources
-      run: |
-        echo "================ CPU ================="
-        nproc
-        lscpu
-        echo "================ RAM ================="
-        free -h
-        echo "================ DISK ================="
-        df -h
-        echo "================ DOCKER CONTAINERS ================="
-        docker ps
-        echo "================ DOCKER RESOURCE USAGE ================="
-        docker stats --no-stream
+        echo "✅ Cleanup done"
