@@ -10,6 +10,7 @@ insightface
 faiss-cpu
 python-multipart
 pillow
+pillow-heif>=0.13.0
 onnxruntime
 sqlalchemy
 alembic
@@ -20,7 +21,6 @@ razorpay
 pydantic[email]
 alembic
 ultralytics
-
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision

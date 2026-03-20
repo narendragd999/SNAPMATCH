@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      show_celery_logs:
+        description: "Stream live Celery worker logs in the GHA output"
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   preview:
@@ -61,15 +66,10 @@ jobs:
         echo "Clean done — this run will rebuild all images from scratch"
 
     # 3 Set up Docker Buildx with GHA cache driver.
-    #   The `gha` cache backend writes directly to GHA's cache service —
-    #   no separate actions/cache step or local directory needed.
-    #   Saves 3-6 min on runs where images haven't changed.
-    #   Note: docker-compose.yml must include `cache_from` / `cache_to` build
-    #   args per service, OR use COMPOSE_BAKE=1 (Docker Compose v2.17+).
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 5 Cache pip packages — avoids re-downloading flask/redis/psycopg2 each run
+    # 5 Cache pip packages
     - name: Cache pip packages
       uses: actions/cache@v4
       with:
@@ -78,8 +78,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-pip-
 
-    # 6 Install Python proxy dependencies early (while docker builds below)
-    #   Running this before docker build lets it overlap with the build time.
+    # 6 Install Python proxy dependencies early
     - name: Install proxy dependencies
       run: pip install flask redis psycopg2-binary -q
 
@@ -127,9 +126,6 @@ jobs:
         cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
 
     # 8 Build and start Docker stack.
-    #   docker compose build --parallel builds all services simultaneously.
-    #   DOCKER_BUILDKIT + COMPOSE_DOCKER_CLI_BUILD enable BuildKit so the
-    #   buildx builder from step 3 is used, enabling GHA layer cache.
     - name: Start Docker containers
       env:
         DOCKER_BUILDKIT: "1"
@@ -140,9 +136,7 @@ jobs:
         docker compose up -d
         docker ps
 
-    # 9 Wait for all services in parallel — poll all three at once instead of
-    #   sequentially. Saves up to (backend_wait + frontend_wait + nginx_wait)
-    #   since in practice they all come up around the same time.
+    # 9 Wait for all services in parallel
     - name: Wait for services
       run: |
         wait_for() {
@@ -158,14 +152,10 @@ jobs:
           return 1
         }
 
-        # Start all three health checks in background simultaneously.
-        # Capture PIDs immediately with $! — by the time a for loop runs,
-        # fast jobs may already be reaped and gone from the jobs table.
         wait_for "Backend"  "http://localhost:8000/docs" 40 3 & PID_BACKEND=$!
         wait_for "Frontend" "http://localhost:3000"      40 3 & PID_FRONTEND=$!
         wait_for "Nginx"    "http://localhost"           30 3 & PID_NGINX=$!
 
-        # Wait for all three — fail if any one fails
         FAIL=0
         wait "$PID_BACKEND"  || FAIL=1
         wait "$PID_FRONTEND" || FAIL=1
@@ -189,11 +179,6 @@ jobs:
         cloudflared --version
 
     # 11 Start BOTH Cloudflare tunnels in parallel.
-    #    Original code started them sequentially — each could take up to
-    #    5 attempts × 33s = 165s, so two tunnels = up to 330s sequential.
-    #    Parallel startup cuts that to max(app_time, minio_time) instead.
-    #
-    #    Why two tunnels — see original comments re: presigned PUT signatures.
     - name: Start Cloudflare Tunnels
       run: |
         start_tunnel() {
@@ -219,17 +204,14 @@ jobs:
           return 1
         }
 
-        # Launch both tunnels in parallel — capture PIDs immediately with $!
         start_tunnel "PREVIEW_URL"      "http://localhost:80"   "tunnel-app.log"   & PID_APP=$!
         start_tunnel "MINIO_TUNNEL_URL" "http://localhost:9000" "tunnel-minio.log" & PID_MINIO=$!
 
-        # Wait for both — explicit PIDs, no jobs -p race condition
         FAIL=0
         wait "$PID_APP"   || FAIL=1
         wait "$PID_MINIO" || FAIL=1
         [ "$FAIL" -eq 1 ] && exit 1
 
-        # Read URLs explicitly — avoids partial-write race from parallel appends
         PREVIEW_URL=$(grep '^PREVIEW_URL=' /tmp/tunnel_urls | cut -d= -f2-)
         MINIO_TUNNEL_URL=$(grep '^MINIO_TUNNEL_URL=' /tmp/tunnel_urls | cut -d= -f2-)
         echo "PREVIEW_URL=$PREVIEW_URL"           >> "$GITHUB_ENV"
@@ -253,13 +235,11 @@ jobs:
         MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
           docker compose up -d --no-deps --force-recreate backend
 
-        # Tighter poll — backend restarts fast, no need for 3s sleep
         for i in {1..30}; do
           curl -sf http://localhost:8000/docs >/dev/null && echo "Backend ready" && break
           sleep 2
         done
 
-        # Confirm env var is live inside container
         BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
         if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
@@ -270,7 +250,6 @@ jobs:
           exit 1
         fi
 
-        # Smoke-test presign endpoint
         PRESIGN_RESP=$(curl -sf -X POST \
           -H "Content-Type: application/json" \
           -d '{"filenames":["test.jpg"]}' \
@@ -285,7 +264,6 @@ jobs:
         python3 .github/scripts/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
         python3 .github/scripts/db_proxy.py    > /tmp/db_proxy.log    2>&1 &
 
-        # Wait for both proxies (parallel, tight poll)
         for svc in "Redis:http://localhost:6380/health" "DB:http://localhost:5433/health"; do
           NAME="${svc%%:*}" URL="${svc#*:}"
           for i in {1..15}; do
@@ -294,11 +272,9 @@ jobs:
           done
         done
 
-        # Start both cloudflared tunnels in parallel
         cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
         cloudflared tunnel --url http://localhost:5433 > /tmp/db-tunnel.log    2>&1 &
 
-        # Extract both URLs (give them up to 20s total, polling every second)
         for i in $(seq 1 20); do
           sleep 1
           REDIS_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/redis-tunnel.log | head -1)
@@ -311,25 +287,10 @@ jobs:
         echo "Redis tunnel: $REDIS_TUNNEL"
         echo "DB tunnel:    $DB_TUNNEL"
 
-    # 14 pgweb (Postgres browser UI) — only when enable_db_ui=true.
-    #
-    # Why pgweb and not a raw Postgres tunnel?
-    #   Cloudflare free tunnels are HTTP only — they cannot proxy raw TCP.
-    #   Postgres speaks the PostgreSQL wire protocol (TCP), not HTTP, so a
-    #   direct cloudflared tunnel to port 5432 simply won't work.
-    #   pgweb is a lightweight Go web UI that speaks HTTP itself, so
-    #   cloudflared can tunnel it normally. Access the full DB from any browser.
-    #
-    # pgweb runs as a Docker container connected to the same network as your
-    # pgweb is a lightweight Postgres web UI that speaks HTTP, so cloudflared
-    # can tunnel it. Auto-detects postgres container and network — no hardcoded
-    # service names needed.
+    # 14 pgweb (Postgres browser UI)
     - name: Start pgweb (Postgres UI)
       if: ${{ github.event.inputs.enable_db_ui == 'true' }}
       run: |
-        # ── Find postgres container ───────────────────────────────────────────
-        # Try known container name first (event_postgres from docker-compose.yml),
-        # then fall back to scanning by image name in case it was renamed.
         if docker inspect event_postgres >/dev/null 2>&1; then
           PG_CONTAINER="event_postgres"
           echo "Using known container: event_postgres"
@@ -341,30 +302,23 @@ jobs:
 
         if [ -z "$PG_CONTAINER" ]; then
           echo "ERROR: No running postgres container found."
-          echo "Running containers:"
           docker ps --format '{{.Names}}\t{{.Image}}'
           exit 1
         fi
 
-        # ── Read creds from the running container env ─────────────────────────
-        # Hardcoded fallbacks match docker-compose.yml exactly so this works
-        # even if printenv fails for any reason.
         DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER     2>/dev/null || echo "postgres")
         DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD  2>/dev/null || echo "admin123")
         DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB        2>/dev/null || echo "event_ai")
 
-        # Use container IP — avoids needing the Docker service hostname entirely
         PG_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PG_CONTAINER" | head -1)
         echo "Postgres IP: $PG_IP  DB: $DB_NAME  User: $DB_USER"
         DB_URL="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
 
-        # ── Auto-detect compose network ───────────────────────────────────────
         COMPOSE_NETWORK=$(docker network ls \
           --filter "label=com.docker.compose.project" \
           --format "{{.Name}}" | head -1)
         echo "Compose network: $COMPOSE_NETWORK"
 
-        # ── Start pgweb container ─────────────────────────────────────────────
         docker run -d \
           --name pgweb \
           --network "${COMPOSE_NETWORK:-host}" \
@@ -372,13 +326,11 @@ jobs:
           sosedoff/pgweb \
           pgweb --bind=0.0.0.0 --listen=8081 --url="$DB_URL"
 
-        # Wait for pgweb to be ready
         for i in {1..15}; do
           curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
           sleep 2
         done
 
-        # Tunnel pgweb
         cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
         for i in $(seq 1 30); do
           sleep 1
@@ -408,7 +360,39 @@ jobs:
         echo "│  URL:      $MINIO_CONSOLE_URL"
         echo " User:     minioadmin  (MINIO_ROOT_USER)"
         echo " Password: minioadmin  (MINIO_ROOT_PASSWORD)"
-        echo "=================================" 
+        echo "================================="
+
+    # ── NEW: Stream live Celery logs in background ────────────────────────────
+    # Tails all 5 Celery containers simultaneously and prefixes each line with
+    # the container name so you can tell which worker produced each log line.
+    # Runs as a background process — does not block the keep-alive loop.
+    # Controlled by the show_celery_logs input (default: true).
+    - name: Stream Celery worker logs
+      if: ${{ github.event.inputs.show_celery_logs != 'false' }}
+      run: |
+        echo "========================================="
+        echo " Celery live logs (all workers)"
+        echo " Workers: photo | finalize | ai | default | beat"
+        echo "========================================="
+
+        # Stream each worker with a coloured prefix into the same stdout.
+        # docker logs -f follows the container; --timestamps adds ISO timestamp.
+        # sed prefixes every line with [worker_name] so lines are identifiable.
+        tail_worker() {
+          local CONTAINER="$1" LABEL="$2"
+          docker logs -f --timestamps "$CONTAINER" 2>&1 \
+            | sed "s/^/[$LABEL] /" &
+        }
+
+        tail_worker event_celery_photo    "PHOTO   "
+        tail_worker event_celery_finalize "FINALIZE"
+        tail_worker event_celery_ai       "AI      "
+        tail_worker event_celery_default  "DEFAULT "
+        tail_worker event_celery_beat     "BEAT    "
+
+        # Store all background PIDs so the keep-alive step can kill them cleanly
+        echo "CELERY_LOG_PIDS=$(pgrep -d' ' -f 'docker logs -f')" >> "$GITHUB_ENV"
+        echo "Celery log streaming started (background)"
 
     # 16 Keep preview alive
     - name: Keep preview alive
@@ -432,15 +416,38 @@ jobs:
           REM=$(( (SECONDS_LEFT - i) / 60 ))
           echo "[$REM min remaining] App: $PREVIEW_URL"
           curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
+
+          # Every 5 minutes print a Celery worker health summary
+          if (( i % 300 == 0 )); then
+            echo "--- Celery worker status ---"
+            for C in event_celery_photo event_celery_finalize event_celery_ai event_celery_default event_celery_beat; do
+              STATUS=$(docker inspect --format='{{.State.Status}}' "$C" 2>/dev/null || echo "not found")
+              echo "  $C: $STATUS"
+            done
+            echo "----------------------------"
+          fi
         done
 
     # 15 Show logs on failure
     - name: Show logs on failure
       if: failure()
       run: |
+        echo "===== BACKEND ====="
         docker compose logs backend  --tail=50
+        echo "===== FRONTEND ====="
         docker compose logs frontend --tail=50
+        echo "===== NGINX ====="
         docker compose logs nginx    --tail=50
+        echo "===== CELERY PHOTO ====="
+        docker compose logs celery_photo    --tail=50
+        echo "===== CELERY FINALIZE ====="
+        docker compose logs celery_finalize --tail=50
+        echo "===== CELERY AI ====="
+        docker compose logs celery_ai       --tail=50
+        echo "===== CELERY DEFAULT ====="
+        docker compose logs celery_default  --tail=50
+        echo "===== CELERY BEAT ====="
+        docker compose logs celery_beat     --tail=50
         cat tunnel-app.log          || true
         cat tunnel-minio.log        || true
         cat /tmp/minio-console-tunnel.log || true
