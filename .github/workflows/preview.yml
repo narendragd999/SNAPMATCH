@@ -18,6 +18,16 @@ on:
         required: false
         default: false
         type: boolean
+      enable_db_ui:
+        description: "Expose Postgres via pgweb browser UI (adds ~30s startup)"
+        required: false
+        default: false
+        type: boolean
+      enable_minio_console:
+        description: "Expose MinIO Console web UI on a public tunnel URL"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   preview:
@@ -301,7 +311,77 @@ jobs:
         echo "Redis tunnel: $REDIS_TUNNEL"
         echo "DB tunnel:    $DB_TUNNEL"
 
-    # 14 Keep preview alive
+    # 14 pgweb (Postgres browser UI) — only when enable_db_ui=true.
+    #
+    # Why pgweb and not a raw Postgres tunnel?
+    #   Cloudflare free tunnels are HTTP only — they cannot proxy raw TCP.
+    #   Postgres speaks the PostgreSQL wire protocol (TCP), not HTTP, so a
+    #   direct cloudflared tunnel to port 5432 simply won't work.
+    #   pgweb is a lightweight Go web UI that speaks HTTP itself, so
+    #   cloudflared can tunnel it normally. Access the full DB from any browser.
+    #
+    # pgweb runs as a Docker container connected to the same network as your
+    # postgres service. DATABASE_URL must match your docker-compose service name.
+    - name: Start pgweb (Postgres UI)
+      if: ${{ github.event.inputs.enable_db_ui == 'true' }}
+      run: |
+        # Read DB creds from .env — adjust var names to match your docker-compose
+        DB_USER=$(grep '^POSTGRES_USER='     .env | cut -d= -f2- | tr -d '\r' || echo "postgres")
+        DB_PASS=$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2- | tr -d '\r' || echo "postgres")
+        DB_NAME=$(grep '^POSTGRES_DB='       .env | cut -d= -f2- | tr -d '\r' || echo "snapfind")
+        # "db" must match your postgres service name in docker-compose.yml
+        DB_URL="postgres://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}?sslmode=disable"
+
+        docker run -d           --name pgweb           --network "$(docker compose ps -q db | xargs docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' | head -1 | cut -c1-12)"           -p 8081:8081           sosedoff/pgweb           pgweb --bind=0.0.0.0 --listen=8081 --url="$DB_URL"
+
+        # Wait for pgweb to be ready
+        for i in {1..15}; do
+          curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
+          sleep 2
+        done
+
+        # Tunnel pgweb
+        cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+        for i in $(seq 1 30); do
+          sleep 1
+          PGWEB_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
+          [ -n "$PGWEB_URL" ] && break
+        done
+        echo "PGWEB_URL=$PGWEB_URL" >> "$GITHUB_ENV"
+        echo ""
+        echo "┌─────────────────────────────────────────────┐"
+        echo "│  Postgres UI (pgweb)                        │"
+        echo "│  URL:  $PGWEB_URL"
+        echo "│  No login needed — direct DB access         │"
+        echo "└─────────────────────────────────────────────┘"
+
+    # 15 MinIO Console tunnel — only when enable_minio_console=true.
+    #
+    # MinIO ships with a built-in web console on port 9001.
+    # It's already running inside your minio container — just needs a tunnel.
+    # Login: MINIO_ACCESS_KEY / MINIO_SECRET_KEY (minioadmin / minioadmin by default).
+    #
+    # Note: the existing MINIO_TUNNEL_URL (port 9000) is the S3 API endpoint
+    # used for presigned PUTs — that is NOT the console. Port 9001 is the console.
+    - name: Start MinIO Console tunnel
+      if: ${{ github.event.inputs.enable_minio_console == 'true' }}
+      run: |
+        cloudflared tunnel --url http://localhost:9001 > /tmp/minio-console-tunnel.log 2>&1 &
+        for i in $(seq 1 30); do
+          sleep 1
+          MINIO_CONSOLE_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/minio-console-tunnel.log | head -1)
+          [ -n "$MINIO_CONSOLE_URL" ] && break
+        done
+        echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL" >> "$GITHUB_ENV"
+        echo ""
+        echo "┌─────────────────────────────────────────────┐"
+        echo "│  MinIO Console                              │"
+        echo "│  URL:      $MINIO_CONSOLE_URL"
+        echo "│  User:     minioadmin                       │"
+        echo "│  Password: minioadmin                       │"
+        echo "└─────────────────────────────────────────────┘"
+
+    # 16 Keep preview alive
     - name: Keep preview alive
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
@@ -332,8 +412,11 @@ jobs:
         docker compose logs backend  --tail=50
         docker compose logs frontend --tail=50
         docker compose logs nginx    --tail=50
-        cat tunnel-app.log   || true
-        cat tunnel-minio.log || true
+        cat tunnel-app.log          || true
+        cat tunnel-minio.log        || true
+        cat /tmp/minio-console-tunnel.log || true
+        cat /tmp/pgweb-tunnel.log   || true
+        docker logs pgweb 2>/dev/null || true
 
     # 16 Cleanup
     - name: Cleanup
