@@ -41,3 +41,10 @@ yarn-error.log*
 next-env.d.ts
 event_ai_saas-13-02-2026-4PM
 models/resnet50_places365.pth.tar
+
+# Runtime data - not needed in repo
+indexes/
+storage/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
