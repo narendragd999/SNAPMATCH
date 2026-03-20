@@ -8,18 +8,15 @@
  *   mode="admin"  — admin panel with full cost breakdown
  *
  * Usage:
- *   // Owner create page (paid events only):
  *   <PricingCalculator onProceed={handleConfigProceed}
  *     ctaLabel="Continue to Payment" showFreeTierNote={freeAvail}
  *     freeEventAvailable={freeAvail && isFreeMode}
  *     onUseFreeEvent={handleFreeEvent} />
  *
- *   // Public page:
  *   <PricingCalculator mode="public"
  *     staticConfig={{ photoQuota: event.photo_quota,
  *       validityDays: event.validity_days, guestQuota: event.guest_quota }} />
  *
- *   // Admin panel:
  *   <PricingCalculator mode="admin"
  *     staticConfig={{ photoQuota: event.photo_quota,
  *       validityDays: event.validity_days, guestQuota: event.guest_quota }} />
@@ -30,7 +27,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Camera, Users, Calendar, ChevronDown, Zap, Info, Gift, ArrowRight,
   Clock, Search, HardDrive, Cpu, Server, CreditCard, TrendingUp,
-  Lock, BadgeCheck, Sparkles, Shield,
+  Lock, Sparkles, Shield,
 } from "lucide-react";
 import {
   calculatePrice,
@@ -42,23 +39,22 @@ import {
   type PriceBreakdown,
 } from "@/lib/pricing";
 
-// ── ADVISOR_COST constants ─────────────────────────────────────────────────────
-// Easy to replace with API values later for admin configurability.
+// ── Infra cost constants (admin breakdown only) ───────────────────────────────
+// YOUR costs — never shown to photographers.
+// 1.5 MB/photo verified from pipeline (1200px JPEG Q85).
 
-export const ADVISOR_COST = {
+const INFRA = {
   R2_STORAGE_PER_GB_MONTH_USD: 0.015,
   R2_CLASS_A_PER_MILLION_USD:  4.50,
   R2_CLASS_B_PER_MILLION_USD:  0.36,
-  RUNPOD_PER_HR_USD:           1.04,   // RTX 4090
-  RUNPOD_SECS_PER_OWNER_PHOTO: 0.5,
+  RUNPOD_PER_HR_USD:           1.04,
+  RUNPOD_SECS_PER_PHOTO:       0.5,
   RUNPOD_COLD_START_SECS:      5,
-  RAZORPAY_RATE:               0.0236, // 2% + 18% GST
+  RAZORPAY_RATE:               0.0236,
   VPS_MONTHLY_INR:             2499,
   VPS_EVENTS_PER_MONTH:        30,
-  OWNER_PHOTO_MB:              1.6,
-  GUEST_PHOTO_MB:              0.8,
+  PHOTO_MB:                    1.5,
   USD_TO_INR:                  84,
-  TARGET_MARGIN:               0.40,
 } as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -91,57 +87,52 @@ interface Props {
   };
 }
 
-interface AdvisorCost {
-  storageCostINR:    number;
-  opsCostINR:        number;
-  gpuCostINR:        number;
-  vpsCostINR:        number;
-  infraCostINR:      number;
-  razorpayFeeINR:    number;
-  profitINR:         number;
-  netMarginPct:      number;
-  suggestedPriceINR: number;
-  perPhotoINR:       number;
+interface InfraCost {
+  storageCostINR: number;
+  opsCostINR:     number;
+  gpuCostINR:     number;
+  vpsCostINR:     number;
+  infraCostINR:   number;
+  razorpayFeeINR: number;
+  profitINR:      number;
+  netMarginPct:   number;
+  perPhotoINR:    number;
 }
 
-// ── Advisor cost engine ───────────────────────────────────────────────────────
+// ── Infra cost engine (admin only) ────────────────────────────────────────────
 
-function calcAdvisorCost(photoQuota: number, guestQuota: number, validityDays: number): AdvisorCost {
-  const fx = ADVISOR_COST.USD_TO_INR;
+function calcInfraCost(
+  photoQuota: number,
+  guestQuota: number,
+  validityDays: number,
+  ownerRevenue: number,
+): InfraCost {
+  const fx = INFRA.USD_TO_INR;
 
-  // R2 Storage: (owner photos × 1.6 MB + guest photos × 0.8 MB) → GB × $/GB/mo × months
-  const totalGB        = (photoQuota * ADVISOR_COST.OWNER_PHOTO_MB + guestQuota * ADVISOR_COST.GUEST_PHOTO_MB) / 1024;
-  const storageCostINR = totalGB * ADVISOR_COST.R2_STORAGE_PER_GB_MONTH_USD * (validityDays / 30) * fx;
+  const totalGB        = (photoQuota * INFRA.PHOTO_MB + guestQuota * (INFRA.PHOTO_MB / 2)) / 1024;
+  const storageCostINR = totalGB * INFRA.R2_STORAGE_PER_GB_MONTH_USD * (validityDays / 30) * fx;
 
-  // R2 Ops: Class A (writes) = uploads; Class B (reads) = search result fetches
-  const uploads        = (photoQuota + guestQuota) / 1_000_000;
-  const searches       = Math.max(50, photoQuota / 2);
-  const reads          = (searches * 10) / 1_000_000;
-  const opsCostINR     = (
-    uploads * ADVISOR_COST.R2_CLASS_A_PER_MILLION_USD +
-    reads   * ADVISOR_COST.R2_CLASS_B_PER_MILLION_USD
+  const uploads    = (photoQuota + guestQuota) / 1_000_000;
+  const searches   = Math.max(50, photoQuota / 2);
+  const reads      = (searches * 10) / 1_000_000;
+  const opsCostINR = (
+    uploads * INFRA.R2_CLASS_A_PER_MILLION_USD +
+    reads   * INFRA.R2_CLASS_B_PER_MILLION_USD
   ) * fx;
 
-  // RunPod GPU: (photos × 0.5s + 5s cold start) / 3600 hrs × $1.04/hr
-  const gpuSecs        = photoQuota * ADVISOR_COST.RUNPOD_SECS_PER_OWNER_PHOTO + ADVISOR_COST.RUNPOD_COLD_START_SECS;
-  const gpuCostINR     = (gpuSecs / 3600) * ADVISOR_COST.RUNPOD_PER_HR_USD * fx;
+  const gpuSecs    = photoQuota * INFRA.RUNPOD_SECS_PER_PHOTO + INFRA.RUNPOD_COLD_START_SECS;
+  const gpuCostINR = (gpuSecs / 3600) * INFRA.RUNPOD_PER_HR_USD * fx;
 
-  // VPS share: ₹2499/month ÷ 30 events
-  const vpsCostINR     = ADVISOR_COST.VPS_MONTHLY_INR / ADVISOR_COST.VPS_EVENTS_PER_MONTH;
-
-  // Totals
-  const infraCostINR      = storageCostINR + opsCostINR + gpuCostINR + vpsCostINR;
-  const denom             = 1 - ADVISOR_COST.TARGET_MARGIN - ADVISOR_COST.RAZORPAY_RATE;
-  const suggestedPriceINR = Math.ceil(infraCostINR / denom / 100) * 100;
-  const razorpayFeeINR    = suggestedPriceINR * ADVISOR_COST.RAZORPAY_RATE;
-  const profitINR         = suggestedPriceINR - infraCostINR - razorpayFeeINR;
-  const netMarginPct      = suggestedPriceINR > 0 ? (profitINR / suggestedPriceINR) * 100 : 0;
-  const perPhotoINR       = photoQuota > 0 ? infraCostINR / photoQuota : 0;
+  const vpsCostINR     = INFRA.VPS_MONTHLY_INR / INFRA.VPS_EVENTS_PER_MONTH;
+  const infraCostINR   = storageCostINR + opsCostINR + gpuCostINR + vpsCostINR;
+  const razorpayFeeINR = ownerRevenue * INFRA.RAZORPAY_RATE;
+  const profitINR      = ownerRevenue - infraCostINR - razorpayFeeINR;
+  const netMarginPct   = ownerRevenue > 0 ? (profitINR / ownerRevenue) * 100 : 0;
+  const perPhotoINR    = photoQuota > 0 ? infraCostINR / photoQuota : 0;
 
   return {
     storageCostINR, opsCostINR, gpuCostINR, vpsCostINR,
-    infraCostINR, razorpayFeeINR, profitINR, netMarginPct,
-    suggestedPriceINR, perPhotoINR,
+    infraCostINR, razorpayFeeINR, profitINR, netMarginPct, perPhotoINR,
   };
 }
 
@@ -177,16 +168,17 @@ const PHOTO_PRESETS = [
   { label: "5K",  value: 5000 },
 ];
 
-// ── Feature pills ─────────────────────────────────────────────────────────────
+// ── Feature pills (public mode) ───────────────────────────────────────────────
 
 function FeaturePills({
   photoQuota, guestQuota, validityDays,
 }: { photoQuota: number; guestQuota: number; validityDays: number }) {
   const pills = [
-    { icon: Camera, label: `${photoQuota.toLocaleString()} photos`,  cls: "text-blue-400    bg-blue-500/10    border-blue-500/20"    },
-    { icon: Clock,  label: `${validityDays} days`,                   cls: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"  },
-    { icon: Search, label: "AI face search",                         cls: "text-violet-400  bg-violet-500/10  border-violet-500/20"   },
-    ...(guestQuota > 0 ? [{ icon: Users, label: `${guestQuota} guest slots`, cls: "text-amber-400 bg-amber-500/10 border-amber-500/20" }] : []),
+    { icon: Camera, label: `${photoQuota.toLocaleString()} photos`,  cls: "text-blue-400    bg-blue-500/10    border-blue-500/20"   },
+    { icon: Clock,  label: `${validityDays} days`,                   cls: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" },
+    { icon: Search, label: "AI face search",                         cls: "text-violet-400  bg-violet-500/10  border-violet-500/20"  },
+    ...(guestQuota > 0 ? [{ icon: Users, label: `${guestQuota} guest slots`,
+      cls: "text-amber-400 bg-amber-500/10 border-amber-500/20" }] : []),
   ];
   return (
     <div className="flex flex-wrap gap-1.5">
@@ -200,90 +192,72 @@ function FeaturePills({
   );
 }
 
-// ── Suggested price card (owner + public) ─────────────────────────────────────
+// ── Public mode card ──────────────────────────────────────────────────────────
+// Shows event features only — no price, no sliders.
 
-function SuggestedPriceCard({
-  photoQuota, guestQuota, validityDays, showFooter = false,
-}: { photoQuota: number; guestQuota: number; validityDays: number; showFooter?: boolean }) {
-  const advisor = useMemo(
-    () => calcAdvisorCost(photoQuota, guestQuota, validityDays),
-    [photoQuota, guestQuota, validityDays],
-  );
-
+function PublicEventCard({ cfg }: { cfg: StaticConfig }) {
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
       <div className="px-5 py-3.5 border-b border-zinc-800 bg-gradient-to-r from-violet-600/6 to-blue-600/6 flex items-center gap-2">
         <Sparkles size={12} className="text-violet-400" />
-        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Suggested client price</span>
+        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Event plan</span>
       </div>
       <div className="p-5 space-y-4">
-        <div className="flex items-end justify-between">
-          <div>
-            <motion.div
-              key={advisor.suggestedPriceINR}
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="text-3xl font-bold text-zinc-100"
-            >
-              ₹{advisor.suggestedPriceINR.toLocaleString()}
-            </motion.div>
-            <div className="text-[10px] text-zinc-600 mt-0.5">recommended to charge your guests</div>
-          </div>
-          <BadgeCheck size={20} className="text-emerald-400 flex-shrink-0 mb-1" />
-        </div>
-        <FeaturePills photoQuota={photoQuota} guestQuota={guestQuota} validityDays={validityDays} />
-        {showFooter && (
-          <p className="text-[10px] text-zinc-600 pt-2 border-t border-zinc-800/60">
-            Includes AI photo processing and secure cloud storage
-          </p>
-        )}
+        <FeaturePills
+          photoQuota={cfg.photoQuota}
+          guestQuota={cfg.guestQuota}
+          validityDays={cfg.validityDays}
+        />
+        <p className="text-[10px] text-zinc-600 pt-2 border-t border-zinc-800/60">
+          Includes AI photo processing and secure cloud storage
+        </p>
       </div>
     </div>
   );
 }
 
 // ── Admin breakdown panel ─────────────────────────────────────────────────────
+// YOUR real infra costs, margins and monthly projections.
+// Only visible in mode="admin".
 
 const MONTHLY_EVENT_COUNTS = [5, 10, 20, 30] as const;
 
 function AdminBreakdown({
-  photoQuota, guestQuota, validityDays,
-}: { photoQuota: number; guestQuota: number; validityDays: number }) {
+  photoQuota, guestQuota, validityDays, ownerRevenue,
+}: { photoQuota: number; guestQuota: number; validityDays: number; ownerRevenue: number }) {
   const [showCostBars, setShowCostBars] = useState(false);
 
-  const a = useMemo(
-    () => calcAdvisorCost(photoQuota, guestQuota, validityDays),
-    [photoQuota, guestQuota, validityDays],
+  const c = useMemo(
+    () => calcInfraCost(photoQuota, guestQuota, validityDays, ownerRevenue),
+    [photoQuota, guestQuota, validityDays, ownerRevenue],
   );
 
-  // Cost bars (infra + Razorpay)
-  const totalCostBasis = a.infraCostINR + a.razorpayFeeINR;
+  const totalCostBasis = c.infraCostINR + c.razorpayFeeINR;
   const costItems = [
-    { label: "R2 Storage", value: a.storageCostINR,  Icon: HardDrive, color: "#3b82f6" },
-    { label: "R2 Ops",     value: a.opsCostINR,      Icon: Server,    color: "#8b5cf6" },
-    { label: "RunPod GPU", value: a.gpuCostINR,      Icon: Cpu,       color: "#f59e0b" },
-    { label: "VPS Share",  value: a.vpsCostINR,      Icon: Server,    color: "#10b981" },
-    { label: "Razorpay",   value: a.razorpayFeeINR,  Icon: CreditCard,color: "#ef4444" },
+    { label: "R2 Storage", value: c.storageCostINR, Icon: HardDrive, color: "#3b82f6" },
+    { label: "R2 Ops",     value: c.opsCostINR,     Icon: Server,    color: "#8b5cf6" },
+    { label: "RunPod GPU", value: c.gpuCostINR,     Icon: Cpu,       color: "#f59e0b" },
+    { label: "VPS Share",  value: c.vpsCostINR,     Icon: Server,    color: "#10b981" },
+    { label: "Razorpay",   value: c.razorpayFeeINR, Icon: CreditCard,color: "#ef4444" },
   ];
 
   return (
     <div className="bg-zinc-900 border border-red-500/25 rounded-2xl overflow-hidden">
 
-      {/* Admin badge header */}
       <div className="px-5 py-3 border-b border-red-500/15 bg-red-500/5 flex items-center gap-2">
         <Lock size={11} className="text-red-400" />
-        <span className="text-[10px] font-bold text-red-400 uppercase tracking-widest">Admin Only</span>
+        <span className="text-[10px] font-bold text-red-400 uppercase tracking-widest">Admin Only · Your costs</span>
       </div>
 
       <div className="p-5 space-y-5">
 
-        {/* Summary grid: infra cost / Razorpay / profit / margin */}
+        {/* Summary grid */}
         <div className="grid grid-cols-2 gap-2.5">
           {([
-            { label: "Infra Cost",   value: `₹${a.infraCostINR.toFixed(2)}`,   sub: "excl. Razorpay",    cls: "text-orange-400" },
-            { label: "Razorpay Fee", value: `₹${a.razorpayFeeINR.toFixed(2)}`, sub: "2.36% effective",   cls: "text-red-400"    },
-            { label: "Net Profit",   value: `₹${a.profitINR.toFixed(2)}`,      sub: "per event",         cls: "text-emerald-400"},
-            { label: "Net Margin",   value: `${a.netMarginPct.toFixed(1)}%`,   sub: "of client price",   cls: "text-violet-400" },
+            { label: "Infra Cost",   value: `₹${c.infraCostINR.toFixed(2)}`,   sub: "excl. Razorpay",  cls: "text-orange-400" },
+            { label: "Razorpay Fee", value: `₹${c.razorpayFeeINR.toFixed(2)}`, sub: "2.36% effective", cls: "text-red-400"    },
+            { label: "Net Profit",   value: `₹${c.profitINR.toFixed(2)}`,      sub: "per event",       cls: "text-emerald-400"},
+            { label: "Net Margin",   value: `${c.netMarginPct.toFixed(1)}%`,   sub: "of owner fee",    cls: "text-violet-400" },
           ] as const).map((item) => (
             <div key={item.label} className="bg-zinc-950 rounded-xl border border-zinc-800 px-3 py-2.5">
               <motion.div
@@ -300,28 +274,19 @@ function AdminBreakdown({
           ))}
         </div>
 
-        {/* Suggested price + per-photo infra cost */}
+        {/* Revenue + per-photo cost */}
         <div className="flex items-center justify-between bg-zinc-950 rounded-xl border border-zinc-800 px-4 py-3">
           <div>
-            <div className="text-[10px] text-zinc-500">Suggested client price</div>
-            <motion.div
-              key={a.suggestedPriceINR}
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="text-xl font-bold text-zinc-100"
-            >
-              ₹{a.suggestedPriceINR.toLocaleString()}
-            </motion.div>
+            <div className="text-[10px] text-zinc-500">Owner fee (your revenue)</div>
+            <div className="text-xl font-bold text-zinc-100">₹{ownerRevenue.toLocaleString()}</div>
           </div>
           <div className="text-right">
             <div className="text-[10px] text-zinc-500">Per-photo infra cost</div>
-            <div className="text-sm font-mono font-bold text-amber-400">
-              ₹{a.perPhotoINR.toFixed(4)}
-            </div>
+            <div className="text-sm font-mono font-bold text-amber-400">₹{c.perPhotoINR.toFixed(4)}</div>
           </div>
         </div>
 
-        {/* Collapsible cost breakdown bars */}
+        {/* Collapsible cost bars */}
         <div className="bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
           <button
             onClick={() => setShowCostBars((v) => !v)}
@@ -367,14 +332,10 @@ function AdminBreakdown({
                       </div>
                     );
                   })}
-
-                  {/* Assumptions note */}
                   <p className="text-[9px] text-zinc-700 pt-2 border-t border-zinc-800 leading-relaxed">
-                    R2 storage at $0.015/GB/mo × {validityDays}d retention · RunPod RTX 4090 $1.04/hr,
-                    0.5s/photo + 5s cold start · Razorpay 2% + 18% GST = 2.36% ·
-                    VPS ₹{ADVISOR_COST.VPS_MONTHLY_INR}/mo ÷ {ADVISOR_COST.VPS_EVENTS_PER_MONTH} events ·
-                    Searches: max(50, photos/2) × 10 results · USD/INR = {ADVISOR_COST.USD_TO_INR} ·
-                    Target margin = {ADVISOR_COST.TARGET_MARGIN * 100}%
+                    R2 $0.015/GB/mo × {validityDays}d · RunPod RTX 4090 $1.04/hr, 0.5s/photo + 5s cold ·
+                    Razorpay 2% + 18% GST = 2.36% · VPS ₹{INFRA.VPS_MONTHLY_INR}/mo ÷ {INFRA.VPS_EVENTS_PER_MONTH} events ·
+                    1.5 MB/photo · USD/INR = {INFRA.USD_TO_INR}
                   </p>
                 </div>
               </motion.div>
@@ -382,7 +343,7 @@ function AdminBreakdown({
           </AnimatePresence>
         </div>
 
-        {/* Monthly projection table */}
+        {/* Monthly projection */}
         <div>
           <div className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">
             <TrendingUp size={10} />
@@ -392,22 +353,22 @@ function AdminBreakdown({
             <table className="w-full text-[10px]">
               <thead>
                 <tr className="border-b border-zinc-800">
-                  <th className="text-left   px-3 py-2 text-zinc-600 font-medium">Events/mo</th>
-                  <th className="text-right  px-3 py-2 text-zinc-600 font-medium">Revenue</th>
-                  <th className="text-right  px-3 py-2 text-zinc-600 font-medium">Cost</th>
-                  <th className="text-right  px-3 py-2 text-zinc-600 font-medium">Profit</th>
+                  <th className="text-left  px-3 py-2 text-zinc-600 font-medium">Events/mo</th>
+                  <th className="text-right px-3 py-2 text-zinc-600 font-medium">Revenue</th>
+                  <th className="text-right px-3 py-2 text-zinc-600 font-medium">Cost</th>
+                  <th className="text-right px-3 py-2 text-zinc-600 font-medium">Profit</th>
                 </tr>
               </thead>
               <tbody>
                 {MONTHLY_EVENT_COUNTS.map((n, i) => {
-                  const revenue = a.suggestedPriceINR * n;
-                  const cost    = (a.infraCostINR + a.razorpayFeeINR) * n;
+                  const revenue = ownerRevenue * n;
+                  const cost    = (c.infraCostINR + c.razorpayFeeINR) * n;
                   const profit  = revenue - cost;
                   return (
                     <tr key={n} className={i < MONTHLY_EVENT_COUNTS.length - 1 ? "border-b border-zinc-800/50" : ""}>
                       <td className="px-3 py-2 font-mono text-zinc-400">{n}×</td>
                       <td className="px-3 py-2 text-right font-mono text-zinc-300">₹{revenue.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right font-mono text-red-400">  ₹{Math.round(cost).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right font-mono text-red-400">₹{Math.round(cost).toLocaleString()}</td>
                       <td className="px-3 py-2 text-right font-mono text-emerald-400">₹{Math.round(profit).toLocaleString()}</td>
                     </tr>
                   );
@@ -416,7 +377,7 @@ function AdminBreakdown({
             </table>
           </div>
           <p className="text-[9px] text-zinc-700 mt-1.5">
-            Revenue = suggested client price × events. Assumes identical photo/guest config.
+            Assumes identical photo/guest config across all events.
           </p>
         </div>
 
@@ -437,7 +398,6 @@ export default function PricingCalculator({
   onUseFreeEvent,
   initialValues,
 }: Props) {
-  // Initialise from staticConfig when present (admin viewing an existing event)
   const [photoQuota,    setPhotoQuota]    = useState(
     initialValues?.photoQuota   ?? staticConfig?.photoQuota   ?? 200,
   );
@@ -466,14 +426,8 @@ export default function PricingCalculator({
   // ── PUBLIC MODE ───────────────────────────────────────────────────────────────
 
   if (mode === "public") {
-    const cfg = staticConfig ?? { photoQuota: 200, validityDays: 30, guestQuota: 0 };
     return (
-      <SuggestedPriceCard
-        photoQuota={cfg.photoQuota}
-        guestQuota={cfg.guestQuota}
-        validityDays={cfg.validityDays}
-        showFooter
-      />
+      <PublicEventCard cfg={staticConfig ?? { photoQuota: 200, validityDays: 30, guestQuota: 0 }} />
     );
   }
 
@@ -487,7 +441,6 @@ export default function PricingCalculator({
       {/* ── Calculator card ──────────────────────────────────────────────────── */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
 
-        {/* Header */}
         <div className={`px-6 py-5 border-b border-zinc-800 bg-gradient-to-r ${
           isAdmin ? "from-red-600/6 to-orange-600/6" : "from-blue-600/8 to-violet-600/8"
         }`}>
@@ -526,7 +479,6 @@ export default function PricingCalculator({
 
             <Slider value={photoQuota} min={MIN_PHOTOS} max={MAX_PHOTOS} step={50} onChange={setPhotoQuota} color="blue" />
 
-            {/* Quick presets */}
             <div className="flex gap-1.5 flex-wrap">
               {PHOTO_PRESETS.map((p) => (
                 <button
@@ -554,7 +506,6 @@ export default function PricingCalculator({
                 <span className="text-xs font-medium text-zinc-200">Guest Uploads</span>
                 <span className="text-[10px] text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded">optional</span>
               </div>
-              {/* Toggle */}
               <button
                 onClick={() => setGuestEnabled((v) => !v)}
                 aria-label={guestEnabled ? "Disable guest uploads" : "Enable guest uploads"}
@@ -627,7 +578,7 @@ export default function PricingCalculator({
             <div className="flex items-center justify-between px-4 py-3.5">
               <div>
                 <div className="text-[11px] text-zinc-500">
-                  {isAdmin ? "Owner fee (platform revenue)" : "Total price (you pay)"}
+                  {isAdmin ? "Owner fee (platform revenue)" : "Total price"}
                 </div>
                 <motion.div
                   key={breakdown.totalPaise}
@@ -719,21 +670,13 @@ export default function PricingCalculator({
         </div>
       </div>
 
-      {/* ── Suggested price card (owner only, below calculator) ──────────────── */}
-      {mode === "owner" && (
-        <SuggestedPriceCard
-          photoQuota={photoQuota}
-          guestQuota={effectiveGuest}
-          validityDays={validityDays}
-        />
-      )}
-
       {/* ── Admin breakdown (admin only) ──────────────────────────────────────── */}
-      {mode === "admin" && (
+      {isAdmin && (
         <AdminBreakdown
           photoQuota={photoQuota}
           guestQuota={effectiveGuest}
           validityDays={validityDays}
+          ownerRevenue={breakdown.totalInr}
         />
       )}
 
