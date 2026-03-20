@@ -21,7 +21,7 @@ from app.core.config import STORAGE_PATH, INDEXES_PATH
 from app.services import storage_service
 
 STORAGE_BACKEND    = os.getenv("STORAGE_BACKEND", "local").lower()
-STORAGE_SIZE       = 1200   # max side px for stored JPEG
+STORAGE_SIZE       = 1600   # max side px for stored JPEG
 THUMB_SIZE         = 400    # max side px for WebP thumbnail
 FACE_DETECTION_SIZE = 640   # max side px for face detection array
 JPEG_QUALITY       = 85
@@ -68,6 +68,10 @@ def process_image(raw_filename: str, event_id: int) -> tuple[str | None, np.ndar
                 )
                 # Clean temp raw
                 storage_service.release_local_temp_path(event_id, raw_filename)
+                # Delete original raw file from MinIO/R2 — no longer needed
+                # now that the optimized JPEG + thumbnail are safely uploaded.
+                storage_service.delete_file(event_id, raw_filename)
+                print(f"🗑 Deleted raw from storage: {raw_filename}")
             # For local backend, files are already in the right place (STORAGE_PATH/event_id/)
     except Exception as e:
         print(f"❌ Pipeline failed for {raw_filename}: {e}")

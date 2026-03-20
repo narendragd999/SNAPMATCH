@@ -78,11 +78,11 @@ Cell 1 — Set environment variables
 import os
 
 # ── Paste from GHA "Print Colab connection info" step output ──────────────────
-os.environ["APP_URL"]   = "https://age-innovation-exemption-tunes.trycloudflare.com"
-os.environ["MINIO_URL"] = "https://fragrance-zoloft-lands-discussing.trycloudflare.com"
+os.environ["APP_URL"]   = "https://acting-drag-tile-nav.trycloudflare.com"
+os.environ["MINIO_URL"] = "https://casino-lauren-golf-suddenly.trycloudflare.com"
 
 # ── Upstash Redis ─────────────────────────────────────────────────────────────
-UPSTASH_URL = "rediss://default:gQAAAAAAASngAAIncDFkZTM1MWY1OWY0YzQ0YTc5OWIwNjhhYTQ1YjhmODI5M3AxNzYyNTY@funny-macaque-76256.upstash.io:6379?ssl_cert_reqs=CERT_NONE"
+UPSTASH_URL = "rediss://default:gQAAAAAAASngAAIncDFkZTM1MWY1OWY0YzQ0YTc5OWIwNjhhYTQ1YjhmODI5M3AxNzYyNTY@funny-macaque-76256.upstash.io:6379"
 os.environ["CELERY_BROKER_URL"]     = UPSTASH_URL
 os.environ["CELERY_RESULT_BACKEND"] = UPSTASH_URL
 

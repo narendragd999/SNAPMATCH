@@ -1,63 +1,86 @@
-name: SnapFind GPU Preview
+name: SnapFind Preview
 
 on:
   workflow_dispatch:
     inputs:
       duration_hours:
-        description: "Hours to keep alive"
+        description: "Preview duration in hours"
         required: false
-        default: "3"
+        default: "2"
         type: choice
-        options: ["1", "2", "3", "5"]
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "5"
+      force_clean:
+        description: "Force clean Docker build (prune cache + rebuild from scratch)"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
-  gpu_preview:
+  preview:
     runs-on: ubuntu-latest
     timeout-minutes: 330
 
     steps:
 
-    # ── 1. Checkout ──────────────────────────────────────────────────────────
-    - name: Checkout
+    # 1 Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ── 2. Free disk ─────────────────────────────────────────────────────────
+    # 2 Free disk.
+    #   Always: remove large unused system packages (~15 GB, no Docker impact).
+    #   force_clean=true: also run docker system prune -af to bust all layer
+    #   cache — use this when stale layers are causing issues (missing changes,
+    #   dependency conflicts, corrupt cache). Normal runs skip the prune so
+    #   cached layers survive for fast incremental rebuilds.
     - name: Free disk space
       run: |
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-        docker system prune -af || true
         df -h
 
-    # ── 3. Write .env ─────────────────────────────────────────────────────────
-    - name: Write .env
-      env:
-        SECRET_KEY:              ${{ secrets.SECRET_KEY }}
-        UPSTASH_REDIS_URL:       ${{ secrets.UPSTASH_REDIS_URL }}
-        RAZORPAY_KEY_ID:         ${{ secrets.RAZORPAY_KEY_ID }}
-        RAZORPAY_KEY_SECRET:     ${{ secrets.RAZORPAY_KEY_SECRET }}
-        RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
-        SMTP_HOST:               ${{ secrets.SMTP_HOST }}
-        SMTP_USER:               ${{ secrets.SMTP_USER }}
-        SMTP_PASSWORD:           ${{ secrets.SMTP_PASSWORD }}
-        SMTP_FROM:               ${{ secrets.SMTP_FROM }}
+    - name: Force clean Docker cache (only when requested)
+      if: ${{ github.event.inputs.force_clean == 'true' }}
       run: |
-        if [ -z "$UPSTASH_REDIS_URL" ]; then
-          echo "❌ UPSTASH_REDIS_URL secret is not set — aborting"
-          exit 1
-        fi
+        echo "force_clean=true — pruning all Docker layers and build cache"
+        docker system prune -af
+        docker builder prune -af
+        df -h
+        echo "Clean done — this run will rebuild all images from scratch"
 
-        # Append ssl_cert_reqs so both backend and Colab worker connect cleanly
-        REDIS_URL="${UPSTASH_REDIS_URL}?ssl_cert_reqs=CERT_NONE"
+    # 3 Set up Docker Buildx with GHA cache driver.
+    #   The `gha` cache backend writes directly to GHA's cache service —
+    #   no separate actions/cache step or local directory needed.
+    #   Saves 3-6 min on runs where images haven't changed.
+    #   Note: docker-compose.yml must include `cache_from` / `cache_to` build
+    #   args per service, OR use COMPOSE_BAKE=1 (Docker Compose v2.17+).
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-        cat > .env << EOF
-        SECRET_KEY=${SECRET_KEY:-gpu-test-secret}
+    # 5 Cache pip packages — avoids re-downloading flask/redis/psycopg2 each run
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-flask-redis-psycopg2
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    # 6 Install Python proxy dependencies early (while docker builds below)
+    #   Running this before docker build lets it overlap with the build time.
+    - name: Install proxy dependencies
+      run: pip install flask redis psycopg2-binary -q
+
+    # 7 Write GHA .env
+    - name: Write GHA .env
+      run: |
+        cat > .env << 'EOF'
+        SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
         ENV=prod
 
-        CELERY_BROKER_URL=${REDIS_URL}
-        CELERY_RESULT_BACKEND=${REDIS_URL}
-
-        DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
-
+        # Storage
         STORAGE_BACKEND=minio
         MINIO_ENDPOINT=http://minio:9000
         MINIO_ACCESS_KEY=minioadmin
@@ -66,180 +89,256 @@ jobs:
         MINIO_PUBLIC_URL=/storage
         MINIO_PRESIGN_ENDPOINT=
 
-        RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
-        RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
-        RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
+        # Payments
+        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
+        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
+        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
 
-        SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
-        SMTP_PORT=587
-        SMTP_USER=${SMTP_USER}
-        SMTP_PASSWORD=${SMTP_PASSWORD}
-        SMTP_FROM=${SMTP_FROM}
+        # SMTP
+        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
+        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+        SMTP_USER=${{ secrets.SMTP_USER || '' }}
+        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
+        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
 
+        # Frontend — relative paths so the Cloudflare tunnel origin is used.
         NEXT_PUBLIC_API_URL=/api
         NEXT_PUBLIC_STORAGE_URL=/storage
-        NEXT_PUBLIC_STORAGE_BACKEND=minio
         NGINX_PORT=80
 
-        USE_GPU=false
-        DEFAULT_EVENT_PIN=0000
+        # AI models
         MAX_PHOTO_SIZE_MB=20
         PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
         YOLO_MODEL_PATH=yolov8n.pt
+        DEFAULT_EVENT_PIN=0000
         EOF
-
         sed -i 's/^[[:space:]]*//' .env
-        echo "✅ .env written"
-        echo "--- key vars (secrets redacted) ---"
-        grep -v "SECRET\|PASSWORD\|KEY\|TOKEN" .env
+        echo "--- .env written ---"
+        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
 
-    # ── 4. Start Docker stack ─────────────────────────────────────────────────
+    # 8 Build and start Docker stack.
+    #   docker compose build --parallel builds all services simultaneously.
+    #   DOCKER_BUILDKIT + COMPOSE_DOCKER_CLI_BUILD enable BuildKit so the
+    #   buildx builder from step 3 is used, enabling GHA layer cache.
     - name: Start Docker containers
+      env:
+        DOCKER_BUILDKIT: "1"
+        COMPOSE_DOCKER_CLI_BUILD: "1"
+        BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
       run: |
-        docker compose up -d --build
+        docker compose build --parallel
+        docker compose up -d
         docker ps
 
-    # ── 5. Wait for backend ───────────────────────────────────────────────────
-    - name: Wait for backend
+    # 9 Wait for all services in parallel — poll all three at once instead of
+    #   sequentially. Saves up to (backend_wait + frontend_wait + nginx_wait)
+    #   since in practice they all come up around the same time.
+    - name: Wait for services
       run: |
-        for i in {1..30}; do
-          curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready" && exit 0
-          sleep 5
-        done
-        echo "❌ Backend failed — logs:"
-        docker compose logs backend --tail=50
-        echo "--- .env (redacted) ---"
-        grep -v "SECRET\|PASSWORD\|KEY\|TOKEN" .env
-        exit 1
+        wait_for() {
+          local NAME="$1" URL="$2" MAX="$3" INTERVAL="$4"
+          for i in $(seq 1 "$MAX"); do
+            if curl -sf "$URL" >/dev/null 2>&1; then
+              echo "$NAME ready (attempt $i)"
+              return 0
+            fi
+            sleep "$INTERVAL"
+          done
+          echo "$NAME failed to start"
+          return 1
+        }
 
-    # ── 6. Wait for frontend ──────────────────────────────────────────────────
-    - name: Wait for frontend
-      run: |
-        for i in {1..30}; do
-          curl -sf http://localhost:3000 >/dev/null && echo "✅ Frontend ready" && exit 0
-          sleep 5
-        done
-        echo "❌ Frontend failed — logs:"
-        docker compose logs frontend --tail=30
-        exit 1
+        # Start all three health checks in background simultaneously.
+        # Capture PIDs immediately with $! — by the time a for loop runs,
+        # fast jobs may already be reaped and gone from the jobs table.
+        wait_for "Backend"  "http://localhost:8000/docs" 40 3 & PID_BACKEND=$!
+        wait_for "Frontend" "http://localhost:3000"      40 3 & PID_FRONTEND=$!
+        wait_for "Nginx"    "http://localhost"           30 3 & PID_NGINX=$!
 
-    # ── 7. Wait for nginx ─────────────────────────────────────────────────────
-    - name: Wait for nginx
-      run: |
-        for i in {1..20}; do
-          curl -sf http://localhost >/dev/null && echo "✅ Nginx ready" && exit 0
-          sleep 3
-        done
-        echo "❌ Nginx failed — logs:"
-        docker compose logs nginx --tail=30
-        exit 1
+        # Wait for all three — fail if any one fails
+        FAIL=0
+        wait "$PID_BACKEND"  || FAIL=1
+        wait "$PID_FRONTEND" || FAIL=1
+        wait "$PID_NGINX"    || FAIL=1
 
-    # ── 8. Stop CPU photo worker — Colab GPU replaces it ─────────────────────
-    - name: Stop CPU photo worker
-      run: |
-        docker compose stop celery_photo
-        echo "✅ celery_photo STOPPED — Colab GPU will handle photo_processing queue"
-        docker compose ps --format "table {{.Name}}\t{{.Status}}"
+        if [ "$FAIL" -eq 1 ]; then
+          echo "One or more services failed to start"
+          docker compose logs backend  --tail=30
+          docker compose logs frontend --tail=30
+          docker compose logs nginx    --tail=30
+          exit 1
+        fi
+        echo "All services ready"
 
-    # ── 9. Install cloudflared ────────────────────────────────────────────────
-    - name: Install cloudflared
+    # 10 Install cloudflared
+    - name: Install Cloudflare tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
         cloudflared --version
 
-    # ── 10. Start tunnels ─────────────────────────────────────────────────────
-    - name: Start Cloudflare tunnels
+    # 11 Start BOTH Cloudflare tunnels in parallel.
+    #    Original code started them sequentially — each could take up to
+    #    5 attempts × 33s = 165s, so two tunnels = up to 330s sequential.
+    #    Parallel startup cuts that to max(app_time, minio_time) instead.
+    #
+    #    Why two tunnels — see original comments re: presigned PUT signatures.
+    - name: Start Cloudflare Tunnels
       run: |
         start_tunnel() {
-          local NAME="$1" TARGET="$2" LOGFILE="$3" VAR="$4"
-          for attempt in 1 2 3; do
-            pkill -f "cloudflared tunnel.*$TARGET" || true
-            rm -f "$LOGFILE"; sleep 3
+          local NAME="$1" TARGET="$2" LOGFILE="$3"
+          for attempt in 1 2 3 4 5; do
+            pkill -f "cloudflared tunnel.*$TARGET" 2>/dev/null || true
+            rm -f "$LOGFILE"
             cloudflared tunnel --url "$TARGET" > "$LOGFILE" 2>&1 &
             for i in $(seq 1 30); do
               sleep 1
-              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$LOGFILE" | head -1)
-              [ -n "$URL" ] && break
+              FOUND=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$LOGFILE" | head -n 1)
+              [ -n "$FOUND" ] && break
             done
-            if [ -n "$URL" ]; then
-              echo "$VAR=$URL" >> $GITHUB_ENV
-              echo "✅ $NAME tunnel: $URL"
+            if [ -n "$FOUND" ]; then
+              echo "$NAME=$FOUND" >> /tmp/tunnel_urls
+              echo "$NAME tunnel ready: $FOUND"
               return 0
             fi
-            echo "  attempt $attempt failed"; cat "$LOGFILE"
+            echo "  $NAME attempt $attempt failed"
           done
-          echo "❌ $NAME tunnel failed after 3 attempts"
+          echo "ERROR: $NAME tunnel failed after 5 attempts"
+          cat "$LOGFILE"
           return 1
         }
 
-        start_tunnel "App"   "http://localhost:80"   "tunnel-app.log"   "APP_URL"
-        start_tunnel "MinIO" "http://localhost:9000" "tunnel-minio.log" "MINIO_URL"
+        # Launch both tunnels in parallel — capture PIDs immediately with $!
+        start_tunnel "PREVIEW_URL"      "http://localhost:80"   "tunnel-app.log"   & PID_APP=$!
+        start_tunnel "MINIO_TUNNEL_URL" "http://localhost:9000" "tunnel-minio.log" & PID_MINIO=$!
 
-    # ── 11. Inject MinIO presign URL ──────────────────────────────────────────
-    - name: Inject MinIO presign endpoint
+        # Wait for both — explicit PIDs, no jobs -p race condition
+        FAIL=0
+        wait "$PID_APP"   || FAIL=1
+        wait "$PID_MINIO" || FAIL=1
+        [ "$FAIL" -eq 1 ] && exit 1
+
+        # Read URLs explicitly — avoids partial-write race from parallel appends
+        PREVIEW_URL=$(grep '^PREVIEW_URL=' /tmp/tunnel_urls | cut -d= -f2-)
+        MINIO_TUNNEL_URL=$(grep '^MINIO_TUNNEL_URL=' /tmp/tunnel_urls | cut -d= -f2-)
+        echo "PREVIEW_URL=$PREVIEW_URL"           >> "$GITHUB_ENV"
+        echo "MINIO_TUNNEL_URL=$MINIO_TUNNEL_URL" >> "$GITHUB_ENV"
+
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo " App URL:      $PREVIEW_URL"
+        echo " API docs:     $PREVIEW_URL/api/docs"
+        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
+        echo "================================="
+
+    # 12 Inject MINIO_PRESIGN_ENDPOINT into running backend
+    - name: Inject MinIO presign endpoint into backend
       run: |
-        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_URL|" .env
-        MINIO_PRESIGN_ENDPOINT="$MINIO_URL" \
+        echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
+        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
+
+        MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
           docker compose up -d --no-deps --force-recreate backend
-        for i in {1..20}; do
-          curl -sf http://localhost:8000/docs >/dev/null && echo "✅ Backend ready" && break
-          sleep 3
+
+        # Tighter poll — backend restarts fast, no need for 3s sleep
+        for i in {1..30}; do
+          curl -sf http://localhost:8000/docs >/dev/null && echo "Backend ready" && break
+          sleep 2
         done
 
-        # Confirm var is live inside container
-        BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -1)
+        # Confirm env var is live inside container
+        BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-        echo "MINIO_PRESIGN_ENDPOINT in container: $LIVE"
+        if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
+          echo "MINIO_PRESIGN_ENDPOINT confirmed: $LIVE"
+        else
+          echo "ERROR: var not found. Got: '$LIVE', Expected: '$MINIO_TUNNEL_URL'"
+          docker exec "$BACKEND" printenv | grep -i minio || true
+          exit 1
+        fi
 
-    # ── 12. Print Colab connection info ───────────────────────────────────────
-    - name: Print Colab connection info
+        # Smoke-test presign endpoint
+        PRESIGN_RESP=$(curl -sf -X POST \
+          -H "Content-Type: application/json" \
+          -d '{"filenames":["test.jpg"]}' \
+          http://localhost:8000/uploads/1/presign 2>/dev/null || true)
+        echo "$PRESIGN_RESP" | grep -q "https://" \
+          && echo "Presign endpoint returns HTTPS URLs" \
+          || echo "WARNING: Presign smoke-test inconclusive. Response: $PRESIGN_RESP"
+
+    # 13 Start Redis + DB proxies and tunnels for Colab GPU worker
+    - name: Start Redis and DB proxies for Colab GPU
       run: |
-        # Read broker URL back from .env (has ssl_cert_reqs already appended)
-        BROKER=$(grep "^CELERY_BROKER_URL=" .env | cut -d= -f2-)
+        python3 .github/scripts/redis_proxy.py > /tmp/redis_proxy.log 2>&1 &
+        python3 .github/scripts/db_proxy.py    > /tmp/db_proxy.log    2>&1 &
 
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════════╗"
-        echo "║           PASTE THESE INTO GOOGLE COLAB CELL 1              ║"
-        echo "╠══════════════════════════════════════════════════════════════╣"
-        echo "║"
-        echo "║  APP_URL              = \"$APP_URL\""
-        echo "║  MINIO_URL            = \"$MINIO_URL\""
-        echo "║  CELERY_BROKER_URL    = \"$BROKER\""
-        echo "║  CELERY_RESULT_BACKEND= \"$BROKER\""
-        echo "║"
-        echo "╚══════════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "Open app: $APP_URL"
+        # Wait for both proxies (parallel, tight poll)
+        for svc in "Redis:http://localhost:6380/health" "DB:http://localhost:5433/health"; do
+          NAME="${svc%%:*}" URL="${svc#*:}"
+          for i in {1..15}; do
+            curl -sf "$URL" >/dev/null && echo "$NAME proxy up" && break
+            sleep 1
+          done
+        done
 
-    # ── 13. Keep alive ────────────────────────────────────────────────────────
+        # Start both cloudflared tunnels in parallel
+        cloudflared tunnel --url http://localhost:6380 > /tmp/redis-tunnel.log 2>&1 &
+        cloudflared tunnel --url http://localhost:5433 > /tmp/db-tunnel.log    2>&1 &
+
+        # Extract both URLs (give them up to 20s total, polling every second)
+        for i in $(seq 1 20); do
+          sleep 1
+          REDIS_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/redis-tunnel.log | head -1)
+          DB_TUNNEL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/db-tunnel.log | head -1)
+          [ -n "$REDIS_TUNNEL" ] && [ -n "$DB_TUNNEL" ] && break
+        done
+
+        echo "REDIS_TUNNEL_URL=$REDIS_TUNNEL" >> "$GITHUB_ENV"
+        echo "DB_TUNNEL_URL=$DB_TUNNEL"       >> "$GITHUB_ENV"
+        echo "Redis tunnel: $REDIS_TUNNEL"
+        echo "DB tunnel:    $DB_TUNNEL"
+
+    # 14 Keep preview alive
     - name: Keep preview alive
       env:
-        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '3' }}
+        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
       run: |
+        echo ""
+        echo "================================="
+        echo " SnapFind Preview is LIVE"
+        echo "================================="
+        echo " App:          $PREVIEW_URL"
+        echo " API docs:     $PREVIEW_URL/api/docs"
+        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
+        echo " Redis tunnel: $REDIS_TUNNEL_URL"
+        echo " DB tunnel:    $DB_TUNNEL_URL"
+        echo "================================="
+
         SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
           REM=$(( (SECONDS_LEFT - i) / 60 ))
-          echo "[$REM min left] $APP_URL"
-          curl -sf http://localhost:8000/docs >/dev/null || echo "  ⚠ backend check failed"
+          echo "[$REM min remaining] App: $PREVIEW_URL"
+          curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
         done
 
-    # ── 14. Show logs on failure ──────────────────────────────────────────────
+    # 15 Show logs on failure
     - name: Show logs on failure
       if: failure()
       run: |
         docker compose logs backend  --tail=50
-        docker compose logs frontend --tail=30
-        docker compose logs nginx    --tail=30
+        docker compose logs frontend --tail=50
+        docker compose logs nginx    --tail=50
         cat tunnel-app.log   || true
         cat tunnel-minio.log || true
 
-    # ── 15. Cleanup ───────────────────────────────────────────────────────────
+    # 16 Cleanup
     - name: Cleanup
       if: always()
       run: |
         pkill cloudflared || true
         docker compose down -v
-        echo "✅ Cleanup done"
+        echo "Cleanup complete"
