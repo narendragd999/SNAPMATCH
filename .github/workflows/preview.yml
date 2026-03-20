@@ -362,42 +362,15 @@ jobs:
         echo " Password: minioadmin  (MINIO_ROOT_PASSWORD)"
         echo "================================="
 
-    # ── NEW: Stream live Celery logs in background ────────────────────────────
-    # Tails all 5 Celery containers simultaneously and prefixes each line with
-    # the container name so you can tell which worker produced each log line.
-    # Runs as a background process — does not block the keep-alive loop.
-    # Controlled by the show_celery_logs input (default: true).
-    - name: Stream Celery worker logs
-      if: ${{ github.event.inputs.show_celery_logs != 'false' }}
-      run: |
-        echo "========================================="
-        echo " Celery live logs (all workers)"
-        echo " Workers: photo | finalize | ai | default | beat"
-        echo "========================================="
-
-        # Stream each worker with a coloured prefix into the same stdout.
-        # docker logs -f follows the container; --timestamps adds ISO timestamp.
-        # sed prefixes every line with [worker_name] so lines are identifiable.
-        tail_worker() {
-          local CONTAINER="$1" LABEL="$2"
-          docker logs -f --timestamps "$CONTAINER" 2>&1 \
-            | sed "s/^/[$LABEL] /" &
-        }
-
-        tail_worker event_celery_photo    "PHOTO   "
-        tail_worker event_celery_finalize "FINALIZE"
-        tail_worker event_celery_ai       "AI      "
-        tail_worker event_celery_default  "DEFAULT "
-        tail_worker event_celery_beat     "BEAT    "
-
-        # Store all background PIDs so the keep-alive step can kill them cleanly
-        echo "CELERY_LOG_PIDS=$(pgrep -d' ' -f 'docker logs -f')" >> "$GITHUB_ENV"
-        echo "Celery log streaming started (background)"
-
-    # 16 Keep preview alive
+    # ── Stream Celery logs inside keep-alive loop ─────────────────────────────
+    # GHA does not show background process output across steps.
+    # Solution: write all worker logs to a single file, then dump new lines
+    # every 60s inside the keep-alive loop so they appear in GHA output.
     - name: Keep preview alive
+      if: always()
       env:
         PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
+        SHOW_CELERY_LOGS: ${{ github.event.inputs.show_celery_logs }}
       run: |
         echo ""
         echo "================================="
@@ -410,21 +383,61 @@ jobs:
         echo " DB tunnel:    $DB_TUNNEL_URL"
         echo "================================="
 
+        # ── Start tailing all Celery workers into one log file ────────────────
+        CELERY_LOG=/tmp/celery_all.log
+        > "$CELERY_LOG"   # truncate/create
+
+        tail_worker() {
+          local CONTAINER="$1" LABEL="$2"
+          docker logs -f --timestamps "$CONTAINER" 2>&1 \
+            | sed -u "s/^/[$LABEL] /" >> "$CELERY_LOG" &
+        }
+
+        tail_worker event_celery_photo    "PHOTO   "
+        tail_worker event_celery_finalize "FINALIZE"
+        tail_worker event_celery_ai       "AI      "
+        tail_worker event_celery_default  "DEFAULT "
+        tail_worker event_celery_beat     "BEAT    "
+
+        echo "Celery log streaming started → $CELERY_LOG"
+        LOG_OFFSET=0   # track how many lines we've already printed
+
+        # ── Keep-alive loop ───────────────────────────────────────────────────
         SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
           REM=$(( (SECONDS_LEFT - i) / 60 ))
+          echo ""
+          echo "──────────────────────────────────────────"
           echo "[$REM min remaining] App: $PREVIEW_URL"
-          curl -sf http://localhost/api/docs >/dev/null || echo "  WARNING: backend health check failed"
+          echo "──────────────────────────────────────────"
 
-          # Every 5 minutes print a Celery worker health summary
+          # Backend health check
+          curl -sf http://localhost/api/docs >/dev/null \
+            || echo "  ⚠ WARNING: backend health check failed"
+
+          # ── Dump new Celery log lines since last iteration ─────────────────
+          if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
+            TOTAL_LINES=$(wc -l < "$CELERY_LOG")
+            NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
+            if [ "$NEW_LINES" -gt 0 ]; then
+              echo "--- Celery logs (last ${NEW_LINES} lines) ---"
+              tail -n "$NEW_LINES" "$CELERY_LOG"
+              echo "--- end ---"
+            else
+              echo "--- Celery logs: no new output ---"
+            fi
+            LOG_OFFSET=$TOTAL_LINES
+          fi
+
+          # ── Worker health summary every 5 min ──────────────────────────────
           if (( i % 300 == 0 )); then
-            echo "--- Celery worker status ---"
+            echo "--- Celery worker container status ---"
             for C in event_celery_photo event_celery_finalize event_celery_ai event_celery_default event_celery_beat; do
               STATUS=$(docker inspect --format='{{.State.Status}}' "$C" 2>/dev/null || echo "not found")
-              echo "  $C: $STATUS"
+              echo "  $C → $STATUS"
             done
-            echo "----------------------------"
+            echo "--------------------------------------"
           fi
         done
 
