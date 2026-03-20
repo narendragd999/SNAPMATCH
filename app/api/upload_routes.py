@@ -178,7 +178,11 @@ async def presign_uploads(
             upload_url = storage_service.generate_presigned_put_url(
                 event_id=event_id,
                 filename=stored_filename,
-                content_type=mime_for_ext(ext),
+                # Must stay application/octet-stream — the presigned URL signature
+                # is tied to this Content-Type. Browser must send the same value
+                # when doing the PUT, regardless of actual image format.
+                # mime_for_ext() is used only on server-side uploads (legacy/bulk routes).
+                content_type="application/octet-stream",
                 expires_in=PRESIGN_TTL_SECONDS,
             )
         except Exception as exc:
