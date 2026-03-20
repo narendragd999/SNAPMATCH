@@ -105,7 +105,7 @@ def process_event(self, event_id: int):
 # TASK 2 — PER-PHOTO WORKER
 # ─────────────────────────────────────────────────────────────────────────────
 
-@celery.task(bind=True, queue=PHOTO_QUEUE, soft_time_limit=100, time_limit=120)
+@celery.task(bind=True, queue=PHOTO_QUEUE, soft_time_limit=100, time_limit=180)
 def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int):
     """
     1. Optimise image (pyvips → Pillow fallback)

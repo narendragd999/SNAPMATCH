@@ -19,6 +19,7 @@ import numpy as np
 
 from app.core.config import STORAGE_PATH, INDEXES_PATH
 from app.services import storage_service
+from app.services.image_normalizer import normalize_to_jpeg
 
 STORAGE_BACKEND    = os.getenv("STORAGE_BACKEND", "local").lower()
 STORAGE_SIZE       = 1600   # max side px for stored JPEG
@@ -38,6 +39,16 @@ def process_image(raw_filename: str, event_id: int) -> tuple[str | None, np.ndar
 
     # ── Get a local path the pipeline can read from ────────────────────────────
     raw_local_path = storage_service.get_local_temp_path(event_id, raw_filename)
+
+    # ── Normalize any format → JPEG (no-op for jpg/png/webp) ─────────────────
+    normalized_path = None
+    try:
+        raw_local_path, was_converted = normalize_to_jpeg(raw_local_path)
+        normalized_path = raw_local_path if was_converted else None
+    except Exception as e:
+        print(f"❌ Normalization failed for {raw_filename}: {e}")
+        storage_service.release_local_temp_path(event_id, raw_filename)
+        return None, None
 
     # ── Working directory for output files ────────────────────────────────────
     tmp_event_dir = _get_tmp_dir(event_id)
@@ -77,7 +88,15 @@ def process_image(raw_filename: str, event_id: int) -> tuple[str | None, np.ndar
         print(f"❌ Pipeline failed for {raw_filename}: {e}")
         import traceback; traceback.print_exc()
         storage_service.release_local_temp_path(event_id, raw_filename)
-        return None, None
+        optimized_filename = None   # ensure we return None on failure
+    finally:
+        # Always clean up the temp JPEG created by format normalization.
+        # Wrapped in its own try so a cleanup error never masks the real result.
+        try:
+            if normalized_path and os.path.exists(normalized_path):
+                os.remove(normalized_path)
+        except Exception as cleanup_err:
+            print(f"⚠ Could not delete normalized temp file: {cleanup_err}")
 
     return optimized_filename, face_np
 

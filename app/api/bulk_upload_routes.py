@@ -20,12 +20,12 @@ from app.models.photo import Photo
 from app.models.user import User
 from app.core.dependencies import get_current_user
 from app.services import storage_service
+from app.services.image_normalizer import ACCEPTED_EXTENSIONS, mime_for_ext
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
 
-ACCEPTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAX_FILE_SIZE_MB     = int(os.getenv("MAX_PHOTO_SIZE_MB", "20"))
 MAX_FILES_PER_BATCH  = 50
 
@@ -115,7 +115,7 @@ async def bulk_upload(
                 data=content,
                 event_id=event_id,
                 filename=raw_filename,
-                content_type=file.content_type or "image/jpeg",
+                content_type=mime_for_ext(ext),
             )
         except Exception as exc:
             logger.error("bulk_upload storage error for %s: %s", original_name, exc)

@@ -36,12 +36,12 @@ from app.models.photo import Photo
 from app.models.user import User
 from app.core.dependencies import get_current_user
 from app.services import storage_service
+from app.services.image_normalizer import ACCEPTED_EXTENSIONS, mime_for_ext
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-ACCEPTED_EXTENSIONS  = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 MAX_FILE_SIZE_MB      = int(os.getenv("MAX_PHOTO_SIZE_MB", "20"))
 PRESIGN_TTL_SECONDS   = int(os.getenv("PRESIGN_TTL_SECONDS", "3600"))   # 1 h
 MAX_PRESIGN_BATCH     = int(os.getenv("MAX_PRESIGN_BATCH", "2000"))      # per request
@@ -178,9 +178,7 @@ async def presign_uploads(
             upload_url = storage_service.generate_presigned_put_url(
                 event_id=event_id,
                 filename=stored_filename,
-                # Sign with application/octet-stream so the browser's Content-Type
-                # header is always valid regardless of image subtype.
-                content_type="application/octet-stream",
+                content_type=mime_for_ext(ext),
                 expires_in=PRESIGN_TTL_SECONDS,
             )
         except Exception as exc:
@@ -378,7 +376,7 @@ async def upload_photos(
                 data=content,
                 event_id=event_id,
                 filename=stored_filename,
-                content_type=file.content_type or "image/jpeg",
+                content_type=mime_for_ext(ext),
             )
         except Exception as e:
             failed.append({"filename": original_name, "reason": f"storage_error: {e}"})
