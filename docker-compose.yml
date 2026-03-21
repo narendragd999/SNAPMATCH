@@ -172,11 +172,11 @@ services:
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
       # 2 workers × 2 threads = 4 logical processors fully used, no over-subscription
-      - OMP_NUM_THREADS=2
-      - OPENBLAS_NUM_THREADS=2
-      - MKL_NUM_THREADS=2
-      - ONNXRUNTIME_NUM_THREADS=2
-    mem_limit: 2g
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - ONNXRUNTIME_NUM_THREADS=1
+    mem_limit: 3g
     restart: unless-stopped
 
   # ── Finalizer Worker ─────────────────────────────────────
@@ -220,7 +220,7 @@ services:
       - OMP_NUM_THREADS=4
       - OPENBLAS_NUM_THREADS=4
       - MKL_NUM_THREADS=4
-    mem_limit: 6g
+    mem_limit: 2g
     restart: unless-stopped
 
   # ── AI Enrichment Worker ─────────────────────────────────
@@ -262,7 +262,7 @@ services:
       - OMP_NUM_THREADS=4
       - OPENBLAS_NUM_THREADS=4
       - MKL_NUM_THREADS=4
-    mem_limit: 4g
+    mem_limit: 2g
     restart: unless-stopped
 
   # ── Default Worker ────────────────────────────────────────
