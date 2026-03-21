@@ -171,43 +171,56 @@ jobs:
         echo "All services ready"
 
     # 10 Seed default users
-    # Creates admin + test accounts so the preview is immediately usable.
-    # Uses the backend /auth/register endpoint.
+    # Bypasses /auth/register (which ignores role field for security).
+    # Runs Python inside the backend container using the app's own
+    # hash_password() so the hash is 100% identical to what login expects.
     - name: Seed default users
       run: |
-        BASE="http://localhost:8000"
+        docker exec event_backend python3 - << 'PYEOF'
+from app.core.security import hash_password
+from app.database.db import SessionLocal
+from app.models.user import User
+from datetime import datetime
 
-        create_user() {
-          local EMAIL="$1" PASS="$2" ROLE="$3"
-          RESP=$(curl -sf -X POST "$BASE/auth/register" \
-            -H "Content-Type: application/json" \
-            -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\",\"role\":\"$ROLE\"}" \
-            2>/dev/null || true)
-          if echo "$RESP" | grep -q '"id"'; then
-            echo "✅ Created [$ROLE]: $EMAIL"
-          elif echo "$RESP" | grep -qi "already\|exist\|duplicate"; then
-            echo "ℹ️  Already exists: $EMAIL (skipping)"
-          else
-            echo "⚠️  Could not create $EMAIL — Response: $RESP"
-            # Fallback: insert directly into DB if API failed
-            docker exec event_postgres psql -U postgres -d event_ai -c \
-              "INSERT INTO users (email, password_hash, role, plan_type, free_event_used, created_at)
-               VALUES ('$EMAIL', crypt('$PASS', gen_salt('bf')), '$ROLE', 'pro', false, now())
-               ON CONFLICT (email) DO NOTHING;" 2>/dev/null \
-              && echo "  ↳ Inserted via DB fallback" \
-              || echo "  ↳ DB fallback also failed (crypt may not be available)"
-          fi
-        }
+db = SessionLocal()
 
-        create_user "admin@admin.com" "123456" "admin"
-        create_user "test@gmail.com"  "123456" "owner"
+users = [
+    {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
+    {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
+]
 
-        echo ""
-        echo "================================="
-        echo " Default accounts ready"
-        echo " Admin → admin@admin.com / 123456  (role: admin)"
-        echo " Test  → test@gmail.com  / 123456  (role: owner)"
-        echo "================================="
+try:
+    for u in users:
+        existing = db.query(User).filter(User.email == u["email"]).first()
+        if existing:
+            # Always force-update role + password in case previous run got it wrong
+            existing.password_hash = hash_password(u["password"])
+            existing.role          = u["role"]
+            existing.plan_type     = u["plan_type"]
+            db.commit()
+            print(f"✅ Updated: {u['email']} (role={u['role']})")
+        else:
+            user = User(
+                email         = u["email"],
+                password_hash = hash_password(u["password"]),
+                role          = u["role"],
+                plan_type     = u["plan_type"],
+                free_event_used = False,
+                created_at    = datetime.utcnow(),
+            )
+            db.add(user)
+            db.commit()
+            print(f"✅ Created: {u['email']} (role={u['role']})")
+finally:
+    db.close()
+
+print("")
+print("=================================")
+print(" Default accounts ready")
+print(" Admin → admin@admin.com / 123456  (role: admin)")
+print(" Test  → test@gmail.com  / 123456  (role: owner)")
+print("=================================")
+PYEOF
 
     # 11 Install cloudflared
     - name: Install Cloudflare tunnel
@@ -358,12 +371,17 @@ jobs:
           --format "{{.Name}}" | head -1)
         echo "Compose network: $COMPOSE_NETWORK"
 
+        # --lock-connection  → hides the login form, auto-connects with --url
+        # --no-open          → don't try to open a browser on the server
         docker run -d \
           --name pgweb \
           --network "${COMPOSE_NETWORK:-host}" \
           -p 8081:8081 \
           sosedoff/pgweb \
-          pgweb --bind=0.0.0.0 --listen=8081 --url="$DB_URL"
+          pgweb --bind=0.0.0.0 --listen=8081 \
+                --url="$DB_URL" \
+                --lock-connection \
+                --no-open
 
         for i in {1..15}; do
           curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
