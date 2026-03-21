@@ -178,28 +178,35 @@ jobs:
         BASE="http://localhost:8000"
 
         create_user() {
-          local NAME="$1" EMAIL="$2" PASS="$3" ROLE="$4"
+          local EMAIL="$1" PASS="$2" ROLE="$3"
           RESP=$(curl -sf -X POST "$BASE/auth/register" \
             -H "Content-Type: application/json" \
-            -d "{\"name\":\"$NAME\",\"email\":\"$EMAIL\",\"password\":\"$PASS\",\"role\":\"$ROLE\"}" \
+            -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\",\"role\":\"$ROLE\"}" \
             2>/dev/null || true)
           if echo "$RESP" | grep -q '"id"'; then
-            echo "✅ Created $ROLE user: $EMAIL"
+            echo "✅ Created [$ROLE]: $EMAIL"
           elif echo "$RESP" | grep -qi "already\|exist\|duplicate"; then
             echo "ℹ️  Already exists: $EMAIL (skipping)"
           else
             echo "⚠️  Could not create $EMAIL — Response: $RESP"
+            # Fallback: insert directly into DB if API failed
+            docker exec event_postgres psql -U postgres -d event_ai -c \
+              "INSERT INTO users (email, password_hash, role, plan_type, free_event_used, created_at)
+               VALUES ('$EMAIL', crypt('$PASS', gen_salt('bf')), '$ROLE', 'pro', false, now())
+               ON CONFLICT (email) DO NOTHING;" 2>/dev/null \
+              && echo "  ↳ Inserted via DB fallback" \
+              || echo "  ↳ DB fallback also failed (crypt may not be available)"
           fi
         }
 
-        create_user "Admin"     "admin@admin.com" "123456" "admin"
-        create_user "Test User" "test@gmail.com"  "123456" "user"
+        create_user "admin@admin.com" "123456" "admin"
+        create_user "test@gmail.com"  "123456" "owner"
 
         echo ""
         echo "================================="
         echo " Default accounts ready"
-        echo " Admin → admin@admin.com / 123456"
-        echo " Test  → test@gmail.com  / 123456"
+        echo " Admin → admin@admin.com / 123456  (role: admin)"
+        echo " Test  → test@gmail.com  / 123456  (role: owner)"
         echo "================================="
 
     # 11 Install cloudflared
@@ -415,8 +422,8 @@ jobs:
         echo " DB tunnel:    $DB_TUNNEL_URL"
         echo "---------------------------------"
         echo " 🔑 Test Accounts"
-        echo " Admin → admin@admin.com / 123456"
-        echo " User  → test@gmail.com  / 123456"
+        echo " Admin → admin@admin.com / 123456  (role: admin)"
+        echo " User  → test@gmail.com  / 123456  (role: owner)"
         echo "================================="
 
         # ── Start tailing all services into one log file ──────────────────────
