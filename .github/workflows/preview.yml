@@ -170,25 +170,24 @@ jobs:
         fi
         echo "All services ready"
 
-    # 10 Run database migrations
-    # Runs alembic inside the backend container so all schema changes
-    # including pricing_config table are applied before seeding users.
+    # 10 Run database migrations via Alembic
+    # The migration chain: 0001→...→0009→001_pricing_config
     - name: Run database migrations
       run: |
         echo "Running alembic migrations..."
-        docker exec event_backend alembic upgrade head
+        docker exec -w /app event_backend alembic upgrade head
 
-        # Verify pricing_config table was created
+        # Verify pricing_config table was created and seeded
         TABLE_CHECK=$(docker exec event_postgres psql -U postgres -d event_ai -tAc \
           "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='pricing_config'")
         if [ "$TABLE_CHECK" = "1" ]; then
-          echo "✅ pricing_config table exists"
           ROW_COUNT=$(docker exec event_postgres psql -U postgres -d event_ai -tAc \
             "SELECT COUNT(*) FROM pricing_config")
-          echo "   Rows: $ROW_COUNT"
+          echo "✅ pricing_config table exists — $ROW_COUNT row(s)"
         else
           echo "⚠️  pricing_config table not found — migration may have failed"
-          docker exec event_backend alembic history
+          docker exec -w /app event_backend alembic history
+          exit 1
         fi
 
     # 11 Seed default users
