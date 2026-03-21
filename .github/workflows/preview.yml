@@ -112,7 +112,7 @@ jobs:
 
         # AI models
         MAX_PHOTO_SIZE_MB=20
-        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
+        PLACES365_MODEL_PATH=  # auto-downloads resnet18 weights on first run
         YOLO_MODEL_PATH=yolov8n.pt
         DEFAULT_EVENT_PIN=0000
         EOF
@@ -354,33 +354,82 @@ jobs:
         echo " DB:   $DB_NAME  User: $DB_USER"
         echo "================================="
 
-        # ── Background watchdog: restart tunnel every 50 min ───────────────
-        # Cloudflare free tunnels last ~2 hrs but often die sooner.
-        # We restart proactively every 50 min to guarantee a live URL.
-        # The new URL overwrites /tmp/pgweb_url so the keep-alive loop
-        # always reads the current one.
+        # ── Background watchdog: check pgweb health + restart every 60s ─────
+        # Fixes two failure modes:
+        #   1. 502 Bad Gateway  → pgweb container died, restart it
+        #   2. DNS_PROBE_STARTED → tunnel process died, restart it
+        # Runs every 60 seconds so recovery is fast.
+        # New URL written to /tmp/pgweb_url for the keep-alive loop to print.
         (
+          # Store DB_URL so watchdog can restart pgweb container if needed
+          PGWEB_DB_URL="$DB_URL"
+          PGWEB_NETWORK="$COMPOSE_NETWORK"
+
           while true; do
-            sleep 3000   # 50 minutes
-            echo "[pgweb watchdog] Restarting tunnel at $(date)"
-            pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
-            sleep 2
-            rm -f /tmp/pgweb-tunnel.log
-            cloudflared tunnel --url http://localhost:8081 >> /tmp/pgweb-tunnel.log 2>&1 &
-            for i in $(seq 1 40); do
-              sleep 1
-              NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
-              [ -n "$NEW_URL" ] && break
-            done
-            if [ -n "$NEW_URL" ]; then
-              echo "$NEW_URL" > /tmp/pgweb_url
-              echo "[pgweb watchdog] New URL: $NEW_URL"
-            else
-              echo "[pgweb watchdog] WARNING: tunnel restart failed"
+            sleep 60
+
+            # ── 1. Check if pgweb HTTP is alive ──────────────────────────────
+            if ! curl -sf --max-time 5 http://localhost:8081 >/dev/null 2>&1; then
+              echo "[pgweb watchdog] pgweb HTTP down — restarting container at $(date)"
+              docker rm -f pgweb 2>/dev/null || true
+              sleep 2
+              docker run -d \
+                --name pgweb \
+                --network "${PGWEB_NETWORK:-host}" \
+                -p 8081:8081 \
+                sosedoff/pgweb \
+                pgweb --bind=0.0.0.0 --listen=8081 \
+                      --url="$PGWEB_DB_URL" \
+                      --lock-connection \
+                      --no-open
+              # Wait for pgweb to be ready
+              for i in $(seq 1 20); do
+                sleep 1
+                curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1 && echo "[pgweb watchdog] pgweb container back up" && break
+              done
+            fi
+
+            # ── 2. Check if tunnel process is alive ──────────────────────────
+            if ! pgrep -f "cloudflared tunnel.*8081" >/dev/null 2>&1; then
+              echo "[pgweb watchdog] Tunnel process dead — restarting at $(date)"
+              rm -f /tmp/pgweb-tunnel.log
+              cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+              for i in $(seq 1 40); do
+                sleep 1
+                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
+                [ -n "$NEW_URL" ] && break
+              done
+              if [ -n "$NEW_URL" ]; then
+                echo "$NEW_URL" > /tmp/pgweb_url
+                echo "[pgweb watchdog] New tunnel URL: $NEW_URL"
+              else
+                echo "[pgweb watchdog] WARNING: tunnel restart failed"
+              fi
+            fi
+
+            # ── 3. Proactive tunnel rotation every 50 min ────────────────────
+            # Even if the tunnel process is alive, rotate it every 50 min
+            # because Cloudflare free tunnels silently expire ~2 hrs.
+            TUNNEL_AGE=$(( $(date +%s) - $(stat -c %Y /tmp/pgweb-tunnel.log 2>/dev/null || echo $(date +%s)) ))
+            if [ "$TUNNEL_AGE" -gt 3000 ]; then
+              echo "[pgweb watchdog] Proactive tunnel rotation at $(date)"
+              pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
+              sleep 2
+              rm -f /tmp/pgweb-tunnel.log
+              cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+              for i in $(seq 1 40); do
+                sleep 1
+                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
+                [ -n "$NEW_URL" ] && break
+              done
+              if [ -n "$NEW_URL" ]; then
+                echo "$NEW_URL" > /tmp/pgweb_url
+                echo "[pgweb watchdog] Rotated URL: $NEW_URL"
+              fi
             fi
           done
         ) &
-        echo "pgweb tunnel watchdog started (restarts every 50 min)"
+        echo "pgweb watchdog started (checks every 60s — restarts container + tunnel if down)"
 
     # 15 MinIO Console tunnel
     - name: Start MinIO Console tunnel

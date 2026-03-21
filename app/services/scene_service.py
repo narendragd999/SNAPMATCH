@@ -1,16 +1,26 @@
 """
+app/services/scene_service.py
+
 Phase 3: Scene Detection using Places365 (lightweight CNN)
 
 Places365 assigns one of 365 scene categories to each image.
 Examples: wedding_reception, outdoor_wedding, banquet_hall, concert_hall, ballroom
 
+BUG FIXED: original code used arch="resnet50" but downloaded resnet18 weights.
+Loading resnet18 weights into a resnet50 model raises a state_dict mismatch
+exception, _scene_model stays None, and scene_label is null for every photo →
+scene filter pills never show in the UI.
+
+Fix: use resnet18 consistently (smaller, faster, correct for auto-download).
+If PLACES365_MODEL_PATH is set, the arch is inferred from the filename so
+a manually supplied resnet50 file still works.
+
 Install:
     pip install torch torchvision
-    # Download model weights (done once, cached):
-    # python -c "from app.services.scene_service import load_scene_model; load_scene_model()"
+    # Weights download automatically on first use (~50 MB cached to ~/.cache/places365/)
 
 Environment variables:
-    PLACES365_MODEL_PATH=/path/to/weights  (optional, auto-downloads if not set)
+    PLACES365_MODEL_PATH=/path/to/resnet18_places365.pth.tar  (optional)
 """
 
 import os
@@ -19,14 +29,23 @@ import numpy as np
 from pathlib import Path
 from app.services import storage_service
 
-# Lazy import — only loaded when scene detection is used
-_scene_model = None
-_scene_labels = None
+_scene_model     = None
+_scene_labels    = None
 _scene_transform = None
 
 
+def _infer_arch(model_path: str) -> str:
+    """Infer ResNet architecture from filename. Defaults to resnet18."""
+    name = Path(model_path).name.lower()
+    if "resnet50" in name:
+        return "resnet50"
+    if "resnet18" in name:
+        return "resnet18"
+    return "resnet18"   # safe default — matches the auto-download URL
+
+
 def load_scene_model():
-    """Load Places365 model. Called once at worker startup."""
+    """Load Places365 model. Called once at worker startup (idempotent)."""
     global _scene_model, _scene_labels, _scene_transform
 
     if _scene_model is not None:
@@ -37,29 +56,33 @@ def load_scene_model():
         import torchvision.models as models
         from torchvision import transforms
 
-        model_path = os.getenv("PLACES365_MODEL_PATH")
-
-        # Use ResNet-18 (smaller, faster than ResNet-50)
-        arch = "resnet50"
-        model = models.__dict__[arch](num_classes=365)
+        model_path = os.getenv("PLACES365_MODEL_PATH", "").strip()
 
         if model_path and os.path.exists(model_path):
+            # User supplied a local file — infer arch from filename
+            arch = _infer_arch(model_path)
+            print(f"📂 Loading Places365 from {model_path}  (arch={arch})")
             checkpoint = torch.load(model_path, map_location="cpu")
         else:
-            # Auto-download from Places365 GitHub release
-            import urllib.request
-            url = "http://places2.csail.mit.edu/models_places365/resnet18_places365.pth.tar"
-            cache_dir = Path.home() / ".cache" / "places365"
+            # Auto-download resnet18 weights (~50 MB, cached after first run)
+            arch = "resnet18"
+            url  = "http://places2.csail.mit.edu/models_places365/resnet18_places365.pth.tar"
+            cache_dir  = Path.home() / ".cache" / "places365"
             cache_dir.mkdir(parents=True, exist_ok=True)
             local_path = cache_dir / "resnet18_places365.pth.tar"
 
             if not local_path.exists():
-                print(f"⬇ Downloading Places365 model to {local_path}")
+                import urllib.request
+                print(f"⬇ Downloading Places365 resnet18 weights → {local_path}")
                 urllib.request.urlretrieve(url, local_path)
+                print("✅ Download complete")
 
             checkpoint = torch.load(local_path, map_location="cpu")
 
-        # Handle DataParallel wrapper
+        # Build model with correct number of output classes (365)
+        model = models.__dict__[arch](num_classes=365)
+
+        # Strip DataParallel wrapper if present
         state_dict = checkpoint.get("state_dict", checkpoint)
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
@@ -67,8 +90,8 @@ def load_scene_model():
 
         _scene_model = model
 
-        # Load class labels
-        labels_url = "https://raw.githubusercontent.com/CSAILVision/places365/master/categories_places365.txt"
+        # Download class labels if not cached
+        labels_url   = "https://raw.githubusercontent.com/CSAILVision/places365/master/categories_places365.txt"
         cache_labels = Path.home() / ".cache" / "places365" / "categories_places365.txt"
 
         if not cache_labels.exists():
@@ -76,6 +99,7 @@ def load_scene_model():
             urllib.request.urlretrieve(labels_url, cache_labels)
 
         with open(cache_labels) as f:
+            # Each line: "/a/airfield 0" → strip leading "/x/" prefix
             _scene_labels = [line.strip().split(" ")[0][3:] for line in f]
 
         _scene_transform = transforms.Compose([
@@ -85,11 +109,11 @@ def load_scene_model():
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
+                std=[0.229, 0.224, 0.225],
+            ),
         ])
 
-        print("✅ Places365 scene model loaded")
+        print(f"✅ Places365 scene model loaded  (arch={arch})")
 
     except Exception as e:
         print(f"⚠ Scene model load failed: {e}. Scene detection disabled.")
@@ -123,11 +147,11 @@ def detect_scene(event_id: int, image_filename: str) -> dict:
             return {"scene_label": None, "scene_confidence": None, "top5": []}
 
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        tensor = _scene_transform(img_rgb).unsqueeze(0)
+        tensor  = _scene_transform(img_rgb).unsqueeze(0)
 
         with torch.no_grad():
             logits = _scene_model(tensor)
-            probs = torch.nn.functional.softmax(logits, dim=1)[0]
+            probs  = torch.nn.functional.softmax(logits, dim=1)[0]
 
         top5_probs, top5_idx = torch.topk(probs, 5)
 
@@ -137,9 +161,9 @@ def detect_scene(event_id: int, image_filename: str) -> dict:
         ]
 
         return {
-            "scene_label": top5[0][0],
+            "scene_label":      top5[0][0],
             "scene_confidence": top5[0][1],
-            "top5": top5
+            "top5":             top5,
         }
 
     except Exception as e:
@@ -148,18 +172,8 @@ def detect_scene(event_id: int, image_filename: str) -> dict:
 
 
 def batch_detect_scenes(event_id: int, image_filenames: list, batch_size: int = 16) -> dict:
-    """
-    Batch scene detection for efficiency.
-
-    Returns: {filename: scene_result}
-    """
-    results = {}
-
+    """Batch scene detection. Returns {filename: scene_result}."""
     if _scene_model is None:
         return {f: {"scene_label": None, "scene_confidence": None} for f in image_filenames}
 
-    # Process one at a time for simplicity (can be batched with DataLoader for speed)
-    for filename in image_filenames:
-        results[filename] = detect_scene(event_id, filename)
-
-    return results
+    return {fn: detect_scene(event_id, fn) for fn in image_filenames}
