@@ -45,7 +45,7 @@ const INFRA = {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface PricingConfig as PricingCalculatorConfig {
+export interface PricingCalculatorConfig {
   photoQuota:   number;
   guestQuota:   number;
   validityDays: number;
@@ -61,7 +61,7 @@ export interface StaticConfig {
 interface Props {
   mode?:               "owner" | "public" | "admin";
   staticConfig?:       StaticConfig;
-  onProceed?:          (config: PricingCalculatorConfig) => void;
+  onProceed?:          (config: PricingCalculatorConfig) => void;  // eslint-disable-line
   ctaLabel?:           string;
   showFreeTierNote?:   boolean;
   freeEventAvailable?: boolean;

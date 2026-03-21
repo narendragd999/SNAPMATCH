@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import PricingCalculator, { type PricingConfig } from "@/components/PricingCalculator";
 import { useRazorpay } from "@/hooks/useRazorpay";
-import { FREE_TIER, formatInr } from "@/lib/pricing";
+import { getPricingConfig, getFreeTier, formatInr } from "@/lib/pricing";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
@@ -64,11 +64,12 @@ function CreateEventForm() {
 
   const [step,      setStep]      = useState<Step>(isFreeMode ? 2 : 1);
   const [details,   setDetails]   = useState<EventDetails>({ name: "", description: "" });
-  const [config,    setConfig]    = useState<PricingConfig | null>(null);
+  const [config,    setConfig]    = useState<PricingCalculatorConfig | null>(null);
   const [error,     setError]     = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [freeAvail, setFreeAvail] = useState(false);
   const [userEmail, setUserEmail] = useState("");
+  const [freeTier,  setFreeTier]  = useState({ photoQuota: 50, guestQuota: 10, validityDays: 7 });
 
   // Load user status on mount
   useEffect(() => {
@@ -84,6 +85,11 @@ function CreateEventForm() {
     })
       .then((r) => r.json())
       .then((d) => setFreeAvail(d.free_event_available ?? false))
+      .catch(() => {});
+
+    // Load live free tier quotas from pricing config
+    getPricingConfig()
+      .then((cfg) => setFreeTier(getFreeTier(cfg)))
       .catch(() => {});
 
     // Restore pre-filled config from pricing page
@@ -308,7 +314,7 @@ function CreateEventForm() {
                     <div>
                       <p className="text-xs font-medium text-emerald-300">You have a free event available!</p>
                       <p className="text-[10px] text-zinc-500">
-                        {FREE_TIER.photoQuota} photos · {FREE_TIER.guestQuota} guest slots · {FREE_TIER.validityDays} days
+                        {freeTier.photoQuota} photos · {freeTier.guestQuota} guest slots · {freeTier.validityDays} days
                       </p>
                     </div>
                   </div>
