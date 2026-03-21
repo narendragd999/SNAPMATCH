@@ -312,53 +312,80 @@ jobs:
         DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER     2>/dev/null || echo "postgres")
         DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD  2>/dev/null || echo "admin123")
         DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB        2>/dev/null || echo "event_ai")
-
-        # Use the container name as the hostname (works inside Docker network)
-        # Falls back to 127.0.0.1 via host network if container name DNS fails
-        DB_HOST="$PG_CONTAINER"
         PG_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PG_CONTAINER" | head -1)
-        DB_URL="postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=disable"
-        DB_URL_IP="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
-        echo "DB_URL (no pass): postgres://${DB_USER}:***@${DB_HOST}:5432/${DB_NAME}"
-        echo "DB_URL_IP (no pass): postgres://${DB_USER}:***@${PG_IP}:5432/${DB_NAME}"
+
+        # Find what host port postgres is exposed on (compose maps it to host)
+        PG_HOST_PORT=$(docker inspect "$PG_CONTAINER" \
+          --format='{{range $p,$b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostPort}}{{end}}{{end}}' \
+          2>/dev/null | tr -s ' \n' '\n' | grep -E '^[0-9]+$' | head -1)
+        # Default to 5432 if not explicitly mapped
+        PG_HOST_PORT="${PG_HOST_PORT:-5432}"
 
         COMPOSE_NETWORK=$(docker network ls --filter "label=com.docker.compose.project" --format "{{.Name}}" | head -1)
-        echo "Compose network: $COMPOSE_NETWORK"
+        echo "Compose network: $COMPOSE_NETWORK  PG_IP=$PG_IP  PG_HOST_PORT=$PG_HOST_PORT"
 
-        # Try starting pgweb with hostname first, fall back to IP if that fails
+        # Build 3 connection URLs to try in order:
+        # 1. host network + localhost (most reliable — pgweb shares host network stack)
+        # 2. compose network + container IP (direct bridge IP)
+        # 3. compose network + container name (DNS — only works if pgweb is in same project)
+        DB_URL_HOST="postgres://${DB_USER}:${DB_PASS}@127.0.0.1:${PG_HOST_PORT}/${DB_NAME}?sslmode=disable"
+        DB_URL_IP="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
+        DB_URL_NAME="postgres://${DB_USER}:${DB_PASS}@${PG_CONTAINER}:5432/${DB_NAME}?sslmode=disable"
+        echo "Will try: localhost:$PG_HOST_PORT → $PG_IP:5432 → $PG_CONTAINER:5432"
+
+        # start_pgweb_container URL LABEL [NETWORK]
+        # NETWORK defaults to "host" for URL_HOST, compose network for others
         start_pgweb_container() {
-          local URL_TO_USE="$1" LABEL="$2"
-          echo "Starting pgweb with $LABEL..."
+          local URL_TO_USE="$1" LABEL="$2" NETWORK="${3:-host}"
+          echo "Starting pgweb: $LABEL (network=$NETWORK)..."
           docker rm -f pgweb 2>/dev/null || true
-          docker run -d \
-            --name pgweb \
-            --network "${COMPOSE_NETWORK:-host}" \
-            -p 8081:8081 \
-            --restart unless-stopped \
-            sosedoff/pgweb \
-            pgweb --bind=0.0.0.0 --listen=8081 \
-                  --url="$URL_TO_USE" \
-                  --lock-connection \
-                  --no-open
-          # Wait for pgweb HTTP to be ready
-          for i in $(seq 1 20); do
+          sleep 1
+          if [ "$NETWORK" = "host" ]; then
+            docker run -d \
+              --name pgweb \
+              --network host \
+              sosedoff/pgweb \
+              pgweb --bind=0.0.0.0 --listen=8081 \
+                    --url="$URL_TO_USE" \
+                    --lock-connection --no-open
+          else
+            docker run -d \
+              --name pgweb \
+              --network "$NETWORK" \
+              -p 8081:8081 \
+              sosedoff/pgweb \
+              pgweb --bind=0.0.0.0 --listen=8081 \
+                    --url="$URL_TO_USE" \
+                    --lock-connection --no-open
+          fi
+          for i in $(seq 1 15); do
             sleep 2
             if curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1; then
-              echo "pgweb ready with $LABEL"
+              echo "✓ pgweb ready: $LABEL"
+              # Save working config for watchdog
+              echo "$URL_TO_USE" > /tmp/pgweb_db_url
+              echo "$NETWORK"    > /tmp/pgweb_network
               return 0
             fi
           done
-          echo "pgweb failed with $LABEL"
-          docker logs pgweb --tail=10 2>/dev/null || true
+          echo "✗ pgweb failed: $LABEL"
+          docker logs pgweb --tail=15 2>/dev/null | sed 's/^/  /'
           return 1
         }
 
-        # Try hostname (works inside Docker network via DNS)
-        if ! start_pgweb_container "$DB_URL" "hostname ($DB_HOST)"; then
-          echo "Hostname failed, trying IP ($PG_IP)..."
-          if ! start_pgweb_container "$DB_URL_IP" "IP ($PG_IP)"; then
-            echo "Both connection methods failed — pgweb unavailable"
-          fi
+        # Try methods in order
+        PGWEB_OK=0
+        if start_pgweb_container "$DB_URL_HOST" "host-network+localhost:$PG_HOST_PORT" "host"; then
+          PGWEB_OK=1
+        elif start_pgweb_container "$DB_URL_IP" "compose-net+IP:$PG_IP" "${COMPOSE_NETWORK:-host}"; then
+          PGWEB_OK=1
+        elif start_pgweb_container "$DB_URL_NAME" "compose-net+name:$PG_CONTAINER" "${COMPOSE_NETWORK:-host}"; then
+          PGWEB_OK=1
+        fi
+
+        if [ "$PGWEB_OK" -eq 0 ]; then
+          echo "ERROR: All pgweb connection methods failed"
+          docker logs pgweb 2>/dev/null | tail -20
         fi
 
         # ── Start initial pgweb tunnel ──────────────────────────────────────
@@ -416,10 +443,11 @@ jobs:
         # Runs every 60 seconds so recovery is fast.
         # New URL written to /tmp/pgweb_url for the keep-alive loop to print.
         (
-          # Store DB_URL so watchdog can restart pgweb container if needed
-          PGWEB_DB_URL="$DB_URL"
-          PGWEB_DB_URL_IP="$DB_URL_IP"
-          PGWEB_NETWORK="$COMPOSE_NETWORK"
+          # Read the working DB URL and network saved by start_pgweb_container()
+          # Falls back to host network + localhost if files not present
+          get_working_url()     { cat /tmp/pgweb_db_url  2>/dev/null || echo "postgres://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}?sslmode=disable"; }
+          get_working_network() { cat /tmp/pgweb_network 2>/dev/null || echo "host"; }
+          PGWEB_NETWORK_FALLBACK="${COMPOSE_NETWORK:-host}"
 
           while true; do
             sleep 60
@@ -427,27 +455,33 @@ jobs:
             # ── 1. Check if pgweb HTTP is alive ──────────────────────────────
             if ! curl -sf --max-time 5 http://localhost:8081 >/dev/null 2>&1; then
               echo "[pgweb watchdog] pgweb HTTP down — restarting container at $(date)"
-              docker rm -f pgweb 2>/dev/null || true
-              sleep 2
-              # Try hostname first, fall back to IP
               RESTARTED=0
-              for TRY_URL in "$PGWEB_DB_URL" "$PGWEB_DB_URL_IP"; do
+              WD_URL=$(get_working_url)
+              WD_NET=$(get_working_network)
+              # Try all 3 methods
+              for TRY_ARGS in \
+                "postgres://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}?sslmode=disable|host" \
+                "${WD_URL}|${WD_NET}" \
+                "postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable|${PGWEB_NETWORK_FALLBACK}"; do
+                TRY_URL="${TRY_ARGS%%|*}"
+                TRY_NET="${TRY_ARGS##*|}"
                 docker rm -f pgweb 2>/dev/null || true
                 sleep 1
-                docker run -d \
-                  --name pgweb \
-                  --network "${PGWEB_NETWORK:-host}" \
-                  -p 8081:8081 \
-                  --restart unless-stopped \
-                  sosedoff/pgweb \
-                  pgweb --bind=0.0.0.0 --listen=8081 \
-                        --url="$TRY_URL" \
-                        --lock-connection \
-                        --no-open
+                if [ "$TRY_NET" = "host" ]; then
+                  docker run -d --name pgweb --network host \
+                    sosedoff/pgweb \
+                    pgweb --bind=0.0.0.0 --listen=8081 \
+                          --url="$TRY_URL" --lock-connection --no-open
+                else
+                  docker run -d --name pgweb --network "$TRY_NET" -p 8081:8081 \
+                    sosedoff/pgweb \
+                    pgweb --bind=0.0.0.0 --listen=8081 \
+                          --url="$TRY_URL" --lock-connection --no-open
+                fi
                 for i in $(seq 1 15); do
                   sleep 1
                   if curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1; then
-                    echo "[pgweb watchdog] pgweb container back up (${TRY_URL%%@*}@...)"
+                    echo "[pgweb watchdog] pgweb back up"
                     RESTARTED=1
                     break
                   fi
