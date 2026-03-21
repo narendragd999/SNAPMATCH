@@ -1,9 +1,9 @@
 """
 app/api/pricing_routes.py
 
-Public GET  /api/pricing/config     → full config (frontend fetches this)
-Admin  PUT  /api/pricing/config     → update any pricing value
-Admin  GET  /api/pricing/config/history → list all past configs
+Public  GET  /pricing/config          → full config (frontend fetches on every load)
+Admin   PUT  /pricing/config          → update any pricing value
+Admin   GET  /pricing/config/history  → list all past config rows (audit trail)
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,23 +19,29 @@ from app.models.user import User
 router = APIRouter(prefix="/pricing", tags=["pricing"])
 
 
-# ── GET /api/pricing/config ───────────────────────────────────────────────────
+# ── GET /pricing/config ───────────────────────────────────────────────────────
 
 @router.get("/config")
 def get_pricing_config(db: Session = Depends(get_db)):
-    """Public — frontend fetches this on every pricing page load."""
+    """
+    Public — no auth required.
+    Frontend fetches this once per session and caches in module scope.
+    Returns the same shape that billing_routes.get_price_config() previously did,
+    plus free_tier and paid_tier limits so the frontend can build sliders
+    without hardcoding any limits.
+    """
     return get_full_config(db)
 
 
-# ── PUT /api/pricing/config ───────────────────────────────────────────────────
+# ── PUT /pricing/config ───────────────────────────────────────────────────────
 
 class TierItem(BaseModel):
     bucket:     Optional[int] = None
-    rate_paise: int
+    rate_paise: int = Field(..., ge=0)
 
 class ValidityItem(BaseModel):
-    days:        int
-    addon_paise: int
+    days:        int = Field(..., ge=1)
+    addon_paise: int = Field(..., ge=0)
     included:    bool
 
 class PricingConfigUpdate(BaseModel):
@@ -53,7 +59,7 @@ class PricingConfigUpdate(BaseModel):
     # Base fee
     base_event_fee_paise: Optional[int] = Field(None, ge=0)
 
-    # Tiers
+    # Tiers (full replacement when provided)
     photo_tiers:      Optional[list[TierItem]] = None
     guest_tiers:      Optional[list[TierItem]] = None
     validity_options: Optional[list[ValidityItem]] = None
@@ -65,11 +71,13 @@ def update_pricing_config(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Admin only — updates pricing config in DB."""
+    """
+    Admin only — updates pricing config in DB (in-place on the active row).
+    Only fields explicitly provided are updated; omitted fields are unchanged.
+    """
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    # Get current active row
     row = (
         db.query(PricingConfig)
         .filter(PricingConfig.is_active == True)
@@ -78,14 +86,13 @@ def update_pricing_config(
     )
 
     if not row:
-        raise HTTPException(status_code=404, detail="No active pricing config found")
+        raise HTTPException(status_code=404, detail="No active pricing config found. Run migrations first.")
 
-    # Apply only the fields that were provided
     updates = data.dict(exclude_none=True)
     if not updates:
-        raise HTTPException(status_code=400, detail="No values provided")
+        raise HTTPException(status_code=400, detail="No values provided to update")
 
-    # Convert Pydantic models to dicts for JSON columns
+    # Convert Pydantic tier models to plain dicts for JSON columns
     if "photo_tiers" in updates:
         updates["photo_tiers"] = [t.dict() for t in data.photo_tiers]
     if "guest_tiers" in updates:
@@ -100,20 +107,20 @@ def update_pricing_config(
     db.refresh(row)
 
     return {
-        "message": "Pricing config updated successfully",
+        "message": "Pricing config updated",
         "updated_fields": list(updates.keys()),
         "config": get_full_config(db),
     }
 
 
-# ── GET /api/pricing/config/history ──────────────────────────────────────────
+# ── GET /pricing/config/history ───────────────────────────────────────────────
 
 @router.get("/config/history")
 def get_pricing_history(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Admin only — returns all pricing config rows for audit trail."""
+    """Admin only — returns all pricing config rows ordered newest first."""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -125,7 +132,12 @@ def get_pricing_history(
             "free_photo_quota":      r.free_photo_quota,
             "free_guest_quota":      r.free_guest_quota,
             "free_validity_days":    r.free_validity_days,
+            "min_photo_quota":       r.min_photo_quota,
+            "max_photo_quota":       r.max_photo_quota,
             "base_event_fee_paise":  r.base_event_fee_paise,
+            "photo_tiers":           r.photo_tiers,
+            "guest_tiers":           r.guest_tiers,
+            "validity_options":      r.validity_options,
             "updated_at":            r.updated_at.isoformat() if r.updated_at else None,
             "created_at":            r.created_at.isoformat() if r.created_at else None,
         }

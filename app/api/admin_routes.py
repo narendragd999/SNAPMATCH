@@ -7,7 +7,7 @@ from app.models.event import Event
 from app.models.cluster import Cluster
 from app.core.dependencies import get_current_user, get_db
 from app.core.security import hash_password
-from app.core.plans import VALID_PLAN_TYPES          # ← replaces PLANS import
+from app.core.plans import VALID_PLAN_TYPES
 from app.services.faiss_manager import FaissManager
 from app.core.config import INDEXES_PATH, STORAGE_PATH
 from app.services.storage_cleanup import delete_event_storage
@@ -41,22 +41,18 @@ class UserCreateRequest(BaseModel):
 
 
 # ── Settings allowed keys ─────────────────────────────────────────────────────
-# All keys the admin panel is permitted to read/write.
-# Integer keys are stored as strings in DB; cast to int on read.
+# Pricing config (free_photo_quota, free_guest_quota, free_validity_days,
+# min_photo_quota, max_photo_quota, max_guest_quota, base_event_fee_paise)
+# has been moved to the pricing_config table.
+# Manage it via GET/PUT /pricing/config (pricing_routes.py).
+# Only feature flags and non-pricing platform settings remain here.
 
 SETTINGS_SCHEMA: dict[str, dict] = {
-    # Free tier quota (admin-configurable, no deploy needed)
-    "free_photo_quota":   {"type": "int",  "default": 500,   "label": "Free photo quota",   "min": 10,  "max": 1000},
-    "free_guest_quota":   {"type": "int",  "default": 20,    "label": "Free guest quota",   "min": 0,   "max": 200},
-    "free_validity_days": {"type": "int",  "default": 7,     "label": "Free validity (days)","min": 1,  "max": 30},
-    # Paid event limits
-    "min_photo_quota":    {"type": "int",  "default": 50,    "label": "Min paid photo quota","min": 10,  "max": 500},
-    "max_photo_quota":    {"type": "int",  "default": 10000, "label": "Max paid photo quota","min": 100, "max": 50000},
-    "max_guest_quota":    {"type": "int",  "default": 1000,  "label": "Max guest quota",    "min": 0,   "max": 5000},
-    # Pricing
-    "base_event_fee_paise": {"type": "int", "default": 4900, "label": "Base event fee (paise)", "min": 0, "max": 100000},
-    # Feature flags
-    "upload_photo_enabled": {"type": "bool", "default": False, "label": "Guest photo upload on public page"},
+    "upload_photo_enabled": {
+        "type":    "bool",
+        "default": False,
+        "label":   "Guest photo upload on public page",
+    },
 }
 
 ALLOWED_KEYS = set(SETTINGS_SCHEMA.keys())
@@ -121,7 +117,7 @@ def list_users(
 def create_user(data: UserCreateRequest, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
-    if data.plan_type not in VALID_PLAN_TYPES:                  # ← fixed
+    if data.plan_type not in VALID_PLAN_TYPES:
         raise HTTPException(status_code=400, detail=f"plan_type must be one of {VALID_PLAN_TYPES}")
     user = User(
         email=data.email,
@@ -148,7 +144,7 @@ def update_user(
             raise HTTPException(status_code=400, detail="Email already in use")
         user.email = data.email
     if data.plan_type is not None:
-        if data.plan_type not in VALID_PLAN_TYPES:               # ← fixed
+        if data.plan_type not in VALID_PLAN_TYPES:
             raise HTTPException(status_code=400, detail=f"plan_type must be one of {VALID_PLAN_TYPES}")
         user.plan_type = data.plan_type
     if data.role is not None:
@@ -238,8 +234,8 @@ def delete_event(event_id: int, db: Session = Depends(get_db), _: User = Depends
 @router.get("/settings")
 def get_settings(db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
     """
-    Returns all settings with current DB value (or default if not set yet).
-    Also returns the schema so the frontend can build the form dynamically.
+    Returns platform feature-flag settings (not pricing config).
+    Pricing config is managed via GET/PUT /pricing/config.
     """
     rows = {r.key: r.value for r in db.query(PlatformSetting).all()}
     result = {}
@@ -260,7 +256,7 @@ def get_settings(db: Session = Depends(get_db), _: User = Depends(get_admin_user
 def update_settings(body: dict, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
     """
     Accepts {key: value} pairs. Only ALLOWED_KEYS are written.
-    Int values are validated against min/max from SETTINGS_SCHEMA.
+    Pricing keys are no longer accepted here — use PUT /pricing/config.
     """
     errors = {}
     for key, value in body.items():

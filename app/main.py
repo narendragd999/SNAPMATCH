@@ -2,10 +2,6 @@
 app/main.py
 
 FastAPI application entry point.
-
-Changes from previous version:
-  - Added import of EventOrder model so Base.metadata.create_all() picks it up
-  - All other routers unchanged
 """
 import os
 from fastapi import FastAPI
@@ -18,11 +14,12 @@ from app.database.db import Base, engine
 
 # ── Model imports (required so metadata is populated) ─────────────────────────
 from app.models import event, cluster
-from app.models.user        import User          # noqa: F401
-from app.models.event       import Event         # noqa: F401
-from app.models.event_order import EventOrder    # noqa: F401  ← NEW
-from app.models.photo       import Photo         # noqa: F401
-from app.models.cluster     import Cluster       # noqa: F401
+from app.models.user          import User          # noqa: F401
+from app.models.event         import Event         # noqa: F401
+from app.models.event_order   import EventOrder    # noqa: F401
+from app.models.photo         import Photo         # noqa: F401
+from app.models.cluster       import Cluster       # noqa: F401
+from app.models.pricing_config import PricingConfig # noqa: F401
 
 # ── Router imports ────────────────────────────────────────────────────────────
 from app.api.auth_routes        import router as auth_router
@@ -35,6 +32,7 @@ from app.api.task_routes        import router as task_router
 from app.api.approval_routes    import router as approval_router
 from app.api.admin_routes       import router as admin_router
 from app.api.guest_upload_routes import router as guest_upload_router
+from app.api.pricing_routes     import router as pricing_router
 
 app = FastAPI(title="SnapFind AI")
 
@@ -69,6 +67,7 @@ app.include_router(task_router)
 app.include_router(approval_router)
 app.include_router(admin_router)
 app.include_router(guest_upload_router)
+app.include_router(pricing_router)
 
 # Auto-create any new tables (idempotent)
 Base.metadata.create_all(bind=engine)

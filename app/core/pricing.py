@@ -5,13 +5,12 @@ Pay-per-event pricing engine.
 All monetary values are in PAISE (INR × 100) internally.
 
 Single source of truth: pricing_config DB table (app/models/pricing_config.py)
-  - Admin updates the DB via PUT /api/pricing/config
-  - Backend reads DB via get_pricing_config(db)
-  - Frontend fetches via GET /api/pricing/config — no JSON files, no imports
-  - No pricing_config.json file needed anymore
+  - Admin updates via PUT /api/pricing/config
+  - Backend reads DB via get_pricing_config(db) / calculate_price(..., db=db)
+  - Frontend fetches via GET /pricing/config  — no JSON files, no static imports
 
 Two event types:
-  - Free:          limits from pricing_config table
+  - Free:          limits from pricing_config table (get_free_tier_config)
   - Pay-per-event: quota/validity chosen by owner at purchase, stored on event.*
 """
 
@@ -19,7 +18,11 @@ from __future__ import annotations
 from typing import TypedDict
 
 
-# ── Hardcoded fallbacks (used ONLY if DB table is empty on first boot) ────────
+# ── Hardcoded fallbacks ───────────────────────────────────────────────────────
+# Used ONLY when DB table is empty on first boot (before migration seeds the row).
+# These match the migration seed values exactly so the first-boot experience
+# is identical to the post-migration experience.
+
 _DEFAULTS = {
     "free_photo_quota":      50,
     "free_guest_quota":      10,
@@ -50,7 +53,10 @@ _DEFAULTS = {
 
 
 def _get_active(db):
-    """Return active PricingConfig row, auto-seeding defaults if table is empty."""
+    """
+    Return the active PricingConfig row.
+    Auto-seeds one default row if the table is empty (first boot before migration).
+    """
     from app.models.pricing_config import PricingConfig
 
     row = (
@@ -72,7 +78,7 @@ def _get_active(db):
 # ── Public helpers ────────────────────────────────────────────────────────────
 
 def get_free_tier_config(db) -> dict:
-    """Used by event creation to set free tier quotas."""
+    """Returns free tier quotas from DB. Used by billing_routes.create_free_event."""
     row = _get_active(db)
     return {
         "photo_quota":   row.free_photo_quota,
@@ -84,7 +90,10 @@ def get_free_tier_config(db) -> dict:
 
 
 def get_full_config(db) -> dict:
-    """Full config dict — served by GET /api/pricing/config to frontend."""
+    """
+    Full config dict served by GET /pricing/config to the frontend.
+    Also used by GET /billing/price-config for backward compat.
+    """
     row = _get_active(db)
     return {
         "id": row.id,
@@ -107,8 +116,11 @@ def get_full_config(db) -> dict:
     }
 
 
-# ── Backward-compat constants (for existing code that imports these) ──────────
-# These use hardcoded defaults — for live values always use get_free_tier_config(db)
+# ── Backward-compat module-level constants ────────────────────────────────────
+# All existing code that imports these names at module level continues to work.
+# Values come from _DEFAULTS (not DB) — good enough for validation decorators
+# on Pydantic models which run at import time before a DB session exists.
+# For live values at request time, always use calculate_price(..., db=db).
 
 FREE_TIER_DEFAULTS = {
     "free_photo_quota":   _DEFAULTS["free_photo_quota"],
@@ -197,9 +209,11 @@ def calculate_price(
 ) -> PriceBreakdown:
     """
     Calculate event price.
-    Pass db to use live DB config, omit to use hardcoded defaults.
+
+    Pass db= to use live DB config (always do this in request handlers).
+    Omit db= for callers that run outside a request context (tests, scripts).
     """
-    if db:
+    if db is not None:
         row              = _get_active(db)
         photo_tiers_data = row.photo_tiers
         guest_tiers_data = row.guest_tiers
@@ -224,8 +238,8 @@ def calculate_price(
 
     photo_total, photo_tiers = _tiered_cost(photo_quota, photo_tiers_data)
     guest_total, guest_tiers = _tiered_cost(guest_quota, guest_tiers_data)
-    validity_addon           = validity_opts[validity_days]
-    total_paise              = base_fee + photo_total + guest_total + validity_addon
+    validity_addon            = validity_opts[validity_days]
+    total_paise               = base_fee + photo_total + guest_total + validity_addon
 
     return PriceBreakdown(
         base_fee_paise=base_fee,
@@ -243,7 +257,7 @@ def format_inr(paise: int) -> str:
 
 
 def get_rate_at_quota(photo_quota: int, db=None) -> int:
-    tiers = _get_active(db).photo_tiers if db else _DEFAULTS["photo_tiers"]
+    tiers = _get_active(db).photo_tiers if db is not None else _DEFAULTS["photo_tiers"]
     used  = 0
     for t in tiers:
         if t["bucket"] is None:

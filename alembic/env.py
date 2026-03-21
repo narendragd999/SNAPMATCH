@@ -7,9 +7,10 @@ from alembic import context
 sys.path.insert(0, '/app')
 
 from app.database.db import Base
-from app.models.user import User
-from app.models.event import Event
-from app.models.cluster import Cluster
+from app.models.user           import User
+from app.models.event          import Event
+from app.models.cluster        import Cluster
+from app.models.pricing_config import PricingConfig  # noqa: F401 — required for autogenerate
 
 config = context.config
 

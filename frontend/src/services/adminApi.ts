@@ -1,4 +1,5 @@
 import API from "@/services/api";
+import { invalidatePricingConfig } from "@/lib/pricing";
 
 // ─── Stats ───────────────────────────────────────────────
 export const getAdminStats = () =>
@@ -53,3 +54,18 @@ export const getAdminPlans = () =>
 // ─── Cleanup ─────────────────────────────────────────────
 export const triggerCleanup = () =>
   API.post("/admin/cleanup").then((r) => r.data);
+
+// ─── Pricing Config ───────────────────────────────────────
+export const getAdminPricingConfig = () =>
+  API.get("/pricing/config").then((r) => r.data);
+
+export const updateAdminPricingConfig = async (data: Record<string, unknown>) => {
+  const result = await API.put("/pricing/config", data).then((r) => r.data);
+  // Bust the frontend module-scope cache so the next getPricingConfig()
+  // call fetches the new values from the server.
+  invalidatePricingConfig();
+  return result;
+};
+
+export const getAdminPricingHistory = () =>
+  API.get("/pricing/config/history").then((r) => r.data);
