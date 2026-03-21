@@ -11,7 +11,7 @@
  *   - FAQ
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
@@ -20,7 +20,7 @@ import {
   HelpCircle, ChevronDown, ArrowRight, Gift, Star,
 } from "lucide-react";
 import PricingCalculator, { type PricingConfig } from "@/components/PricingCalculator";
-import { FREE_TIER, formatInr } from "@/lib/pricing";
+import { getPricingConfig, getFreeTier, formatInr } from "@/lib/pricing";
 
 // ── FAQ data ──────────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ const FAQ = [
   },
   {
     q: "What is the free event?",
-    a: `Every new account gets one free event with ${FREE_TIER.photoQuota} photos, ${FREE_TIER.guestQuota} guest upload slots, and ${FREE_TIER.validityDays}-day validity. No credit card needed.`,
+    a: `Every new account gets one free event: owner photos, guest slots, and validity are configurable — check the free tier card below for current limits. No credit card needed.`,
   },
   {
     q: "What payment methods are accepted?",
@@ -94,6 +94,13 @@ function FaqItem({ q, a }: { q: string; a: string }) {
 export default function PricingPage() {
   const router  = useRouter();
   const [calcConfig, setCalcConfig] = useState<PricingConfig | null>(null);
+  const [freeTier, setFreeTier] = useState({ photoQuota: 50, guestQuota: 10, validityDays: 7 });
+
+  useEffect(() => {
+    getPricingConfig()
+      .then((cfg) => setFreeTier(getFreeTier(cfg)))
+      .catch(() => {});
+  }, []);
 
   // Check auth & free event status (client side)
   const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -201,9 +208,9 @@ export default function PricingPage() {
               </div>
               <ul className="space-y-2 mb-5">
                 {[
-                  `${FREE_TIER.photoQuota} owner photos`,
-                  `${FREE_TIER.guestQuota} guest upload slots`,
-                  `${FREE_TIER.validityDays}-day validity`,
+                  `${freeTier.photoQuota} owner photos`,
+                  `${freeTier.guestQuota} guest upload slots`,
+                  `${freeTier.validityDays}-day validity`,
                   "AI face search enabled",
                   "No credit card required",
                 ].map((item) => (
