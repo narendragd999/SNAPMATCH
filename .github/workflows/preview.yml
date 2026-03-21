@@ -174,53 +174,56 @@ jobs:
     # Bypasses /auth/register (which ignores role field for security).
     # Runs Python inside the backend container using the app's own
     # hash_password() so the hash is 100% identical to what login expects.
-    - name: Seed default users
       run: |
         docker exec event_backend python3 - << 'PYEOF'
-        from app.core.security import hash_password
-        from app.database.db import SessionLocal
-        from app.models.user import User
-        from datetime import datetime
+from app.core.security import hash_password
+from app.database.db import SessionLocal
+from app.models.user import User
+from datetime import datetime
 
-        db = SessionLocal()
-
-        users = [
-            {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
-            {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
-        ]
-
-        try:
-            for u in users:
-                existing = db.query(User).filter(User.email == u["email"]).first()
-                if existing:
-                    # Always force-update role + password in case previous run got it wrong
-                    existing.password_hash = hash_password(u["password"])
-                    existing.role          = u["role"]
-                    existing.plan_type     = u["plan_type"]
-                    db.commit()
-                    print(f"✅ Updated: {u['email']} (role={u['role']})")
-                else:
-                    user = User(
-                        email         = u["email"],
-                        password_hash = hash_password(u["password"]),
-                        role          = u["role"],
-                        plan_type     = u["plan_type"],
-                        free_event_used = False,
-                        created_at    = datetime.utcnow(),
-                    )
-                    db.add(user)
-                    db.commit()
-                    print(f"✅ Created: {u['email']} (role={u['role']})")
-        finally:
-            db.close()
-
-        print("")
-        print("=================================")
-        print(" Default accounts ready")
-        print(" Admin → admin@admin.com / 123456  (role: admin)")
-        print(" Test  → test@gmail.com  / 123456  (role: owner)")
-        print("=================================")
-        PYEOF
+db = SessionLocal()
+users = [
+    {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
+    {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
+]
+try:
+    for u in users:
+        existing = db.query(User).filter(User.email == u["email"]).first()
+        if existing:
+            existing.password_hash = hash_password(u["password"])
+            existing.role          = u["role"]
+            existing.plan_type     = u["plan_type"]
+            db.commit()
+            print("Updated:", u["email"], "role=" + u["role"])
+        else:
+            user = User(
+                email           = u["email"],
+                password_hash   = hash_password(u["password"]),
+                role            = u["role"],
+                plan_type       = u["plan_type"],
+                free_event_used = False,
+                created_at      = datetime.utcnow(),
+            )
+            db.add(user)
+            db.commit()
+            print("Created:", u["email"], "role=" + u["role"])
+finally:
+    db.close()
+print("=================================")
+print(" Admin  admin@admin.com / 123456  role=admin")
+print(" Owner  test@gmail.com  / 123456  role=owner")
+print("=================================")
+PYEOF
+        # Verify roles
+        docker exec event_backend python3 -c "
+from app.database.db import SessionLocal
+from app.models.user import User
+db = SessionLocal()
+for e in ['admin@admin.com','test@gmail.com']:
+    u = db.query(User).filter(User.email == e).first()
+    print(e, '->', 'role=' + u.role if u else 'NOT FOUND')
+db.close()
+"
 
     # 11 Install cloudflared
     - name: Install Cloudflare tunnel
@@ -438,11 +441,21 @@ jobs:
         echo " MinIO tunnel: $MINIO_TUNNEL_URL"
         echo " Redis tunnel: $REDIS_TUNNEL_URL"
         echo " DB tunnel:    $DB_TUNNEL_URL"
+        [ -n "$PGWEB_URL" ] && echo " pgweb DB UI:  $PGWEB_URL"
         echo "---------------------------------"
         echo " 🔑 Test Accounts"
         echo " Admin → admin@admin.com / 123456  (role: admin)"
         echo " User  → test@gmail.com  / 123456  (role: owner)"
         echo "================================="
+        # Verify admin role was seeded correctly
+        docker exec event_backend python3 -c "
+from app.database.db import SessionLocal
+from app.models.user import User
+db = SessionLocal()
+u = db.query(User).filter(User.email == 'admin@admin.com').first()
+print('admin@admin.com role=' + (u.role if u else 'NOT FOUND'))
+db.close()
+" 2>/dev/null || true
 
         # ── Start tailing all services into one log file ──────────────────────
         CELERY_LOG=/tmp/celery_all.log
@@ -481,6 +494,16 @@ jobs:
           # Backend health check
           curl -sf http://localhost/api/docs >/dev/null \
             || echo "  ⚠ WARNING: backend health check failed"
+
+          # Refresh pgweb tunnel URL if it has changed
+          if [ -f /tmp/pgweb-tunnel.log ]; then
+            LATEST_PGWEB=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | tail -1)
+            if [ -n "$LATEST_PGWEB" ] && [ "$LATEST_PGWEB" != "$PGWEB_URL" ]; then
+              PGWEB_URL="$LATEST_PGWEB"
+              echo "pgweb URL refreshed: $PGWEB_URL"
+            fi
+            [ -n "$PGWEB_URL" ] && echo " pgweb DB UI: $PGWEB_URL"
+          fi
 
           # ── Dump new log lines since last iteration ────────────────────────
           if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
