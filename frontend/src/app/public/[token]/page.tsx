@@ -11,7 +11,7 @@ import {
   SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff,
   Images,
 } from 'lucide-react';
-import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf, confidenceOf } from '@/lib/snapmatch/utils';
+import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf } from '@/lib/snapmatch/utils';
 import { useReducedMotion } from '@/hooks/snapmatch/useSnapmatch';
 import { sceneIcon } from '@/components/snapmatch/UIComponents';
 import { PhotoPreview } from '@/components/snapmatch/PhotoPreview';
@@ -107,8 +107,9 @@ export default function PublicSelfiePage() {
   const [showInfo,     setShowInfo]    = useState(false);
   const [dragOver,     setDragOver]    = useState(false);
   const [gridLayout,   setGridLayout]  = useState<GridLayout>('comfortable');
-  const [dlAllLoading, setDlAllLoading] = useState(false);
-  const [showConfidence, setShowConfidence] = useState(true);
+  const [dlAllLoading,    setDlAllLoading]    = useState(false);
+  const [dlAllTabLoading, setDlAllTabLoading] = useState(false);
+  const [batchDlLoading,  setBatchDlLoading]  = useState(false);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
 
   // ── Filter state (My Photos tab) ──
@@ -401,12 +402,53 @@ export default function PublicSelfiePage() {
     finally { setDlAllLoading(false); }
   }, [resultId, dlAllLoading, token, API, event]);
 
-  // ── Batch download selected ──
+  // ── Download all event photos as ZIP (All Photos tab) ──
+  const handleDownloadAllTab = useCallback(async () => {
+    if (dlAllTabLoading) return;
+    setDlAllTabLoading(true); hapticFeedback('medium');
+    try {
+      const res = await fetch(`${API}/public/events/${token}/download-all`);
+      if (!res.ok) throw new Error();
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-all-photos.zip` });
+      a.click(); URL.revokeObjectURL(url); hapticFeedback('success');
+    } catch { hapticFeedback('error'); }
+    finally { setDlAllTabLoading(false); }
+  }, [dlAllTabLoading, token, API, event]);
+
+  // ── Batch download selected → concurrent fetch → client-side ZIP ──
   const handleBatchDownload = useCallback(async () => {
-    if (multiSelect.count === 0) return;
-    for (const imageName of multiSelect.selectionOrder) await downloadSinglePhoto(imageName);
-    multiSelect.exitSelectMode();
-  }, [multiSelect, downloadSinglePhoto]);
+    if (multiSelect.count === 0 || batchDlLoading) return;
+    setBatchDlLoading(true); hapticFeedback('medium');
+    try {
+      const results = await Promise.allSettled(
+        multiSelect.selectionOrder.map(async (imageName) => {
+          const res = await fetch(`${API}/public/events/${token}/photo/${imageName}`);
+          if (!res.ok) throw new Error();
+          const blob = await res.blob();
+          return { name: imageName, blob };
+        })
+      );
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          zip.file(result.value.name, result.value.blob);
+        }
+      }
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
+      const url = URL.createObjectURL(zipBlob);
+      const a = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `${event?.name || 'selected'}-photos.zip`,
+      });
+      a.click(); URL.revokeObjectURL(url);
+      hapticFeedback('success');
+      multiSelect.exitSelectMode();
+    } catch { hapticFeedback('error'); }
+    finally { setBatchDlLoading(false); }
+  }, [multiSelect, batchDlLoading, token, API, event]);
 
   // ── Camera ──
   const handleCameraCapture = useCallback((file: File) => { setCameraOpen(false); handleUpload(file); }, [handleUpload]);
@@ -477,7 +519,6 @@ export default function PublicSelfiePage() {
             {items.map((item, idx) => {
               const imgName   = nameOf(item);
               const scene     = sceneOf(item);
-              const confidence = confidenceOf(item);
               const isSelected = multiSelect.selectedIds.has(imgName);
               return (
                 <SelectablePhotoCard
@@ -492,8 +533,8 @@ export default function PublicSelfiePage() {
                   onToggle={() => multiSelect.toggle(imgName)}
                   onClick={() => { setPreviewIndex(idx); setPreviewImage(imgName); }}
                   scene={scene}
-                  confidence={confidence}
-                  showConfidence={showConfidence && activeTab === 'my-photos'}
+                  confidence={0}
+                  showConfidence={false}
                   watermarkConfig={watermarkConfig}
                 />
               );
@@ -862,7 +903,7 @@ export default function PublicSelfiePage() {
                           </button>
                         ))}
                       </div>
-                      {/* Download All ZIP — available for both tabs, no plan check */}
+                      {/* Download All ZIP — My Photos tab */}
                       {activeTab === 'my-photos' && myTab.total > 0 && resultId && (
                         <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
                           onClick={handleDownloadAll} disabled={dlAllLoading}
@@ -870,6 +911,16 @@ export default function PublicSelfiePage() {
                           {dlAllLoading
                             ? <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={13} /></motion.div>Preparing…</>
                             : <><PackageOpen size={13} />Download All ({myTab.total})</>}
+                        </motion.button>
+                      )}
+                      {/* Download All ZIP — All Photos tab */}
+                      {activeTab === 'all-photos' && allTab.total > 0 && (
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                          onClick={handleDownloadAllTab} disabled={dlAllTabLoading}
+                          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors">
+                          {dlAllTabLoading
+                            ? <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={13} /></motion.div>Preparing…</>
+                            : <><PackageOpen size={13} />Download All ({allTab.total})</>}
                         </motion.button>
                       )}
                       {/* New search */}
@@ -888,17 +939,26 @@ export default function PublicSelfiePage() {
                     {multiSelect.isSelectMode && (
                       <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
                         className="mb-4">
-                        <MultiSelectToolbar
-                          items={activeItems}
-                          selectedIds={multiSelect.selectedIds}
-                          onToggle={multiSelect.toggle}
-                          onSelectAll={multiSelect.selectAll}
-                          onClearSelection={multiSelect.clearSelection}
-                          onBatchDownload={handleBatchDownload}
-                          isActive={true}
-                          onActivate={multiSelect.enterSelectMode}
-                          onDeactivate={multiSelect.exitSelectMode}
-                        />
+                        {batchDlLoading ? (
+                          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800">
+                            <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
+                              <Loader2 size={14} className="text-blue-400" />
+                            </motion.div>
+                            <span className="text-xs font-medium text-zinc-300">Packaging {multiSelect.count} photos into ZIP…</span>
+                          </div>
+                        ) : (
+                          <MultiSelectToolbar
+                            items={activeItems}
+                            selectedIds={multiSelect.selectedIds}
+                            onToggle={multiSelect.toggle}
+                            onSelectAll={multiSelect.selectAll}
+                            onClearSelection={multiSelect.clearSelection}
+                            onBatchDownload={handleBatchDownload}
+                            isActive={true}
+                            onActivate={multiSelect.enterSelectMode}
+                            onDeactivate={multiSelect.exitSelectMode}
+                          />
+                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -1126,7 +1186,7 @@ export default function PublicSelfiePage() {
             onNavigate={handlePreviewNavigate}
             apiBaseUrl={API}
             token={token}
-            showConfidence={showConfidence && activeTab === 'my-photos'}
+            showConfidence={false}
             showScene={true}
             onDownload={downloadSinglePhoto}
             watermarkConfig={watermarkConfig}
