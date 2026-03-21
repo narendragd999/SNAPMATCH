@@ -424,26 +424,47 @@ export default function PublicSelfiePage() {
     try {
       const results = await Promise.allSettled(
         multiSelect.selectionOrder.map(async (imageName) => {
-          const res = await fetch(`${API}/public/events/${token}/photo/${imageName}`);
-          if (!res.ok) throw new Error();
-          const blob = await res.blob();
+          // Step 1: HEAD the /photo/ endpoint to get the redirect URL (MinIO presigned URL)
+          // fetch() with redirect:'follow' follows 307 automatically, but cross-origin
+          // MinIO CORS may block the response body. Instead resolve the redirect URL first,
+          // then fetch the resolved URL directly.
+          const probe = await fetch(`${API}/public/events/${token}/photo/${imageName}`, {
+            redirect: 'follow',
+          });
+          // If the backend served the image directly (local backend), use the blob
+          if (probe.ok && probe.url === `${API}/public/events/${token}/photo/${imageName}`) {
+            const blob = await probe.blob();
+            return { name: imageName, blob };
+          }
+          // For MinIO/R2: probe.url is now the resolved MinIO URL after redirect
+          // Fetch that URL directly (it has no CORS restriction since it's a presigned public URL)
+          const finalUrl = probe.url || `${API}/public/events/${token}/photo/${imageName}`;
+          const res2 = await fetch(finalUrl, { mode: 'cors' });
+          if (!res2.ok) throw new Error(`${res2.status}`);
+          const blob = await res2.blob();
           return { name: imageName, blob };
         })
       );
       const JSZip = (await import('jszip')).default;
       const zip = new JSZip();
+      let added = 0;
       for (const result of results) {
-        if (result.status === 'fulfilled') {
+        if (result.status === 'fulfilled' && result.value.blob.size > 0) {
           zip.file(result.value.name, result.value.blob);
+          added++;
         }
       }
+      if (added === 0) throw new Error('No photos could be fetched');
       const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
       const url = URL.createObjectURL(zipBlob);
       const a = Object.assign(document.createElement('a'), {
         href: url,
         download: `${event?.name || 'selected'}-photos.zip`,
       });
-      a.click(); URL.revokeObjectURL(url);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
       hapticFeedback('success');
       multiSelect.exitSelectMode();
     } catch { hapticFeedback('error'); }

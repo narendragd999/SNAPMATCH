@@ -309,32 +309,57 @@ jobs:
         [ -z "$PG_CONTAINER" ] && echo "ERROR: No postgres container" && exit 1
         echo "Postgres container: $PG_CONTAINER"
 
-        DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER    2>/dev/null || echo "postgres")
-        DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "admin123")
-        DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB       2>/dev/null || echo "event_ai")
+        DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER     2>/dev/null || echo "postgres")
+        DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD  2>/dev/null || echo "admin123")
+        DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB        2>/dev/null || echo "event_ai")
+
+        # Use the container name as the hostname (works inside Docker network)
+        # Falls back to 127.0.0.1 via host network if container name DNS fails
+        DB_HOST="$PG_CONTAINER"
         PG_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PG_CONTAINER" | head -1)
-        DB_URL="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
-        echo "DB_URL (no pass): postgres://${DB_USER}:***@${PG_IP}:5432/${DB_NAME}"
+        DB_URL="postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=disable"
+        DB_URL_IP="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
+        echo "DB_URL (no pass): postgres://${DB_USER}:***@${DB_HOST}:5432/${DB_NAME}"
+        echo "DB_URL_IP (no pass): postgres://${DB_USER}:***@${PG_IP}:5432/${DB_NAME}"
 
         COMPOSE_NETWORK=$(docker network ls --filter "label=com.docker.compose.project" --format "{{.Name}}" | head -1)
         echo "Compose network: $COMPOSE_NETWORK"
 
-        # Start pgweb container (--lock-connection skips login form)
-        docker run -d \
-          --name pgweb \
-          --network "${COMPOSE_NETWORK:-host}" \
-          -p 8081:8081 \
-          sosedoff/pgweb \
-          pgweb --bind=0.0.0.0 --listen=8081 \
-                --url="$DB_URL" \
-                --lock-connection \
-                --no-open
+        # Try starting pgweb with hostname first, fall back to IP if that fails
+        start_pgweb_container() {
+          local URL_TO_USE="$1" LABEL="$2"
+          echo "Starting pgweb with $LABEL..."
+          docker rm -f pgweb 2>/dev/null || true
+          docker run -d \
+            --name pgweb \
+            --network "${COMPOSE_NETWORK:-host}" \
+            -p 8081:8081 \
+            --restart unless-stopped \
+            sosedoff/pgweb \
+            pgweb --bind=0.0.0.0 --listen=8081 \
+                  --url="$URL_TO_USE" \
+                  --lock-connection \
+                  --no-open
+          # Wait for pgweb HTTP to be ready
+          for i in $(seq 1 20); do
+            sleep 2
+            if curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1; then
+              echo "pgweb ready with $LABEL"
+              return 0
+            fi
+          done
+          echo "pgweb failed with $LABEL"
+          docker logs pgweb --tail=10 2>/dev/null || true
+          return 1
+        }
 
-        # Wait for pgweb HTTP to be ready
-        for i in {1..20}; do
-          curl -sf http://localhost:8081 >/dev/null && echo "pgweb HTTP ready" && break
-          sleep 2
-        done
+        # Try hostname (works inside Docker network via DNS)
+        if ! start_pgweb_container "$DB_URL" "hostname ($DB_HOST)"; then
+          echo "Hostname failed, trying IP ($PG_IP)..."
+          if ! start_pgweb_container "$DB_URL_IP" "IP ($PG_IP)"; then
+            echo "Both connection methods failed — pgweb unavailable"
+          fi
+        fi
 
         # ── Start initial pgweb tunnel ──────────────────────────────────────
         start_pgweb_tunnel() {
@@ -393,6 +418,7 @@ jobs:
         (
           # Store DB_URL so watchdog can restart pgweb container if needed
           PGWEB_DB_URL="$DB_URL"
+          PGWEB_DB_URL_IP="$DB_URL_IP"
           PGWEB_NETWORK="$COMPOSE_NETWORK"
 
           while true; do
@@ -403,20 +429,32 @@ jobs:
               echo "[pgweb watchdog] pgweb HTTP down — restarting container at $(date)"
               docker rm -f pgweb 2>/dev/null || true
               sleep 2
-              docker run -d \
-                --name pgweb \
-                --network "${PGWEB_NETWORK:-host}" \
-                -p 8081:8081 \
-                sosedoff/pgweb \
-                pgweb --bind=0.0.0.0 --listen=8081 \
-                      --url="$PGWEB_DB_URL" \
-                      --lock-connection \
-                      --no-open
-              # Wait for pgweb to be ready
-              for i in $(seq 1 20); do
+              # Try hostname first, fall back to IP
+              RESTARTED=0
+              for TRY_URL in "$PGWEB_DB_URL" "$PGWEB_DB_URL_IP"; do
+                docker rm -f pgweb 2>/dev/null || true
                 sleep 1
-                curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1 && echo "[pgweb watchdog] pgweb container back up" && break
+                docker run -d \
+                  --name pgweb \
+                  --network "${PGWEB_NETWORK:-host}" \
+                  -p 8081:8081 \
+                  --restart unless-stopped \
+                  sosedoff/pgweb \
+                  pgweb --bind=0.0.0.0 --listen=8081 \
+                        --url="$TRY_URL" \
+                        --lock-connection \
+                        --no-open
+                for i in $(seq 1 15); do
+                  sleep 1
+                  if curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1; then
+                    echo "[pgweb watchdog] pgweb container back up (${TRY_URL%%@*}@...)"
+                    RESTARTED=1
+                    break
+                  fi
+                done
+                [ "$RESTARTED" -eq 1 ] && break
               done
+              [ "$RESTARTED" -eq 0 ] && echo "[pgweb watchdog] WARNING: could not restart pgweb container"
             fi
 
             # ── 2. Check if tunnel process is alive ──────────────────────────
