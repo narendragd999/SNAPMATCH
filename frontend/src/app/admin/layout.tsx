@@ -29,7 +29,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const router   = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(""); 
 
   useEffect(() => {
     const token = localStorage.getItem("token");
