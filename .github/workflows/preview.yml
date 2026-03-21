@@ -177,50 +177,50 @@ jobs:
     - name: Seed default users
       run: |
         docker exec event_backend python3 - << 'PYEOF'
-from app.core.security import hash_password
-from app.database.db import SessionLocal
-from app.models.user import User
-from datetime import datetime
+        from app.core.security import hash_password
+        from app.database.db import SessionLocal
+        from app.models.user import User
+        from datetime import datetime
 
-db = SessionLocal()
+        db = SessionLocal()
 
-users = [
-    {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
-    {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
-]
+        users = [
+            {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
+            {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
+        ]
 
-try:
-    for u in users:
-        existing = db.query(User).filter(User.email == u["email"]).first()
-        if existing:
-            # Always force-update role + password in case previous run got it wrong
-            existing.password_hash = hash_password(u["password"])
-            existing.role          = u["role"]
-            existing.plan_type     = u["plan_type"]
-            db.commit()
-            print(f"✅ Updated: {u['email']} (role={u['role']})")
-        else:
-            user = User(
-                email         = u["email"],
-                password_hash = hash_password(u["password"]),
-                role          = u["role"],
-                plan_type     = u["plan_type"],
-                free_event_used = False,
-                created_at    = datetime.utcnow(),
-            )
-            db.add(user)
-            db.commit()
-            print(f"✅ Created: {u['email']} (role={u['role']})")
-finally:
-    db.close()
+        try:
+            for u in users:
+                existing = db.query(User).filter(User.email == u["email"]).first()
+                if existing:
+                    # Always force-update role + password in case previous run got it wrong
+                    existing.password_hash = hash_password(u["password"])
+                    existing.role          = u["role"]
+                    existing.plan_type     = u["plan_type"]
+                    db.commit()
+                    print(f"✅ Updated: {u['email']} (role={u['role']})")
+                else:
+                    user = User(
+                        email         = u["email"],
+                        password_hash = hash_password(u["password"]),
+                        role          = u["role"],
+                        plan_type     = u["plan_type"],
+                        free_event_used = False,
+                        created_at    = datetime.utcnow(),
+                    )
+                    db.add(user)
+                    db.commit()
+                    print(f"✅ Created: {u['email']} (role={u['role']})")
+        finally:
+            db.close()
 
-print("")
-print("=================================")
-print(" Default accounts ready")
-print(" Admin → admin@admin.com / 123456  (role: admin)")
-print(" Test  → test@gmail.com  / 123456  (role: owner)")
-print("=================================")
-PYEOF
+        print("")
+        print("=================================")
+        print(" Default accounts ready")
+        print(" Admin → admin@admin.com / 123456  (role: admin)")
+        print(" Test  → test@gmail.com  / 123456  (role: owner)")
+        print("=================================")
+        PYEOF
 
     # 11 Install cloudflared
     - name: Install Cloudflare tunnel
