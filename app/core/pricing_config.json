@@ -1,0 +1,37 @@
+{
+  "_comment": "Single source of truth for all pricing config. Read by both pricing.py and pricing.ts. Never hardcode limits anywhere else.",
+
+  "free_tier": {
+    "photo_quota":   50,
+    "guest_quota":   10,
+    "validity_days": 7
+  },
+
+  "paid_tier": {
+    "min_photo_quota": 50,
+    "max_photo_quota": 10000,
+    "min_guest_quota": 0,
+    "max_guest_quota": 1000,
+    "base_event_fee_paise": 9900
+  },
+
+  "photo_tiers": [
+    { "bucket": 500,  "rate_paise": 20 },
+    { "bucket": 500,  "rate_paise": 15 },
+    { "bucket": 2000, "rate_paise": 10 },
+    { "bucket": null, "rate_paise": 7  }
+  ],
+
+  "guest_tiers": [
+    { "bucket": 50,   "rate_paise": 10 },
+    { "bucket": 150,  "rate_paise": 8  },
+    { "bucket": 300,  "rate_paise": 6  },
+    { "bucket": null, "rate_paise": 4  }
+  ],
+
+  "validity_options": [
+    { "days": 30,  "addon_paise": 0,     "included": true  },
+    { "days": 90,  "addon_paise": 4900,  "included": false },
+    { "days": 365, "addon_paise": 14900, "included": false }
+  ]
+}

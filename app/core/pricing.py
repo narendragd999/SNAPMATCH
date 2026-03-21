@@ -4,53 +4,32 @@ app/core/pricing.py
 Pay-per-event pricing engine.
 All monetary values are in PAISE (INR × 100) internally.
 
-Two event types only:
-  - Free:          quota/validity admin-configurable via PlatformSetting DB table
+Single source of truth: app/core/pricing_config.json
+  - Python reads it at import time (this file)
+  - TypeScript reads it at build time (pricing.ts)
+  - Never hardcode limits in either file — edit pricing_config.json only.
+
+Two event types:
+  - Free:          limits from pricing_config.json free_tier (DB overrides via PlatformSetting)
   - Pay-per-event: quota/validity chosen by owner at purchase, stored on event.*
-
-To change free tier limits without a deploy → update via admin panel.
-Hardcoded values in FREE_TIER_DEFAULTS are only used as DB fallbacks on first run.
-
-─── Infra cost model (verified against real pipeline) ───────────────────────
-Image pipeline output : 1200px JPEG Q85 = ~1.5 MB/photo
-Storage per 1000 photos: 1.5 GB
-Dominant cost          : VPS share ₹83/event (85% of total infra)
-
-Component                         Per 1000 photos    Notes
-──────────────────────────────────────────────────────────────────────────────
-Cloudflare R2 storage             ₹1.85              1.5GB × $0.015/GB-mo × ₹84
-R2 ops (upload + reads)           ₹0.04              negligible
-RunPod RTX 4090 (0.5s/photo)      ₹12.25             500s ÷ 3600 × $1.04 × ₹84
-VPS Hostinger KVM8 (÷30 events)   ₹83.30             ₹2499/mo ÷ 30
-──────────────────────────────────────────────────────────────────────────────
-TOTAL INFRA per 1000-photo event  ₹98.08
-Razorpay effective fee            2.36%              2% + 18% GST on fee
-Target margin                     ≥ 40% (from 200 photos upward)
-
-Verified profit at key event sizes (after Razorpay 2.36%):
-   50 photos → charge ₹109  → infra ₹84  → profit ₹22   (20% — edge case)
-  200 photos → charge ₹139  → infra ₹86  → profit ₹50   (36% margin)
-  500 photos → charge ₹199  → infra ₹90  → profit ₹104  (52% margin)
- 1000 photos → charge ₹274  → infra ₹98  → profit ₹170  (62% margin)
- 2000 photos → charge ₹374  → infra ₹112 → profit ₹254  (68% margin)
- 5000 photos → charge ₹614  → infra ₹153 → profit ₹446  (73% margin)
-10000 photos → charge ₹964  → infra ₹223 → profit ₹718  (74% margin)
-
-Note: 50–100 photo events have thin margin due to ₹83 fixed VPS cost.
-These are edge cases — typical photographer events are 500–5000 photos.
-
-MIRROR: Keep in sync with frontend/src/lib/pricing.ts at all times.
 """
 
 from __future__ import annotations
+import os
+import json
 from typing import TypedDict
 
+# ── Load config from single source of truth ───────────────────────────────────
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pricing_config.json")
 
-# ── Free tier defaults (used when DB rows not yet set) ───────────────────────
+with open(_CONFIG_PATH) as _f:
+    _CFG = json.load(_f)
+
+# ── Free tier ─────────────────────────────────────────────────────────────────
 FREE_TIER_DEFAULTS: dict[str, int] = {
-    "free_photo_quota":   5000,
-    "free_guest_quota":   200,
-    "free_validity_days": 7,
+    "free_photo_quota":   _CFG["free_tier"]["photo_quota"],
+    "free_guest_quota":   _CFG["free_tier"]["guest_quota"],
+    "free_validity_days": _CFG["free_tier"]["validity_days"],
 }
 
 FREE_TIER_CONFIG: dict = {
@@ -61,11 +40,35 @@ FREE_TIER_CONFIG: dict = {
     "amount_paise":  0,
 }
 
+# ── Paid tier limits ──────────────────────────────────────────────────────────
+MIN_PHOTO_QUOTA = _CFG["paid_tier"]["min_photo_quota"]
+MAX_PHOTO_QUOTA = _CFG["paid_tier"]["max_photo_quota"]
+MIN_GUEST_QUOTA = _CFG["paid_tier"]["min_guest_quota"]
+MAX_GUEST_QUOTA = _CFG["paid_tier"]["max_guest_quota"]
 
+# ── Pricing constants ─────────────────────────────────────────────────────────
+BASE_EVENT_FEE_PAISE = _CFG["paid_tier"]["base_event_fee_paise"]
+
+PHOTO_TIERS: list[tuple[int | None, int]] = [
+    (t["bucket"], t["rate_paise"]) for t in _CFG["photo_tiers"]
+]
+
+GUEST_TIERS: list[tuple[int | None, int]] = [
+    (t["bucket"], t["rate_paise"]) for t in _CFG["guest_tiers"]
+]
+
+VALIDITY_ADDON_PAISE: dict[int, int] = {
+    v["days"]: v["addon_paise"] for v in _CFG["validity_options"]
+}
+
+VALID_VALIDITY_DAYS = tuple(VALIDITY_ADDON_PAISE.keys())
+
+
+# ── Live free tier (reads DB overrides) ───────────────────────────────────────
 def get_free_tier_config(db) -> dict:
     """
     Live free tier config — reads from PlatformSetting table.
-    Falls back to FREE_TIER_DEFAULTS if a key hasn't been set yet.
+    Falls back to pricing_config.json values if a key hasn't been set yet.
     """
     from app.models.platform_settings import PlatformSetting
 
@@ -80,43 +83,6 @@ def get_free_tier_config(db) -> dict:
         "is_free_tier":  True,
         "amount_paise":  0,
     }
-
-
-# ── Paid event limits ─────────────────────────────────────────────────────────
-MIN_PHOTO_QUOTA = 50
-MAX_PHOTO_QUOTA = 10_000
-MIN_GUEST_QUOTA = 0
-MAX_GUEST_QUOTA = 1_000
-
-# ── Pricing constants ─────────────────────────────────────────────────────────
-#
-# Base fee ₹99 covers the fixed VPS overhead (₹83/event).
-# Per-photo rates are low and competitive vs Kwikpic (~₹85/event subscription).
-# All rates verified profitable from 200 photos upward.
-#
-BASE_EVENT_FEE_PAISE = 9_900   # ₹99
-
-PHOTO_TIERS: list[tuple[int | None, int]] = [
-    (500,  20),    # ₹0.20/photo — first 500      → max ₹100
-    (500,  15),    # ₹0.15/photo — 501–1000        → max ₹75
-    (2000, 10),    # ₹0.10/photo — 1001–3000       → max ₹200
-    (None,  7),    # ₹0.07/photo — 3001+
-]
-
-GUEST_TIERS: list[tuple[int | None, int]] = [
-    (50,   10),    # ₹0.10/guest — first 50
-    (150,   8),    # ₹0.08/guest — 51–200
-    (300,   6),    # ₹0.06/guest — 201–500
-    (None,  4),    # ₹0.04/guest — 501+
-]
-
-VALIDITY_ADDON_PAISE: dict[int, int] = {
-    30:  0,        # included free
-    90:  4_900,    # ₹49
-    365: 14_900,   # ₹149
-}
-
-VALID_VALIDITY_DAYS = (30, 90, 365)
 
 
 # ── TypedDicts ────────────────────────────────────────────────────────────────
