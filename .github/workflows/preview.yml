@@ -176,54 +176,54 @@ jobs:
     # hash_password() so the hash is 100% identical to what login expects.
       run: |
         docker exec event_backend python3 - << 'PYEOF'
-from app.core.security import hash_password
-from app.database.db import SessionLocal
-from app.models.user import User
-from datetime import datetime
+        from app.core.security import hash_password
+        from app.database.db import SessionLocal
+        from app.models.user import User
+        from datetime import datetime
 
-db = SessionLocal()
-users = [
-    {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
-    {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
-]
-try:
-    for u in users:
-        existing = db.query(User).filter(User.email == u["email"]).first()
-        if existing:
-            existing.password_hash = hash_password(u["password"])
-            existing.role          = u["role"]
-            existing.plan_type     = u["plan_type"]
-            db.commit()
-            print("Updated:", u["email"], "role=" + u["role"])
-        else:
-            user = User(
-                email           = u["email"],
-                password_hash   = hash_password(u["password"]),
-                role            = u["role"],
-                plan_type       = u["plan_type"],
-                free_event_used = False,
-                created_at      = datetime.utcnow(),
-            )
-            db.add(user)
-            db.commit()
-            print("Created:", u["email"], "role=" + u["role"])
-finally:
-    db.close()
-print("=================================")
-print(" Admin  admin@admin.com / 123456  role=admin")
-print(" Owner  test@gmail.com  / 123456  role=owner")
-print("=================================")
-PYEOF
-        # Verify roles
-        docker exec event_backend python3 -c "
-from app.database.db import SessionLocal
-from app.models.user import User
-db = SessionLocal()
-for e in ['admin@admin.com','test@gmail.com']:
-    u = db.query(User).filter(User.email == e).first()
-    print(e, '->', 'role=' + u.role if u else 'NOT FOUND')
-db.close()
-"
+        db = SessionLocal()
+        users = [
+            {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
+            {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
+        ]
+        try:
+            for u in users:
+                existing = db.query(User).filter(User.email == u["email"]).first()
+                if existing:
+                    existing.password_hash = hash_password(u["password"])
+                    existing.role          = u["role"]
+                    existing.plan_type     = u["plan_type"]
+                    db.commit()
+                    print("Updated:", u["email"], "role=" + u["role"])
+                else:
+                    user = User(
+                        email           = u["email"],
+                        password_hash   = hash_password(u["password"]),
+                        role            = u["role"],
+                        plan_type       = u["plan_type"],
+                        free_event_used = False,
+                        created_at      = datetime.utcnow(),
+                    )
+                    db.add(user)
+                    db.commit()
+                    print("Created:", u["email"], "role=" + u["role"])
+        finally:
+            db.close()
+        print("=================================")
+        print(" Admin  admin@admin.com / 123456  role=admin")
+        print(" Owner  test@gmail.com  / 123456  role=owner")
+        print("=================================")
+        PYEOF
+                # Verify roles
+                docker exec event_backend python3 -c "
+        from app.database.db import SessionLocal
+        from app.models.user import User
+        db = SessionLocal()
+        for e in ['admin@admin.com','test@gmail.com']:
+            u = db.query(User).filter(User.email == e).first()
+            print(e, '->', 'role=' + u.role if u else 'NOT FOUND')
+        db.close()
+        "
 
     # 11 Install cloudflared
     - name: Install Cloudflare tunnel
