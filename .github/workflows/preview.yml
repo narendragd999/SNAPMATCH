@@ -170,7 +170,39 @@ jobs:
         fi
         echo "All services ready"
 
-    # 10 Install cloudflared
+    # 10 Seed default users
+    # Creates admin + test accounts so the preview is immediately usable.
+    # Uses the backend /auth/register endpoint.
+    - name: Seed default users
+      run: |
+        BASE="http://localhost:8000"
+
+        create_user() {
+          local NAME="$1" EMAIL="$2" PASS="$3" ROLE="$4"
+          RESP=$(curl -sf -X POST "$BASE/auth/register" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"$NAME\",\"email\":\"$EMAIL\",\"password\":\"$PASS\",\"role\":\"$ROLE\"}" \
+            2>/dev/null || true)
+          if echo "$RESP" | grep -q '"id"'; then
+            echo "✅ Created $ROLE user: $EMAIL"
+          elif echo "$RESP" | grep -qi "already\|exist\|duplicate"; then
+            echo "ℹ️  Already exists: $EMAIL (skipping)"
+          else
+            echo "⚠️  Could not create $EMAIL — Response: $RESP"
+          fi
+        }
+
+        create_user "Admin"     "admin@admin.com" "123456" "admin"
+        create_user "Test User" "test@gmail.com"  "123456" "user"
+
+        echo ""
+        echo "================================="
+        echo " Default accounts ready"
+        echo " Admin → admin@admin.com / 123456"
+        echo " Test  → test@gmail.com  / 123456"
+        echo "================================="
+
+    # 11 Install cloudflared
     - name: Install Cloudflare tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -381,9 +413,13 @@ jobs:
         echo " MinIO tunnel: $MINIO_TUNNEL_URL"
         echo " Redis tunnel: $REDIS_TUNNEL_URL"
         echo " DB tunnel:    $DB_TUNNEL_URL"
+        echo "---------------------------------"
+        echo " 🔑 Test Accounts"
+        echo " Admin → admin@admin.com / 123456"
+        echo " User  → test@gmail.com  / 123456"
         echo "================================="
 
-        # ── Start tailing all Celery workers into one log file ────────────────
+        # ── Start tailing all services into one log file ──────────────────────
         CELERY_LOG=/tmp/celery_all.log
         > "$CELERY_LOG"   # truncate/create
 
@@ -393,13 +429,18 @@ jobs:
             | sed -u "s/^/[$LABEL] /" >> "$CELERY_LOG" &
         }
 
+        # Celery workers
         tail_worker event_celery_photo    "PHOTO   "
         tail_worker event_celery_finalize "FINALIZE"
         tail_worker event_celery_ai       "AI      "
         tail_worker event_celery_default  "DEFAULT "
         tail_worker event_celery_beat     "BEAT    "
+        # Backend + Frontend
+        tail_worker event_backend         "BACKEND "
+        tail_worker event_frontend        "FRONTEND"
 
-        echo "Celery log streaming started → $CELERY_LOG"
+        echo "Log streaming started → $CELERY_LOG"
+        echo "  Workers: photo | finalize | ai | default | beat | backend | frontend"
         LOG_OFFSET=0   # track how many lines we've already printed
 
         # ── Keep-alive loop ───────────────────────────────────────────────────
@@ -416,28 +457,28 @@ jobs:
           curl -sf http://localhost/api/docs >/dev/null \
             || echo "  ⚠ WARNING: backend health check failed"
 
-          # ── Dump new Celery log lines since last iteration ─────────────────
+          # ── Dump new log lines since last iteration ────────────────────────
           if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
             TOTAL_LINES=$(wc -l < "$CELERY_LOG")
             NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
             if [ "$NEW_LINES" -gt 0 ]; then
-              echo "--- Celery logs (last ${NEW_LINES} lines) ---"
+              echo "--- Service logs (last ${NEW_LINES} lines) ---"
               tail -n "$NEW_LINES" "$CELERY_LOG"
               echo "--- end ---"
             else
-              echo "--- Celery logs: no new output ---"
+              echo "--- Service logs: no new output ---"
             fi
             LOG_OFFSET=$TOTAL_LINES
           fi
 
-          # ── Worker health summary every 5 min ──────────────────────────────
+          # ── Container health summary every 5 min ───────────────────────────
           if (( i % 300 == 0 )); then
-            echo "--- Celery worker container status ---"
-            for C in event_celery_photo event_celery_finalize event_celery_ai event_celery_default event_celery_beat; do
+            echo "--- Container status ---"
+            for C in event_backend event_frontend event_celery_photo event_celery_finalize event_celery_ai event_celery_default event_celery_beat; do
               STATUS=$(docker inspect --format='{{.State.Status}}' "$C" 2>/dev/null || echo "not found")
               echo "  $C → $STATUS"
             done
-            echo "--------------------------------------"
+            echo "------------------------"
           fi
         done
 
