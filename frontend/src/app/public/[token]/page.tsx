@@ -55,6 +55,7 @@ interface TabState {
 interface EventData {
   name:                 string;
   image_count?:         number;
+  processed_count?:     number;
   watermark_enabled?:   boolean;
   watermark_config?:    WatermarkConfig;
   pin_enabled?:         boolean;
@@ -311,11 +312,20 @@ export default function PublicSelfiePage() {
   // ── Switch to All Photos tab — load first page if empty ──
   const handleTabSwitch = useCallback((tab: ActiveTab) => {
     setActiveTab(tab);
-    if (tab === 'all-photos' && allTab.items.length === 0 && !allTab.loading) {
-      loadAllPhotos(1, allSceneFilter, true);
+    if (tab === 'all-photos') {
+      // Refresh scene pills every time the user opens All Photos tab.
+      // AI enrichment runs after processing — scenes may have populated
+      // after the page first loaded, so always re-fetch to stay current.
+      fetch(`${API}/public/events/${token}/scenes`)
+        .then(r => r.json())
+        .then(d => setAllScenes(d.scenes ?? []))
+        .catch(() => {});
+      if (allTab.items.length === 0 && !allTab.loading) {
+        loadAllPhotos(1, allSceneFilter, true);
+      }
     }
     multiSelect.exitSelectMode();
-  }, [allTab, allSceneFilter, loadAllPhotos, multiSelect]);
+  }, [allTab, allSceneFilter, loadAllPhotos, multiSelect, token, API]);
 
   // ── All Photos scene filter change ──
   const handleAllSceneFilter = useCallback((scene: string) => {
@@ -727,7 +737,7 @@ export default function PublicSelfiePage() {
                   <motion.div variants={fadeUp} className="mt-8">
                     <button onClick={() => handleTabSwitch('all-photos')}
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-zinc-200 text-sm font-medium transition-colors">
-                      <Images size={15} /> Browse all {event?.image_count ? `${event.image_count} ` : ''}event photos
+                      <Images size={15} /> Browse all {(event?.processed_count ?? event?.image_count) ? `${event?.processed_count ?? event?.image_count} ` : ''}event photos
                     </button>
                   </motion.div>
 

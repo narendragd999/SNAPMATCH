@@ -147,6 +147,16 @@ def validate_public_event(public_token: str, db: Session) -> Event:
 
 # ── Get Event Info (for public page) ─────────────────────────────────────────
 
+# ── get_public_event — replace existing function in public_routes.py ──────────
+#
+# Added: processed_count — the exact number of photos that will appear in
+# the All Photos gallery (status=processed, approved, has optimized_filename).
+# The frontend uses this for the "Browse all X event photos" button label
+# so it always matches what the gallery actually loads.
+#
+# event.image_count counts every upload attempt including ones that fail
+# the pipeline — it can be higher than what actually renders.
+
 @router.get("/events/{public_token}")
 def get_public_event(
     public_token: str,
@@ -154,25 +164,32 @@ def get_public_event(
 ):
     """Get public event info including watermark config."""
     event = validate_public_event(public_token, db)
-    
-    return {
-        "name": event.name,
-        "description": event.description,
-        "image_count": event.image_count,
-        "cover_image_url": storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
-        "guest_upload_enabled": event.guest_upload_enabled,
-        "processing_status": event.processing_status,
-        # 🎨 Watermark configuration
-        "watermark_enabled": event.watermark_enabled,
-        "watermark_config": event.get_watermark_config() if event.watermark_enabled else None,
-        # 🔒 PIN protection — only expose the flag, never the hash
-        "pin_enabled": event.pin_enabled,
-        "pin_version":  event.pin_version,   # ← add this
-        "expires_at": event.expires_at.isoformat() if event.expires_at else None,  # ← ADD
-        "owner_id":     event.owner_id,   # ← add this
-        "upload_photo_enabled": _get_setting(db, "upload_photo_enabled") == "true",  # ← ADD
-    }
 
+    # Count of photos that will actually render in the All Photos gallery.
+    # This is what the "Browse all X photos" button should show.
+    processed_count = db.query(Photo).filter(
+        Photo.event_id == event.id,
+        Photo.status == "processed",
+        Photo.approval_status == "approved",
+        Photo.optimized_filename.isnot(None),
+    ).count()
+
+    return {
+        "name":                  event.name,
+        "description":           event.description,
+        "image_count":           event.image_count,    # raw upload count
+        "processed_count":       processed_count,       # ← what actually shows in gallery
+        "cover_image_url":       storage_service.get_cover_url(event.cover_image) if event.cover_image else None,
+        "guest_upload_enabled":  event.guest_upload_enabled,
+        "processing_status":     event.processing_status,
+        "watermark_enabled":     event.watermark_enabled,
+        "watermark_config":      event.get_watermark_config() if event.watermark_enabled else None,
+        "pin_enabled":           event.pin_enabled,
+        "pin_version":           event.pin_version,
+        "expires_at":            event.expires_at.isoformat() if event.expires_at else None,
+        "owner_id":              event.owner_id,
+        "upload_photo_enabled":  _get_setting(db, "upload_photo_enabled") == "true",
+    }
 
 
 # ── PIN Verification ──────────────────────────────────────────────────────────
@@ -716,16 +733,14 @@ def _get_setting(db: Session, key: str, default: str = "false") -> str:
     return row.value if row else default
 
 # ── Browse All Event Photos (paginated) ──────────────────────────────────────
-# ADD THIS BLOCK anywhere in public_routes.py, before the _get_setting helper.
+# ADD to app/api/public_routes.py, before the _get_setting helper at the bottom.
 #
-# Endpoint: GET /public/events/{public_token}/photos
-# Query params:
-#   page      int  default 1
-#   page_size int  default 30, max 60
-#   scene     str  optional — filter by scene_label
+# Shows ALL processed photos — status="processed" with an optimized_filename.
+# This includes photos with no faces (documents, landscapes) — intentional,
+# the owner decides what to upload.
 #
-# Returns paginated list of processed, approved photos with scene/object meta.
-# Used by the "All Photos" tab on the public selfie page.
+# The previous version filtered faces_detected > 0 which caused only 39 of 50
+# photos to show. Removed that filter so all processed photos appear.
 
 @router.get("/events/{public_token}/photos")
 def browse_event_photos(
@@ -737,7 +752,7 @@ def browse_event_photos(
 ):
     """
     Paginated gallery of all processed photos for an event.
-    No auth required — intended for the public guest selfie page.
+    No auth required — used by the public All Photos tab.
     """
     event = validate_public_event(public_token, db)
 
@@ -770,7 +785,7 @@ def browse_event_photos(
     items = []
     for fn, scene_label, objects_json in rows:
         try:
-            parsed = _json.loads(objects_json) if objects_json else []
+            parsed  = _json.loads(objects_json) if objects_json else []
             objects = [o["label"] for o in parsed if isinstance(o, dict) and "label" in o]
         except (TypeError, ValueError):
             objects = []
