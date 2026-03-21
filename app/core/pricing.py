@@ -4,88 +4,146 @@ app/core/pricing.py
 Pay-per-event pricing engine.
 All monetary values are in PAISE (INR × 100) internally.
 
-Single source of truth: app/core/pricing_config.json
-  - Python reads it at import time (this file)
-  - TypeScript reads it at build time (pricing.ts)
-  - Never hardcode limits in either file — edit pricing_config.json only.
+Single source of truth: pricing_config DB table (app/models/pricing_config.py)
+  - Admin updates the DB via PUT /api/pricing/config
+  - Backend reads DB via get_pricing_config(db)
+  - Frontend fetches via GET /api/pricing/config — no JSON files, no imports
+  - No pricing_config.json file needed anymore
 
 Two event types:
-  - Free:          limits from pricing_config.json free_tier (DB overrides via PlatformSetting)
+  - Free:          limits from pricing_config table
   - Pay-per-event: quota/validity chosen by owner at purchase, stored on event.*
 """
 
 from __future__ import annotations
-import os
-import json
 from typing import TypedDict
 
-# ── Load config from single source of truth ───────────────────────────────────
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pricing_config.json")
 
-with open(_CONFIG_PATH) as _f:
-    _CFG = json.load(_f)
-
-# ── Free tier ─────────────────────────────────────────────────────────────────
-FREE_TIER_DEFAULTS: dict[str, int] = {
-    "free_photo_quota":   _CFG["free_tier"]["photo_quota"],
-    "free_guest_quota":   _CFG["free_tier"]["guest_quota"],
-    "free_validity_days": _CFG["free_tier"]["validity_days"],
+# ── Hardcoded fallbacks (used ONLY if DB table is empty on first boot) ────────
+_DEFAULTS = {
+    "free_photo_quota":      50,
+    "free_guest_quota":      10,
+    "free_validity_days":    7,
+    "min_photo_quota":       50,
+    "max_photo_quota":       10000,
+    "min_guest_quota":       0,
+    "max_guest_quota":       1000,
+    "base_event_fee_paise":  9900,
+    "photo_tiers": [
+        {"bucket": 500,  "rate_paise": 20},
+        {"bucket": 500,  "rate_paise": 15},
+        {"bucket": 2000, "rate_paise": 10},
+        {"bucket": None, "rate_paise": 7},
+    ],
+    "guest_tiers": [
+        {"bucket": 50,   "rate_paise": 10},
+        {"bucket": 150,  "rate_paise": 8},
+        {"bucket": 300,  "rate_paise": 6},
+        {"bucket": None, "rate_paise": 4},
+    ],
+    "validity_options": [
+        {"days": 30,  "addon_paise": 0,     "included": True},
+        {"days": 90,  "addon_paise": 4900,  "included": False},
+        {"days": 365, "addon_paise": 14900, "included": False},
+    ],
 }
 
-FREE_TIER_CONFIG: dict = {
-    "photo_quota":   FREE_TIER_DEFAULTS["free_photo_quota"],
-    "guest_quota":   FREE_TIER_DEFAULTS["free_guest_quota"],
-    "validity_days": FREE_TIER_DEFAULTS["free_validity_days"],
-    "is_free_tier":  True,
-    "amount_paise":  0,
-}
 
-# ── Paid tier limits ──────────────────────────────────────────────────────────
-MIN_PHOTO_QUOTA = _CFG["paid_tier"]["min_photo_quota"]
-MAX_PHOTO_QUOTA = _CFG["paid_tier"]["max_photo_quota"]
-MIN_GUEST_QUOTA = _CFG["paid_tier"]["min_guest_quota"]
-MAX_GUEST_QUOTA = _CFG["paid_tier"]["max_guest_quota"]
+def _get_active(db):
+    """Return active PricingConfig row, auto-seeding defaults if table is empty."""
+    from app.models.pricing_config import PricingConfig
 
-# ── Pricing constants ─────────────────────────────────────────────────────────
-BASE_EVENT_FEE_PAISE = _CFG["paid_tier"]["base_event_fee_paise"]
+    row = (
+        db.query(PricingConfig)
+        .filter(PricingConfig.is_active == True)
+        .order_by(PricingConfig.id.desc())
+        .first()
+    )
 
-PHOTO_TIERS: list[tuple[int | None, int]] = [
-    (t["bucket"], t["rate_paise"]) for t in _CFG["photo_tiers"]
-]
+    if not row:
+        row = PricingConfig(**{k: v for k, v in _DEFAULTS.items()})
+        db.add(row)
+        db.commit()
+        db.refresh(row)
 
-GUEST_TIERS: list[tuple[int | None, int]] = [
-    (t["bucket"], t["rate_paise"]) for t in _CFG["guest_tiers"]
-]
-
-VALIDITY_ADDON_PAISE: dict[int, int] = {
-    v["days"]: v["addon_paise"] for v in _CFG["validity_options"]
-}
-
-VALID_VALIDITY_DAYS = tuple(VALIDITY_ADDON_PAISE.keys())
+    return row
 
 
-# ── Live free tier (reads DB overrides) ───────────────────────────────────────
+# ── Public helpers ────────────────────────────────────────────────────────────
+
 def get_free_tier_config(db) -> dict:
-    """
-    Live free tier config — reads from PlatformSetting table.
-    Falls back to pricing_config.json values if a key hasn't been set yet.
-    """
-    from app.models.platform_settings import PlatformSetting
-
-    def _get(key: str) -> int:
-        row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
-        return int(row.value) if row else FREE_TIER_DEFAULTS[key]
-
+    """Used by event creation to set free tier quotas."""
+    row = _get_active(db)
     return {
-        "photo_quota":   _get("free_photo_quota"),
-        "guest_quota":   _get("free_guest_quota"),
-        "validity_days": _get("free_validity_days"),
+        "photo_quota":   row.free_photo_quota,
+        "guest_quota":   row.free_guest_quota,
+        "validity_days": row.free_validity_days,
         "is_free_tier":  True,
         "amount_paise":  0,
     }
 
 
+def get_full_config(db) -> dict:
+    """Full config dict — served by GET /api/pricing/config to frontend."""
+    row = _get_active(db)
+    return {
+        "id": row.id,
+        "free_tier": {
+            "photo_quota":   row.free_photo_quota,
+            "guest_quota":   row.free_guest_quota,
+            "validity_days": row.free_validity_days,
+        },
+        "paid_tier": {
+            "min_photo_quota":      row.min_photo_quota,
+            "max_photo_quota":      row.max_photo_quota,
+            "min_guest_quota":      row.min_guest_quota,
+            "max_guest_quota":      row.max_guest_quota,
+            "base_event_fee_paise": row.base_event_fee_paise,
+        },
+        "photo_tiers":      row.photo_tiers,
+        "guest_tiers":      row.guest_tiers,
+        "validity_options": row.validity_options,
+        "updated_at":       row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+# ── Backward-compat constants (for existing code that imports these) ──────────
+# These use hardcoded defaults — for live values always use get_free_tier_config(db)
+
+FREE_TIER_DEFAULTS = {
+    "free_photo_quota":   _DEFAULTS["free_photo_quota"],
+    "free_guest_quota":   _DEFAULTS["free_guest_quota"],
+    "free_validity_days": _DEFAULTS["free_validity_days"],
+}
+
+FREE_TIER_CONFIG = {
+    "photo_quota":   _DEFAULTS["free_photo_quota"],
+    "guest_quota":   _DEFAULTS["free_guest_quota"],
+    "validity_days": _DEFAULTS["free_validity_days"],
+    "is_free_tier":  True,
+    "amount_paise":  0,
+}
+
+MIN_PHOTO_QUOTA      = _DEFAULTS["min_photo_quota"]
+MAX_PHOTO_QUOTA      = _DEFAULTS["max_photo_quota"]
+MIN_GUEST_QUOTA      = _DEFAULTS["min_guest_quota"]
+MAX_GUEST_QUOTA      = _DEFAULTS["max_guest_quota"]
+BASE_EVENT_FEE_PAISE = _DEFAULTS["base_event_fee_paise"]
+
+PHOTO_TIERS: list[tuple[int | None, int]] = [
+    (t["bucket"], t["rate_paise"]) for t in _DEFAULTS["photo_tiers"]
+]
+GUEST_TIERS: list[tuple[int | None, int]] = [
+    (t["bucket"], t["rate_paise"]) for t in _DEFAULTS["guest_tiers"]
+]
+VALIDITY_ADDON_PAISE: dict[int, int] = {
+    v["days"]: v["addon_paise"] for v in _DEFAULTS["validity_options"]
+}
+VALID_VALIDITY_DAYS = tuple(VALIDITY_ADDON_PAISE.keys())
+
+
 # ── TypedDicts ────────────────────────────────────────────────────────────────
+
 class PhotoBreakdown(TypedDict):
     tier_label: str
     units:      int
@@ -108,16 +166,19 @@ class PriceBreakdown(TypedDict):
 
 
 # ── Core calculation ──────────────────────────────────────────────────────────
-def _tiered_cost(quantity: int, tiers: list[tuple[int | None, int]]) -> tuple[int, list[PhotoBreakdown]]:
+
+def _tiered_cost(quantity: int, tiers: list[dict]) -> tuple[int, list[PhotoBreakdown]]:
     remaining   = quantity
     total_paise = 0
     breakdown   = []
     used_so_far = 0
-    for bucket_size, rate in tiers:
+    for t in tiers:
         if remaining <= 0:
             break
-        units        = remaining if bucket_size is None else min(remaining, bucket_size)
-        subtotal     = units * rate
+        bucket   = t["bucket"]
+        rate     = t["rate_paise"]
+        units    = remaining if bucket is None else min(remaining, bucket)
+        subtotal = units * rate
         total_paise += subtotal
         breakdown.append(PhotoBreakdown(
             tier_label=f"{used_so_far + 1}–{used_so_far + units}",
@@ -128,26 +189,52 @@ def _tiered_cost(quantity: int, tiers: list[tuple[int | None, int]]) -> tuple[in
     return total_paise, breakdown
 
 
-def calculate_price(photo_quota: int, guest_quota: int = 0, validity_days: int = 30) -> PriceBreakdown:
-    if not (MIN_PHOTO_QUOTA <= photo_quota <= MAX_PHOTO_QUOTA):
-        raise ValueError(f"photo_quota must be {MIN_PHOTO_QUOTA}–{MAX_PHOTO_QUOTA}")
-    if not (MIN_GUEST_QUOTA <= guest_quota <= MAX_GUEST_QUOTA):
-        raise ValueError(f"guest_quota must be {MIN_GUEST_QUOTA}–{MAX_GUEST_QUOTA}")
-    if validity_days not in VALIDITY_ADDON_PAISE:
-        raise ValueError(f"validity_days must be one of {list(VALIDITY_ADDON_PAISE.keys())}")
+def calculate_price(
+    photo_quota:   int,
+    guest_quota:   int = 0,
+    validity_days: int = 30,
+    db=None,
+) -> PriceBreakdown:
+    """
+    Calculate event price.
+    Pass db to use live DB config, omit to use hardcoded defaults.
+    """
+    if db:
+        row              = _get_active(db)
+        photo_tiers_data = row.photo_tiers
+        guest_tiers_data = row.guest_tiers
+        validity_opts    = {v["days"]: v["addon_paise"] for v in row.validity_options}
+        base_fee         = row.base_event_fee_paise
+        min_p, max_p     = row.min_photo_quota, row.max_photo_quota
+        min_g, max_g     = row.min_guest_quota,  row.max_guest_quota
+    else:
+        photo_tiers_data = _DEFAULTS["photo_tiers"]
+        guest_tiers_data = _DEFAULTS["guest_tiers"]
+        validity_opts    = VALIDITY_ADDON_PAISE
+        base_fee         = BASE_EVENT_FEE_PAISE
+        min_p, max_p     = MIN_PHOTO_QUOTA, MAX_PHOTO_QUOTA
+        min_g, max_g     = MIN_GUEST_QUOTA, MAX_GUEST_QUOTA
 
-    photo_total, photo_tiers = _tiered_cost(photo_quota, PHOTO_TIERS)
-    guest_total, guest_tiers = _tiered_cost(guest_quota, GUEST_TIERS)
-    validity_addon            = VALIDITY_ADDON_PAISE[validity_days]
-    total_paise               = BASE_EVENT_FEE_PAISE + photo_total + guest_total + validity_addon
+    if not (min_p <= photo_quota <= max_p):
+        raise ValueError(f"photo_quota must be {min_p}–{max_p}")
+    if not (min_g <= guest_quota <= max_g):
+        raise ValueError(f"guest_quota must be {min_g}–{max_g}")
+    if validity_days not in validity_opts:
+        raise ValueError(f"validity_days must be one of {list(validity_opts.keys())}")
+
+    photo_total, photo_tiers = _tiered_cost(photo_quota, photo_tiers_data)
+    guest_total, guest_tiers = _tiered_cost(guest_quota, guest_tiers_data)
+    validity_addon           = validity_opts[validity_days]
+    total_paise              = base_fee + photo_total + guest_total + validity_addon
 
     return PriceBreakdown(
-        base_fee_paise=BASE_EVENT_FEE_PAISE,
-        photo_tiers=photo_tiers, photo_total_paise=photo_total,
-        guest_tiers=guest_tiers, guest_total_paise=guest_total,
+        base_fee_paise=base_fee,
+        photo_tiers=photo_tiers,   photo_total_paise=photo_total,
+        guest_tiers=guest_tiers,   guest_total_paise=guest_total,
         validity_addon_paise=validity_addon,
-        total_paise=total_paise, total_inr=round(total_paise / 100, 2),
-        photo_quota=photo_quota, guest_quota=guest_quota, validity_days=validity_days,
+        total_paise=total_paise,   total_inr=round(total_paise / 100, 2),
+        photo_quota=photo_quota,   guest_quota=guest_quota,
+        validity_days=validity_days,
     )
 
 
@@ -155,12 +242,13 @@ def format_inr(paise: int) -> str:
     return f"₹{paise / 100:.2f}"
 
 
-def get_rate_at_quota(photo_quota: int) -> int:
-    used = 0
-    for bucket_size, rate in PHOTO_TIERS:
-        if bucket_size is None:
-            return rate
-        if photo_quota <= used + bucket_size:
-            return rate
-        used += bucket_size
-    return PHOTO_TIERS[-1][1]
+def get_rate_at_quota(photo_quota: int, db=None) -> int:
+    tiers = _get_active(db).photo_tiers if db else _DEFAULTS["photo_tiers"]
+    used  = 0
+    for t in tiers:
+        if t["bucket"] is None:
+            return t["rate_paise"]
+        if photo_quota <= used + t["bucket"]:
+            return t["rate_paise"]
+        used += t["bucket"]
+    return tiers[-1]["rate_paise"]
