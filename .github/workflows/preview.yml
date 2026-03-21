@@ -112,7 +112,7 @@ jobs:
 
         # AI models
         MAX_PHOTO_SIZE_MB=20
-        PLACES365_MODEL_PATH=  # auto-downloads resnet18 weights on first run
+        PLACES365_MODEL_PATH=
         YOLO_MODEL_PATH=yolov8n.pt
         DEFAULT_EVENT_PIN=0000
         EOF
@@ -184,19 +184,34 @@ jobs:
           local NAME="$1" TARGET="$2" LOGFILE="$3"
           for attempt in 1 2 3 4 5; do
             pkill -f "cloudflared tunnel.*$TARGET" 2>/dev/null || true
+            sleep 2
             rm -f "$LOGFILE"
             cloudflared tunnel --url "$TARGET" > "$LOGFILE" 2>&1 &
-            for i in $(seq 1 30); do
+            local TPID=$!
+            local FOUND=""
+            for i in $(seq 1 40); do
               sleep 1
+              # Check process is still alive
+              if ! kill -0 "$TPID" 2>/dev/null; then
+                echo "  $NAME attempt $attempt: cloudflared process died early"
+                break
+              fi
               FOUND=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$LOGFILE" | head -n 1)
               [ -n "$FOUND" ] && break
             done
-            if [ -n "$FOUND" ]; then
-              echo "$NAME=$FOUND" >> /tmp/tunnel_urls
-              echo "$NAME tunnel ready: $FOUND"
-              return 0
+            if [ -n "$FOUND" ] && kill -0 "$TPID" 2>/dev/null; then
+              # Verify tunnel actually responds (not just printed URL then died)
+              sleep 2
+              if kill -0 "$TPID" 2>/dev/null; then
+                echo "$NAME=$FOUND" >> /tmp/tunnel_urls
+                echo "$NAME tunnel ready: $FOUND"
+                return 0
+              else
+                echo "  $NAME attempt $attempt: tunnel died after printing URL"
+              fi
             fi
-            echo "  $NAME attempt $attempt failed"
+            echo "  $NAME attempt $attempt failed, retrying in 5s..."
+            sleep 5
           done
           echo "ERROR: $NAME tunnel failed after 5 attempts"
           cat "$LOGFILE"
@@ -323,23 +338,38 @@ jobs:
 
         # ── Start initial pgweb tunnel ──────────────────────────────────────
         start_pgweb_tunnel() {
-          pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
-          sleep 1
-          rm -f /tmp/pgweb-tunnel.log
-          cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
-          local URL=""
-          for i in $(seq 1 40); do
-            sleep 1
-            URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
-            [ -n "$URL" ] && break
+          local ATTEMPTS=5
+          for attempt in $(seq 1 $ATTEMPTS); do
+            pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
+            sleep 2
+            rm -f /tmp/pgweb-tunnel.log
+            cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+            local TPID=$!
+            local URL=""
+            for i in $(seq 1 40); do
+              sleep 1
+              if ! kill -0 "$TPID" 2>/dev/null; then
+                echo "  pgweb tunnel attempt $attempt: process died early"
+                break
+              fi
+              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
+              [ -n "$URL" ] && break
+            done
+            if [ -n "$URL" ] && kill -0 "$TPID" 2>/dev/null; then
+              sleep 2  # wait 2s to confirm process stays alive
+              if kill -0 "$TPID" 2>/dev/null; then
+                echo "$URL" > /tmp/pgweb_url
+                echo "pgweb tunnel ready: $URL"
+                return 0
+              else
+                echo "  pgweb tunnel attempt $attempt: died after printing URL"
+              fi
+            fi
+            echo "  pgweb tunnel attempt $attempt failed, retrying in 5s..."
+            sleep 5
           done
-          if [ -n "$URL" ]; then
-            echo "$URL" > /tmp/pgweb_url
-            echo "pgweb tunnel ready: $URL"
-          else
-            echo "WARNING: pgweb tunnel failed to start" >&2
-            cat /tmp/pgweb-tunnel.log >&2
-          fi
+          echo "WARNING: pgweb tunnel failed after $ATTEMPTS attempts" >&2
+          cat /tmp/pgweb-tunnel.log >&2
         }
 
         start_pgweb_tunnel
@@ -391,45 +421,56 @@ jobs:
 
             # ── 2. Check if tunnel process is alive ──────────────────────────
             if ! pgrep -f "cloudflared tunnel.*8081" >/dev/null 2>&1; then
-              echo "[pgweb watchdog] Tunnel process dead — restarting at $(date)"
-              rm -f /tmp/pgweb-tunnel.log
-              cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
-              for i in $(seq 1 40); do
-                sleep 1
-                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
-                [ -n "$NEW_URL" ] && break
+              echo "[pgweb watchdog] Tunnel dead — restarting at $(date)"
+              for wdattempt in 1 2 3; do
+                sleep 2
+                rm -f /tmp/pgweb-tunnel.log
+                cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+                WD_PID=$!
+                NEW_URL=""
+                for i in $(seq 1 40); do
+                  sleep 1
+                  kill -0 "$WD_PID" 2>/dev/null || break
+                  NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
+                  [ -n "$NEW_URL" ] && break
+                done
+                if [ -n "$NEW_URL" ] && kill -0 "$WD_PID" 2>/dev/null; then
+                  sleep 2
+                  if kill -0 "$WD_PID" 2>/dev/null; then
+                    echo "$NEW_URL" > /tmp/pgweb_url
+                    echo "[pgweb watchdog] New tunnel URL: $NEW_URL"
+                    break
+                  fi
+                fi
+                echo "[pgweb watchdog] restart attempt $wdattempt failed"
               done
-              if [ -n "$NEW_URL" ]; then
-                echo "$NEW_URL" > /tmp/pgweb_url
-                echo "[pgweb watchdog] New tunnel URL: $NEW_URL"
-              else
-                echo "[pgweb watchdog] WARNING: tunnel restart failed"
-              fi
             fi
 
             # ── 3. Proactive tunnel rotation every 50 min ────────────────────
-            # Even if the tunnel process is alive, rotate it every 50 min
-            # because Cloudflare free tunnels silently expire ~2 hrs.
             TUNNEL_AGE=$(( $(date +%s) - $(stat -c %Y /tmp/pgweb-tunnel.log 2>/dev/null || echo $(date +%s)) ))
             if [ "$TUNNEL_AGE" -gt 3000 ]; then
-              echo "[pgweb watchdog] Proactive tunnel rotation at $(date)"
+              echo "[pgweb watchdog] Proactive rotation at $(date)"
               pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
               sleep 2
               rm -f /tmp/pgweb-tunnel.log
               cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
+              ROT_PID=$!
+              NEW_URL=""
               for i in $(seq 1 40); do
                 sleep 1
+                kill -0 "$ROT_PID" 2>/dev/null || break
                 NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
                 [ -n "$NEW_URL" ] && break
               done
-              if [ -n "$NEW_URL" ]; then
-                echo "$NEW_URL" > /tmp/pgweb_url
-                echo "[pgweb watchdog] Rotated URL: $NEW_URL"
+              if [ -n "$NEW_URL" ] && kill -0 "$ROT_PID" 2>/dev/null; then
+                sleep 2
+                kill -0 "$ROT_PID" 2>/dev/null && echo "$NEW_URL" > /tmp/pgweb_url && echo "[pgweb watchdog] Rotated URL: $NEW_URL"
               fi
             fi
           done
-        ) &
-        echo "pgweb watchdog started (checks every 60s — restarts container + tunnel if down)"
+        ) > /tmp/pgweb-watchdog.log 2>&1 &
+        disown $!
+        echo "pgweb watchdog started PID=$! (checks every 60s — restarts container + tunnel if down)"
 
     # 15 MinIO Console tunnel
     - name: Start MinIO Console tunnel
@@ -505,6 +546,11 @@ jobs:
         tail_worker event_celery_beat     "BEAT    "
         tail_worker event_backend         "BACKEND "
         tail_worker event_frontend        "FRONTEND"
+
+        # Tail pgweb watchdog log if it exists (only when enable_db_ui=true)
+        if [ -f /tmp/pgweb-watchdog.log ]; then
+          tail -f /tmp/pgweb-watchdog.log | sed -u 's/^/[PGWEB-WD] /' >> "$CELERY_LOG" &
+        fi
 
         LOG_OFFSET=0
 
