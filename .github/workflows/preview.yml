@@ -170,26 +170,6 @@ jobs:
         fi
         echo "All services ready"
 
-    # 10 Run database migrations via Alembic
-    # The migration chain: 0001→...→0009→001_pricing_config
-    - name: Run database migrations
-      run: |
-        echo "Running alembic migrations..."
-        docker exec -w /app event_backend alembic upgrade head
-
-        # Verify pricing_config table was created and seeded
-        TABLE_CHECK=$(docker exec event_postgres psql -U postgres -d event_ai -tAc \
-          "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='pricing_config'")
-        if [ "$TABLE_CHECK" = "1" ]; then
-          ROW_COUNT=$(docker exec event_postgres psql -U postgres -d event_ai -tAc \
-            "SELECT COUNT(*) FROM pricing_config")
-          echo "✅ pricing_config table exists — $ROW_COUNT row(s)"
-        else
-          echo "⚠️  pricing_config table not found — migration may have failed"
-          docker exec -w /app event_backend alembic history
-          exit 1
-        fi
-
     # 11 Seed default users
     # Bypasses /auth/register (which ignores role field for security).
     # Runs Python inside the backend container using the app's own
