@@ -171,59 +171,10 @@ jobs:
         echo "All services ready"
 
     # 11 Seed default users
-    # Bypasses /auth/register (which ignores role field for security).
-    # Runs Python inside the backend container using the app's own
-    # hash_password() so the hash is 100% identical to what login expects.
+    # Uses base64-encoded script to avoid heredoc/YAML indentation conflicts.
+    - name: Seed default users
       run: |
-        docker exec event_backend python3 - << 'PYEOF'
-        from app.core.security import hash_password
-        from app.database.db import SessionLocal
-        from app.models.user import User
-        from datetime import datetime
-
-        db = SessionLocal()
-        users = [
-            {"email": "admin@admin.com", "password": "123456", "role": "admin",  "plan_type": "pro"},
-            {"email": "test@gmail.com",  "password": "123456", "role": "owner",  "plan_type": "pro"},
-        ]
-        try:
-            for u in users:
-                existing = db.query(User).filter(User.email == u["email"]).first()
-                if existing:
-                    existing.password_hash = hash_password(u["password"])
-                    existing.role          = u["role"]
-                    existing.plan_type     = u["plan_type"]
-                    db.commit()
-                    print("Updated:", u["email"], "role=" + u["role"])
-                else:
-                    user = User(
-                        email           = u["email"],
-                        password_hash   = hash_password(u["password"]),
-                        role            = u["role"],
-                        plan_type       = u["plan_type"],
-                        free_event_used = False,
-                        created_at      = datetime.utcnow(),
-                    )
-                    db.add(user)
-                    db.commit()
-                    print("Created:", u["email"], "role=" + u["role"])
-        finally:
-            db.close()
-        print("=================================")
-        print(" Admin  admin@admin.com / 123456  role=admin")
-        print(" Owner  test@gmail.com  / 123456  role=owner")
-        print("=================================")
-        PYEOF
-                # Verify roles
-                docker exec event_backend python3 -c "
-        from app.database.db import SessionLocal
-        from app.models.user import User
-        db = SessionLocal()
-        for e in ['admin@admin.com','test@gmail.com']:
-            u = db.query(User).filter(User.email == e).first()
-            print(e, '->', 'role=' + u.role if u else 'NOT FOUND')
-        db.close()
-        "
+        echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gZGF0ZXRpbWUgaW1wb3J0IGRhdGV0aW1lCgpkYiA9IFNlc3Npb25Mb2NhbCgpCnVzZXJzID0gWwogICAgeyJlbWFpbCI6ICJhZG1pbkBhZG1pbi5jb20iLCAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAiYWRtaW4iLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKICAgIHsiZW1haWwiOiAidGVzdEBnbWFpbC5jb20iLCAgInBhc3N3b3JkIjogIjEyMzQ1NiIsICJyb2xlIjogIm93bmVyIiwgICJwbGFuX3R5cGUiOiAicHJvIn0sCl0KdHJ5OgogICAgZm9yIHUgaW4gdXNlcnM6CiAgICAgICAgZXhpc3RpbmcgPSBkYi5xdWVyeShVc2VyKS5maWx0ZXIoVXNlci5lbWFpbCA9PSB1WyJlbWFpbCJdKS5maXJzdCgpCiAgICAgICAgaWYgZXhpc3Rpbmc6CiAgICAgICAgICAgIGV4aXN0aW5nLnBhc3N3b3JkX2hhc2ggPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pCiAgICAgICAgICAgIGV4aXN0aW5nLnJvbGUgICAgICAgICAgPSB1WyJyb2xlIl0KICAgICAgICAgICAgZXhpc3RpbmcucGxhbl90eXBlICAgICA9IHVbInBsYW5fdHlwZSJdCiAgICAgICAgICAgIGRiLmNvbW1pdCgpCiAgICAgICAgICAgIHByaW50KCJVcGRhdGVkOiIsIHVbImVtYWlsIl0sICJyb2xlPSIgKyB1WyJyb2xlIl0pCiAgICAgICAgZWxzZToKICAgICAgICAgICAgdXNlciA9IFVzZXIoCiAgICAgICAgICAgICAgICBlbWFpbCAgICAgICAgICAgPSB1WyJlbWFpbCJdLAogICAgICAgICAgICAgICAgcGFzc3dvcmRfaGFzaCAgID0gaGFzaF9wYXNzd29yZCh1WyJwYXNzd29yZCJdKSwKICAgICAgICAgICAgICAgIHJvbGUgICAgICAgICAgICA9IHVbInJvbGUiXSwKICAgICAgICAgICAgICAgIHBsYW5fdHlwZSAgICAgICA9IHVbInBsYW5fdHlwZSJdLAogICAgICAgICAgICAgICAgZnJlZV9ldmVudF91c2VkID0gRmFsc2UsCiAgICAgICAgICAgICAgICBjcmVhdGVkX2F0ICAgICAgPSBkYXRldGltZS51dGNub3coKSwKICAgICAgICAgICAgKQogICAgICAgICAgICBkYi5hZGQodXNlcikKICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIkNyZWF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKZmluYWxseToKICAgIGRiLmNsb3NlKCkKcHJpbnQoIkFkbWluICBhZG1pbkBhZG1pbi5jb20gLyAxMjM0NTYgIHJvbGU9YWRtaW4iKQpwcmludCgiT3duZXIgIHRlc3RAZ21haWwuY29tICAvIDEyMzQ1NiAgcm9sZT1vd25lciIpCg==' | base64 -d | docker exec -i event_backend python3
 
     # 11 Install cloudflared
     - name: Install Cloudflare tunnel
