@@ -8,6 +8,7 @@ import {
   Users,
   CalendarDays,
   CreditCard,
+  IndianRupee,
   Trash2,
   LogOut,
   ShieldCheck,
@@ -17,19 +18,19 @@ import {
 } from "lucide-react";
 
 const NAV = [
-  { href: "/admin",        label: "Dashboard",  icon: LayoutDashboard },
-  { href: "/admin/users",  label: "Users",       icon: Users           },
-  { href: "/admin/events", label: "Events",      icon: CalendarDays    },
-  { href: "/admin/plans",  label: "Plans",       icon: CreditCard      },
-  { href: "/admin/pricing",label: "Pricing",     icon: CreditCard      },
-  { href: "/admin/tools",  label: "Tools",       icon: Trash2          },
+  { href: "/admin",         label: "Dashboard", icon: LayoutDashboard },
+  { href: "/admin/users",   label: "Users",     icon: Users           },
+  { href: "/admin/events",  label: "Events",    icon: CalendarDays    },
+  { href: "/admin/plans",   label: "Plans",     icon: CreditCard      },
+  { href: "/admin/pricing", label: "Pricing",   icon: IndianRupee     },  // ← distinct icon
+  { href: "/admin/tools",   label: "Tools",     icon: Trash2          },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router   = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const [email, setEmail] = useState(""); 
+  const [email, setEmail] = useState("");
 
   useEffect(() => {
     const token = localStorage.getItem("token");

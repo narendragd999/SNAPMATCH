@@ -1,0 +1,152 @@
+Looking at your codebase, this is **SnapFind AI** — a full-stack AI-powered event photo delivery SaaS. Let me break down the complete architecture, then give you the prompt.
+
+## Architecture Overview
+
+**Stack:** FastAPI (Python) backend + Next.js 14 App Router frontend + Celery workers + PostgreSQL + Redis + MinIO/R2 + FAISS
+
+**Core Flow:**
+1. Owner uploads photos → stored in MinIO/R2
+2. Celery workers: optimize images (pyvips/Pillow) → InsightFace face detection → DBSCAN clustering → FAISS index
+3. Guests visit public link → upload selfie → FAISS nearest-neighbor search → download matched photos
+
+**Key modules:**
+- `tasks.py` — 5-task Celery pipeline (orchestrator → per-photo → finalizer → AI enrichment → cleanup)
+- `storage_service.py` — unified abstraction over local/MinIO/R2
+- `faiss_manager.py` — mtime-based cross-process cache invalidation
+- `search_service.py` — multi-embedding search with augmented variants
+- `pricing.py` — tiered pay-per-event engine backed by DB config
+- `public_routes.py` — PIN protection, in-memory result cache, ZIP downloads
+- `billing_routes.py` — Razorpay integration, free tier, webhook handling
+
+---
+
+## Future Context Prompt
+
+Save this and paste it at the start of any new conversation:
+
+---
+
+```
+You are helping me build and maintain SnapFind AI — a full-stack AI-powered 
+event photo delivery SaaS. Here is the complete architecture:
+
+## PROJECT: SnapFind AI
+
+### Tech Stack
+- Backend: FastAPI (Python), SQLAlchemy ORM, PostgreSQL
+- Workers: Celery + Redis broker, 4 queues: default, photo_processing, 
+  event_finalize, ai_enrichment
+- Storage: MinIO/R2 via boto3, abstracted in storage_service.py
+  (STORAGE_BACKEND env: local | minio | r2)
+- AI/ML: InsightFace buffalo_l (face detection + embeddings), FAISS IndexFlatIP 
+  (vector search), DBSCAN clustering, Places365 (scene), YOLOv8n (objects)
+- Frontend: Next.js 14 App Router, TypeScript, Tailwind CSS, Framer Motion
+- Payments: Razorpay (UPI + cards), pay-per-event model
+- Auth: JWT (access 7d + refresh 30d), bcrypt passwords
+
+### Database Models
+- User: id, email, password_hash, role (owner|admin), plan_type 
+  (free|pay_per_event), free_event_used
+- Event: id, owner_id, name, slug, public_token, photo_quota, guest_quota, 
+  guest_uploads_used, validity_days, is_free_tier, payment_status 
+  (pending|paid|free|failed), amount_paid_paise, payment_order_id, 
+  payment_id, processing_status, total_faces, total_clusters, 
+  watermark_enabled, watermark_config (JSON), pin_enabled, pin_hash, 
+  pin_version, expires_at
+- Photo: id, event_id, stored_filename, optimized_filename, uploaded_by 
+  (owner|guest), approval_status (approved|pending|rejected), status 
+  (uploaded|processed|failed|skipped), faces_detected, scene_label, 
+  objects_detected (JSON), guest_preview_filename, guest_name, guest_ip
+- Cluster: id, event_id, cluster_id, image_name, embedding (LargeBinary/pickle)
+- EventOrder: id, user_id, event_id, razorpay_order_id, amount_paise, 
+  photo_quota, guest_quota, validity_days, status (created|paid|failed)
+- PricingConfig: single active row with tiered rates in JSON columns
+- PlatformSetting: key-value store for feature flags
+
+### Processing Pipeline (tasks.py)
+1. process_event() — orchestrator, dispatches chord of per-photo tasks
+2. process_single_photo() — image_pipeline (pyvips→Pillow), InsightFace, 
+   returns serialized embeddings
+3. finalize_event() — chord callback: bulk DB writes, DBSCAN clustering via 
+   FAISS IndexFlatIP, merge pass (MERGE_THRESHOLD=0.82), FAISS search index 
+   rebuild, triggers AI enrichment
+4. enrich_event_photos() → ai_enrich_event() — Places365 + YOLOv8n, 
+   batched commits (ENRICH_BATCH_SIZE=25)
+5. cleanup_expired_events() — Celery Beat daily 03:00 UTC
+
+### Search Architecture
+- FaissManager: in-process cache with mtime-based invalidation (solves 
+  cross-process staleness between FastAPI and Celery worker)
+- search_service.py: multi-embedding search (original + 3 augments: flip, 
+  center crop, brightness boost), best-score-per-image deduplication
+- Thresholds: STRICT=0.68, NORMAL=0.55, FALLBACK=0.40, MAX_RESULTS=1000
+- Public search caches results in-memory (CACHE_TTL=30min, PAGE_SIZE=30)
+
+### Storage Service (storage_service.py)
+- Object keys: events/{id}/{filename}, events/{id}/thumbnails/{fn}, 
+  events/{id}/guest_previews/{fn}, covers/{fn}
+- Separate presign client (_presign_s3) uses MINIO_PRESIGN_ENDPOINT for 
+  correct HMAC signing through Cloudflare Tunnel
+- get_local_temp_path() downloads to /tmp/snapfind/{event_id}/ for AI pipeline
+- Lazy boto3 init, _ensure_bucket() creates bucket + public-read + CORS policy
+
+### API Routes
+- /auth/* — register, login, refresh (httpOnly cookie), logout, forgot/reset
+- /events/* — CRUD, process, clusters, scenes, watermark CRUD, PIN CRUD, 
+  presign/confirm upload, owner thumbnails/images
+- /public/* — PIN verify, selfie search, paginated results, ZIP download, 
+  guest contribute, quota info
+- /billing/* — price-config, calculate-price, create-event-order (Razorpay), 
+  verify-payment, create-free-event, webhook, my-orders, event-quota, 
+  user-status
+- /upload/{id} — legacy multipart; /upload/{id}/presign + /confirm for 
+  direct-to-MinIO
+- /bulk-upload/{id} — owner batch upload (max 50/batch)
+- /events/{id}/guest-uploads/* — list, approve, reject, bulk ops
+- /events/{id}/photos/{id}/approve|reject|re-approve — individual approval
+- /admin/* — stats, users CRUD, events list/delete, settings, cleanup trigger
+- /pricing/config — GET (public), PUT (admin), GET history
+- /tasks/{task_id} — Celery task status
+
+### Frontend Structure (Next.js App Router)
+- app/(app)/ — authenticated routes: dashboard, events, events/[id], 
+  events/create
+- app/admin/ — admin panel with layout, dashboard, users, events, plans, 
+  pricing, tools pages
+- app/(public)/ — landing page, login, forgot/reset password, pricing page
+- /public/[token] — public event page (PIN gate, selfie search, gallery)
+- Key components: PricingCalculator (live API config), EventQuotaBar, 
+  PeopleGallery, QRCodeDisplay, WatermarkSettings, MultiSelect, PhotoPreview
+- Key hooks: useRazorpay, useWatermark, useSnapmatch (keyboard nav, swipe, 
+  camera)
+- pricing.ts: module-scope cache, calculatePrice() with tiered cost engine, 
+  invalidatePricingConfig() after admin updates
+
+### Pricing System
+- Pay-per-event: base_fee + tiered photo rate + tiered guest rate + 
+  validity_addon (all in paise)
+- Default tiers: photos 1-500@₹0.20, 501-1000@₹0.15, 1001-3000@₹0.10, 
+  3000+@₹0.07; validity: 30d free, 90d+₹49, 365d+₹149
+- Free tier: 50 photos, 10 guest slots, 7 days (one per user account)
+- All values DB-configurable via admin panel → PUT /pricing/config
+
+### Key Design Decisions
+- Guest photos require owner approval before processing; guest_uploads_used 
+  incremented only on approval, not on upload
+- PIN stored as salt:sha256_hash, brute-forced 0000-9999 to recover plain 
+  PIN for owner display (10K iterations, ~10ms)
+- FAISS indexes always on local disk; photos/thumbnails in object storage
+- Celery chord: all per-photo tasks must complete before finalize_event runs
+- Redis keys for processing progress have 24h TTL; phase key kept 1h after 
+  completion for frontend polling
+- Watermark applied client-side via Canvas API; config stored per-event in DB
+- Admin panel at /admin requires role=admin in JWT; protected by admin 
+  layout redirect
+
+### Environment Variables (key ones)
+STORAGE_BACKEND, MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, 
+MINIO_BUCKET, MINIO_PUBLIC_URL, MINIO_PRESIGN_ENDPOINT, DATABASE_URL, 
+CELERY_BROKER_URL, SECRET_KEY, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, 
+RAZORPAY_WEBHOOK_SECRET, FRONTEND_URL, ALLOWED_ORIGINS, DEFAULT_EVENT_PIN, 
+USE_GPU, NEXT_PUBLIC_API_URL
+```

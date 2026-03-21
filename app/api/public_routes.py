@@ -714,3 +714,77 @@ def _get_setting(db: Session, key: str, default: str = "false") -> str:
     from app.models.platform_settings import PlatformSetting
     row = db.query(PlatformSetting).filter(PlatformSetting.key == key).first()
     return row.value if row else default
+
+# ── Browse All Event Photos (paginated) ──────────────────────────────────────
+# ADD THIS BLOCK anywhere in public_routes.py, before the _get_setting helper.
+#
+# Endpoint: GET /public/events/{public_token}/photos
+# Query params:
+#   page      int  default 1
+#   page_size int  default 30, max 60
+#   scene     str  optional — filter by scene_label
+#
+# Returns paginated list of processed, approved photos with scene/object meta.
+# Used by the "All Photos" tab on the public selfie page.
+
+@router.get("/events/{public_token}/photos")
+def browse_event_photos(
+    public_token: str,
+    page:         int = Query(1, ge=1),
+    page_size:    int = Query(30, ge=1, le=60),
+    scene:        str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """
+    Paginated gallery of all processed photos for an event.
+    No auth required — intended for the public guest selfie page.
+    """
+    event = validate_public_event(public_token, db)
+
+    query = (
+        db.query(
+            Photo.optimized_filename,
+            Photo.scene_label,
+            Photo.objects_detected,
+        )
+        .filter(
+            Photo.event_id == event.id,
+            Photo.status == "processed",
+            Photo.approval_status == "approved",
+            Photo.optimized_filename.isnot(None),
+        )
+    )
+
+    if scene:
+        query = query.filter(Photo.scene_label == scene)
+
+    total = query.count()
+    rows  = (
+        query
+        .order_by(Photo.uploaded_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = []
+    for fn, scene_label, objects_json in rows:
+        try:
+            parsed = _json.loads(objects_json) if objects_json else []
+            objects = [o["label"] for o in parsed if isinstance(o, dict) and "label" in o]
+        except (TypeError, ValueError):
+            objects = []
+        items.append({
+            "image_name":  fn,
+            "scene_label": scene_label,
+            "objects":     objects,
+        })
+
+    return {
+        "page":        page,
+        "page_size":   page_size,
+        "total":       total,
+        "total_pages": max(1, -(-total // page_size)),
+        "has_more":    (page * page_size) < total,
+        "items":       items,
+    }

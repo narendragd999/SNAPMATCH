@@ -8,7 +8,7 @@ import { useState, useEffect, useRef } from "react";
 import {
   Camera, Search, Users, Download, Shield, Zap,
   ChevronRight, Star, Check, Menu, X, ArrowRight,
-  Image, Clock, Award, Globe, Mail, Phone
+  Image, Clock, Award, Globe, Mail, Phone, Calculator, ShieldCheck,
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 
@@ -25,17 +25,17 @@ const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.08 } } };
 
 /* ─── data ─────────────────────────────────────────────────── */
 const NAV_LINKS = [
-  { label: "Features", href: "#features" },
-  { label: "How It Works", href: "#how" },
-  { label: "Pricing", href: "#pricing" },
-  { label: "FAQ", href: "#faq" },
+  { label: "Features",     href: "#features" },
+  { label: "How It Works", href: "#how"      },
+  { label: "Pricing",      href: "/pricing"  },  // ← links to full /pricing page
+  { label: "FAQ",          href: "#faq"      },
 ];
 
 const STATS = [
-  { value: 12000, suffix: "+", label: "Events Hosted" },
-  { value: 2, suffix: "M+", label: "Photos Indexed" },
-  { value: 350, suffix: "K+", label: "Faces Recognised" },
-  { value: 99.2, suffix: "%", label: "Match Accuracy", decimals: 1 },
+  { value: 12000, suffix: "+",  label: "Events Hosted"     },
+  { value: 2,     suffix: "M+", label: "Photos Indexed"    },
+  { value: 350,   suffix: "K+", label: "Faces Recognised"  },
+  { value: 99.2,  suffix: "%",  label: "Match Accuracy", decimals: 1 },
 ];
 
 const FEATURES = [
@@ -113,7 +113,6 @@ const HOW_STEPS = [
 ];
 
 // Pricing is pay-per-event with a custom configurator — no fixed tiers.
-// PLANS below are used only for the FREE plan card + the "Build Your Event" CTA card.
 const PLANS = [
   {
     name: "Free",
@@ -122,17 +121,17 @@ const PLANS = [
     badge: "",
     desc: "Try SnapFind risk-free on your first event",
     features: [
-      { text: "1 event included", included: true },
-      { text: "Up to 500 photos", included: true },
-      { text: "AI face search for guests", included: true },
-      { text: "Individual photo download", included: true },
-      { text: "Guest portal with share link", included: true },
-      { text: "PIN protection", included: true },
-      { text: "7-day cloud storage", included: true },
-      { text: "Bulk ZIP download", included: false },
-      { text: "Watermarking", included: false },
-      { text: "AI scene & object tags", included: false },
-      { text: "Guest upload portal", included: false },
+      { text: "1 event included",               included: true  },
+      { text: "Up to 500 photos",               included: true  },
+      { text: "AI face search for guests",      included: true  },
+      { text: "Individual photo download",      included: true  },
+      { text: "Guest portal with share link",   included: true  },
+      { text: "PIN protection",                 included: true  },
+      { text: "7-day cloud storage",            included: true  },
+      { text: "Bulk ZIP download",              included: false },
+      { text: "Watermarking",                   included: false },
+      { text: "AI scene & object tags",         included: false },
+      { text: "Guest upload portal",            included: false },
     ],
     cta: "Start Free",
     href: "/login?mode=register",
@@ -145,24 +144,23 @@ const PLANS = [
     badge: "MOST POPULAR",
     desc: "Build exactly what your event needs — pay only for what you use",
     features: [
-      { text: "Custom photo count (slider)", included: true },
-      { text: "Custom storage duration (slider)", included: true },
-      { text: "Guest upload portal (optional)", included: true },
-      { text: "Bulk ZIP download", included: true },
-      { text: "AI face search + clustering", included: true },
-      { text: "AI scene & object tags", included: true },
-      { text: "Custom watermarking", included: true },
-      { text: "PIN protection", included: true },
-      { text: "Custom guest upload limit", included: true },
-      { text: "Longer cloud storage", included: true },
+      { text: "Custom photo count (slider)",     included: true },
+      { text: "Custom storage duration (slider)",included: true },
+      { text: "Guest upload portal (optional)", included: true  },
+      { text: "Bulk ZIP download",              included: true  },
+      { text: "AI face search + clustering",    included: true  },
+      { text: "AI scene & object tags",         included: true  },
+      { text: "Custom watermarking",            included: true  },
+      { text: "PIN protection",                 included: true  },
+      { text: "Custom guest upload limit",      included: true  },
+      { text: "Longer cloud storage",           included: true  },
     ],
     cta: "Configure Your Event",
-    href: "/billing/create-event-order",
+    href: "/pricing",
     highlight: true,
   },
 ];
 
-// Pay-per-event pricing factors shown in the configurator section
 const PRICING_FACTORS = [
   {
     icon: "📸",
@@ -244,7 +242,7 @@ const FAQS = [
 
 /* ─── sub-components ───────────────────────────────────────── */
 function Navbar() {
-  const [open, setOpen] = useState(false);
+  const [open,     setOpen]     = useState(false);
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -271,13 +269,29 @@ function Navbar() {
 
         <nav className="hidden md:flex items-center gap-8">
           {NAV_LINKS.map((l) => (
-            <a
-              key={l.label}
-              href={l.href}
-              className="text-sm text-gray-400 hover:text-white transition-colors"
-            >
-              {l.label}
-            </a>
+            l.href.startsWith("/") ? (
+              /* External page link (e.g. /pricing) */
+              <Link
+                key={l.label}
+                href={l.href}
+                className={`text-sm transition-colors ${
+                  l.label === "Pricing"
+                    ? "text-[#3ecfcf] hover:text-white font-medium"
+                    : "text-gray-400 hover:text-white"
+                }`}
+              >
+                {l.label}
+              </Link>
+            ) : (
+              /* Anchor link */
+              <a
+                key={l.label}
+                href={l.href}
+                className="text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                {l.label}
+              </a>
+            )
           ))}
         </nav>
 
@@ -314,14 +328,25 @@ function Navbar() {
             className="md:hidden bg-[#090d1a]/98 border-t border-white/10 px-6 py-4 flex flex-col gap-4"
           >
             {NAV_LINKS.map((l) => (
-              <a
-                key={l.label}
-                href={l.href}
-                className="text-gray-300 hover:text-white"
-                onClick={() => setOpen(false)}
-              >
-                {l.label}
-              </a>
+              l.href.startsWith("/") ? (
+                <Link
+                  key={l.label}
+                  href={l.href}
+                  className={l.label === "Pricing" ? "text-[#3ecfcf] font-medium" : "text-gray-300 hover:text-white"}
+                  onClick={() => setOpen(false)}
+                >
+                  {l.label}
+                </Link>
+              ) : (
+                <a
+                  key={l.label}
+                  href={l.href}
+                  className="text-gray-300 hover:text-white"
+                  onClick={() => setOpen(false)}
+                >
+                  {l.label}
+                </a>
+              )
             ))}
             <Link
               href="/login?mode=login"
@@ -379,7 +404,7 @@ function FAQItem({ q, a }: { q: string; a: string }) {
 export default function HomePage() {
   const heroRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({ target: heroRef, offset: ["start start", "end start"] });
-  const heroY = useTransform(scrollYProgress, [0, 1], ["0%", "30%"]);
+  const heroY       = useTransform(scrollYProgress, [0, 1], ["0%", "30%"]);
   const heroOpacity = useTransform(scrollYProgress, [0, 0.8], [1, 0]);
 
   return (
@@ -402,16 +427,8 @@ export default function HomePage() {
           "name": "SnapFind AI",
           "applicationCategory": "Photography",
           "description": "AI-powered face recognition for event photo delivery",
-          "offers": {
-            "@type": "Offer",
-            "price": "0",
-            "priceCurrency": "INR"
-          },
-          "aggregateRating": {
-            "@type": "AggregateRating",
-            "ratingValue": "4.9",
-            "reviewCount": "847"
-          }
+          "offers": { "@type": "Offer", "price": "0", "priceCurrency": "INR" },
+          "aggregateRating": { "@type": "AggregateRating", "ratingValue": "4.9", "reviewCount": "847" }
         })}} />
       </Head>
 
@@ -429,18 +446,13 @@ export default function HomePage() {
             pointer-events: none; opacity: 0.35;
           }
           .glow-purple { box-shadow: 0 0 80px -20px #6c63ff80; }
-          .glow-teal { box-shadow: 0 0 80px -20px #3ecfcf60; }
+          .glow-teal   { box-shadow: 0 0 80px -20px #3ecfcf60; }
           .text-gradient {
             background: linear-gradient(135deg, #fff 0%, #a5b4fc 50%, #3ecfcf 100%);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
           }
-          .card-hover {
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-          }
-          .card-hover:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 20px 60px -10px #6c63ff40;
-          }
+          .card-hover { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+          .card-hover:hover { transform: translateY(-4px); box-shadow: 0 20px 60px -10px #6c63ff40; }
           .mesh-bg {
             background:
               radial-gradient(ellipse 80% 50% at 20% 20%, #6c63ff18 0%, transparent 60%),
@@ -819,7 +831,7 @@ export default function HomePage() {
             </motion.div>
 
             {/* ── Two plan cards ── */}
-            <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-16">
+            <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-10">
               {PLANS.map(({ name, price, badge, desc, features, cta, href, highlight }, i) => (
                 <motion.div
                   key={name}
@@ -885,6 +897,45 @@ export default function HomePage() {
               ))}
             </div>
 
+            {/* ── PRICING CALCULATOR CTA BANNER ─────────────────────────────── */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              className="max-w-4xl mx-auto mb-16"
+            >
+              <div className="relative overflow-hidden rounded-2xl border border-[#3ecfcf]/25 bg-gradient-to-r from-[#6c63ff]/10 to-[#3ecfcf]/10 p-8 flex flex-col md:flex-row items-center gap-6 text-center md:text-left">
+                {/* Glow orbs */}
+                <div className="absolute -top-10 -left-10 w-40 h-40 rounded-full bg-[#6c63ff]/15 blur-3xl pointer-events-none" />
+                <div className="absolute -bottom-10 -right-10 w-40 h-40 rounded-full bg-[#3ecfcf]/10 blur-3xl pointer-events-none" />
+
+                <div className="relative flex-shrink-0 w-16 h-16 rounded-2xl bg-gradient-to-br from-[#6c63ff]/25 to-[#3ecfcf]/20 border border-[#6c63ff]/30 flex items-center justify-center">
+                  <Calculator size={28} className="text-[#3ecfcf]" />
+                </div>
+
+                <div className="relative flex-1">
+                  <p className="text-[#3ecfcf] text-xs font-semibold tracking-widest uppercase mb-1">
+                    Live Price Calculator
+                  </p>
+                  <h3 className="text-xl font-bold text-white mb-1">
+                    Calculate your exact event cost
+                  </h3>
+                  <p className="text-gray-400 text-sm">
+                    Adjust sliders for photos, guests & validity — see your price update in real time before you pay.
+                  </p>
+                </div>
+
+                <Link
+                  href="/pricing"
+                  className="relative flex-shrink-0 flex items-center gap-2 bg-gradient-to-r from-[#6c63ff] to-[#3ecfcf] text-white font-semibold px-6 py-3 rounded-xl hover:opacity-90 transition text-sm whitespace-nowrap glow-purple"
+                >
+                  <Calculator size={15} />
+                  Open Calculator
+                  <ArrowRight size={14} />
+                </Link>
+              </div>
+            </motion.div>
+
             {/* ── How pay-per-event pricing works ── */}
             <motion.div
               initial={{ opacity: 0, y: 24 }}
@@ -931,9 +982,9 @@ export default function HomePage() {
 
                   <div className="space-y-5 mb-6">
                     {[
-                      { label: "Photos", value: "1,000 photos", pct: 40 },
-                      { label: "Storage", value: "30 days", pct: 35 },
-                      { label: "Guest uploads", value: "200 photos", pct: 25 },
+                      { label: "Photos",         value: "1,000 photos", pct: 40 },
+                      { label: "Storage",         value: "30 days",      pct: 35 },
+                      { label: "Guest uploads",   value: "200 photos",   pct: 25 },
                     ].map(({ label, value, pct }) => (
                       <div key={label}>
                         <div className="flex justify-between text-xs mb-2">
@@ -962,7 +1013,7 @@ export default function HomePage() {
                       </p>
                     </div>
                     <Link
-                      href="/billing/create-event-order"
+                      href="/pricing"
                       className="flex items-center gap-2 bg-gradient-to-r from-[#6c63ff] to-[#3ecfcf] text-white text-sm font-semibold px-5 py-2.5 rounded-xl hover:opacity-90 transition"
                     >
                       Build My Event
@@ -1074,13 +1125,21 @@ export default function HomePage() {
               <div>
                 <p className="text-white font-semibold text-sm mb-4">Product</p>
                 <ul className="space-y-3">
-                  {["Features", "Pricing", "How It Works", "FAQ"].map((l) => (
-                    <li key={l}>
-                      <a href={`#${l.toLowerCase().replace(/ /g,"-")}`} className="text-gray-500 text-sm hover:text-white transition">
-                        {l}
-                      </a>
-                    </li>
-                  ))}
+                  <li>
+                    <a href="#features" className="text-gray-500 text-sm hover:text-white transition">Features</a>
+                  </li>
+                  <li>
+                    {/* ── Pricing links to the /pricing page ── */}
+                    <Link href="/pricing" className="text-gray-500 text-sm hover:text-white transition">
+                      Pricing Calculator
+                    </Link>
+                  </li>
+                  <li>
+                    <a href="#how" className="text-gray-500 text-sm hover:text-white transition">How It Works</a>
+                  </li>
+                  <li>
+                    <a href="#faq" className="text-gray-500 text-sm hover:text-white transition">FAQ</a>
+                  </li>
                 </ul>
               </div>
 
@@ -1088,10 +1147,10 @@ export default function HomePage() {
                 <p className="text-white font-semibold text-sm mb-4">Account</p>
                 <ul className="space-y-3">
                   {[
-                    { label: "Sign In", href: "/login?mode=login" },
-                    { label: "Create Account", href: "/login?mode=register" },
-                    { label: "Organiser Dashboard", href: "/dashboard" },
-                    { label: "Find My Photos", href: "/public-search" },
+                    { label: "Sign In",              href: "/login?mode=login"    },
+                    { label: "Create Account",       href: "/login?mode=register" },
+                    { label: "Organiser Dashboard",  href: "/dashboard"           },
+                    { label: "Find My Photos",       href: "/public-search"       },
                   ].map(({ label, href }) => (
                     <li key={label}>
                       <Link href={href} className="text-gray-500 text-sm hover:text-white transition">
@@ -1107,12 +1166,24 @@ export default function HomePage() {
                 <ul className="space-y-3">
                   {["Privacy Policy", "Terms of Service", "Refund Policy"].map((l) => (
                     <li key={l}>
-                      <a href="#" className="text-gray-500 text-sm hover:text-white transition">
-                        {l}
-                      </a>
+                      <a href="#" className="text-gray-500 text-sm hover:text-white transition">{l}</a>
                     </li>
                   ))}
                 </ul>
+
+                {/* ── Admin Panel link (subtle, in Legal column) ── */}
+                <div className="mt-6 pt-6 border-t border-white/5">
+                  <p className="text-gray-700 text-[11px] font-semibold uppercase tracking-wider mb-2">
+                    Admin
+                  </p>
+                  <Link
+                    href="/admin"
+                    className="inline-flex items-center gap-1.5 text-gray-600 hover:text-violet-400 text-xs transition-colors group"
+                  >
+                    <ShieldCheck size={12} className="group-hover:text-violet-400 transition-colors" />
+                    Admin Panel
+                  </Link>
+                </div>
               </div>
             </div>
 
