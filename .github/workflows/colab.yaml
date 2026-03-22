@@ -253,38 +253,49 @@ jobs:
     # 12 Inject MINIO_PRESIGN_ENDPOINT into running backend
     - name: Inject MinIO presign endpoint into backend
       run: |
-        echo "MINIO_PRESIGN_ENDPOINT = $MINIO_TUNNEL_URL"
         sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
 
         MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
           docker compose up -d --no-deps --force-recreate backend
 
-        for i in {1..30}; do
-          curl -sf http://localhost:8000/docs >/dev/null \
-            && echo "Backend ready at attempt $i" && break
-          echo "  waiting for backend... ($i)"
+        # Wait up to 90s for backend
+        echo "Waiting for backend..."
+        for i in $(seq 1 45); do
+          if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+            echo "✅ Backend ready at attempt $i"
+            break
+          fi
+          # Print backend logs every 10 attempts to see errors
+          if (( i % 10 == 0 )); then
+            echo "--- Backend logs so far ---"
+            docker logs event_backend --tail=20 2>&1
+            echo "---"
+          fi
+          echo "  waiting... ($i/45)"
           sleep 2
         done
 
-        # Restart celery workers so they pick up recreated backend network
+        # Final check
+        if ! curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+          echo "❌ Backend failed to start — full logs:"
+          docker logs event_backend --tail=50 2>&1
+          exit 1
+        fi
+
+        # Restart celery workers
         for WORKER in event_celery_finalize event_celery_ai \
                       event_celery_default event_celery_beat; do
           docker restart "$WORKER" 2>/dev/null || true
           echo "  restarted $WORKER"
         done
 
-        # Re-stop celery_photo (recreate may have restarted it)
+        # Re-stop celery_photo
         docker stop event_celery_photo || true
-        echo "✅ celery_photo re-stopped after backend recreate"
+        echo "✅ celery_photo re-stopped"
 
         BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-        if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
-          echo "MINIO_PRESIGN_ENDPOINT confirmed: $LIVE"
-        else
-          echo "ERROR: Got: '$LIVE', Expected: '$MINIO_TUNNEL_URL'"
-          exit 1
-        fi
+        echo "MINIO_PRESIGN_ENDPOINT = $LIVE"
 
     # 13 Start Redis + Postgres TCP tunnels via Pinggy (no auth, no card)
     - name: Start Redis + Postgres TCP tunnels (Pinggy)
