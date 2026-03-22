@@ -64,21 +64,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Install rustunnel
-        run: |
-          echo "Installing rustunnel..."
-
-          wget -qO rt.tar.gz https://github.com/joaoh82/rustunnel/releases/download/v0.2.3/rustunnel-v0.2.3-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf rt.tar.gz
-
-          sudo mv rustunnel /usr/local/bin/
-          sudo chmod +x /usr/local/bin/rustunnel
-
-          echo "Rustunnel installed at:"
-          which rustunnel
-
-          rustunnel --version || true  
-
     # 4 Cache pip packages
     - name: Cache pip packages
       uses: actions/cache@v4
