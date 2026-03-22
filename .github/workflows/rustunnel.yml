@@ -336,7 +336,9 @@ jobs:
 
     - name: Test Redis internally
       run: |
-        docker exec -it $(docker ps --format '{{.Names}}' | grep redis) redis-cli ping    
+        CONTAINER=$(docker ps --format '{{.Names}}' | grep redis | head -1)
+        echo "Redis container: $CONTAINER"
+        docker exec $CONTAINER redis-cli ping 
 
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
