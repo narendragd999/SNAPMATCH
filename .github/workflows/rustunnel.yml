@@ -323,10 +323,14 @@ jobs:
     - name: Verify TCP tunnels
       run: |
         echo "Testing Redis..."
-        nc -zv edge.rustunnel.com $REDIS_PORT || exit 1
+        HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
+        PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
+        nc -zv $HOST $PORT || exit 1
 
         echo "Testing Postgres..."
-        nc -zv edge.rustunnel.com $DB_PORT || exit 1
+        HOST=$(echo $DB_TUNNEL | cut -d: -f1)
+        PORT=$(echo $DB_TUNNEL | cut -d: -f2)
+        nc -zv $HOST $PORT || exit 1
 
         echo "✅ TCP tunnels working"
 
