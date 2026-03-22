@@ -60,7 +60,7 @@ jobs:
         df -h
         echo "Clean done — this run will rebuild all images from scratch"
 
-    # 3 Set up Docker Buildx with GHA cache driver.
+    # 3 Set up Docker Buildx
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -79,10 +79,17 @@ jobs:
 
     # 6 Write GHA .env
     - name: Write GHA .env
+      env:
+        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
       run: |
-        cat > .env << 'EOF'
+        cat > .env << EOF
         SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
         ENV=prod
+
+        # Redis — Upstash cloud (accessible from GHA + Colab without tunnel)
+        REDIS_URL=${UPSTASH_REDIS_URL}
+        CELERY_BROKER_URL=${UPSTASH_REDIS_URL}
+        CELERY_RESULT_BACKEND=${UPSTASH_REDIS_URL}
 
         # Storage
         STORAGE_BACKEND=minio
@@ -105,7 +112,7 @@ jobs:
         SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
         SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
 
-        # Frontend — relative paths so the Cloudflare tunnel origin is used.
+        # Frontend
         NEXT_PUBLIC_API_URL=/api
         NEXT_PUBLIC_STORAGE_URL=/storage
         NGINX_PORT=80
@@ -118,7 +125,7 @@ jobs:
         EOF
         sed -i 's/^[[:space:]]*//' .env
         echo "--- .env written ---"
-        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
+        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY | grep -v TOKEN
 
     # 7 Build and start Docker stack
     - name: Start Docker containers
@@ -164,12 +171,12 @@ jobs:
         fi
         echo "All services ready"
 
-    # ← ADD HERE (between step 8 and step 9)
-    - name: Stop celery_photo worker (Colab will handle photo tasks) 
+    # 8.5 Stop celery_photo — Colab GPU will handle photo tasks
+    - name: Stop celery_photo worker (Colab will handle photo tasks)
       run: |
-        docker stop event_celery_photo
+        docker stop event_celery_photo || true
         echo "✅ celery_photo stopped — Colab GPU worker will consume photo queue"
-        docker ps --format '{{.Names}}\t{{.Status}}' | grep celery
+        docker ps --format '{{.Names}}\t{{.Status}}' | grep celery || true
 
     # 9 Seed default users
     - name: Seed default users
@@ -198,7 +205,6 @@ jobs:
             local FOUND=""
             for i in $(seq 1 40); do
               sleep 1
-              # Check process is still alive
               if ! kill -0 "$TPID" 2>/dev/null; then
                 echo "  $NAME attempt $attempt: cloudflared process died early"
                 break
@@ -207,7 +213,6 @@ jobs:
               [ -n "$FOUND" ] && break
             done
             if [ -n "$FOUND" ] && kill -0 "$TPID" 2>/dev/null; then
-              # Verify tunnel actually responds (not just printed URL then died)
               sleep 2
               if kill -0 "$TPID" 2>/dev/null; then
                 echo "$NAME=$FOUND" >> /tmp/tunnel_urls
@@ -267,152 +272,168 @@ jobs:
           echo "ERROR: var not found. Got: '$LIVE', Expected: '$MINIO_TUNNEL_URL'"
           exit 1
         fi
-    
-    - name: Install rustunnel
+
+    # 13 Install ngrok + start Postgres TCP tunnel
+    - name: Install ngrok
       run: |
-        echo "Installing rustunnel..."
+        curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+          | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+          | sudo tee /etc/apt/sources.list.d/ngrok.list
+        sudo apt-get update -q && sudo apt-get install ngrok -q
+        ngrok version
 
-        wget -qO rt.tar.gz https://github.com/joaoh82/rustunnel/releases/download/v0.2.3/rustunnel-v0.2.3-x86_64-unknown-linux-musl.tar.gz
-        tar -xzf rt.tar.gz
-
-        sudo mv rustunnel /usr/local/bin/
-        sudo chmod +x /usr/local/bin/rustunnel
-
-        echo "Rustunnel installed at:"
-        which rustunnel
-
-        rustunnel --version || true
-
-
-    # 13 Start Redis + Postgres TCP tunnels (rustunnel)
-    - name: Start Redis + DB TCP tunnels
+    - name: Start Postgres TCP tunnel (ngrok) + verify Upstash Redis
       env:
-        TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
+        NGROK_TOKEN:       ${{ secrets.NGROK_AUTH_TOKEN }}
+        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
       run: |
-        echo "Starting rustunnel TCP..."
+        # ── Upstash Redis — verify it works from GHA ──
+        echo "Verifying Upstash Redis..."
+        python3 -c "
+import redis
+r = redis.from_url('${UPSTASH_REDIS_URL}')
+print('✅ Upstash Redis ping:', r.ping())
+print('   Photo queue depth:', r.llen('photo'))
+" || echo "⚠️ Upstash check failed — check UPSTASH_REDIS_URL secret"
 
-        cat <<EOF > rt.yml
-        server: edge.rustunnel.com:4040
-        auth_token: $TOKEN
+        # ── ngrok Postgres TCP tunnel (1 tunnel = fits free plan) ──
+        echo "Starting ngrok Postgres tunnel..."
+        ngrok config add-authtoken "$NGROK_TOKEN"
+        ngrok tcp 5432 --log=stdout > /tmp/ngrok-db.log 2>&1 &
+        NGROK_PID=$!
+        echo "ngrok PID: $NGROK_PID"
 
-        tunnels:
-          redis:
-            proto: tcp
-            local_port: 6379
+        # Wait up to 30s for tunnel URL
+        for i in $(seq 1 30); do
+          sleep 1
+          DB_TUNNEL=$(curl -sf http://localhost:4040/api/tunnels 2>/dev/null \
+            | python3 -c "
+import json,sys
+try:
+    t=json.load(sys.stdin)['tunnels']
+    if t: print(t[0]['public_url'].replace('tcp://',''))
+except: pass
+" 2>/dev/null || true)
+          if [ -n "$DB_TUNNEL" ]; then
+            echo "ngrok tunnel ready at attempt $i"
+            break
+          fi
+          if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok process died"
+            cat /tmp/ngrok-db.log
+            exit 1
+          fi
+        done
 
-          postgres:
-            proto: tcp
-            local_port: 5432
-        EOF
-
-        rustunnel start --config rt.yml > rt.log 2>&1 &
-        sleep 20
-
-        echo "==== RUSTUNNEL TCP LOG ===="
-        cat rt.log
-
-        REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' rt.log | sed -n '1p')
-        DB_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' rt.log | sed -n '2p')
-
-        if [ -z "$REDIS_PORT" ] || [ -z "$DB_PORT" ]; then
-          echo "❌ Failed to start TCP tunnels"
+        if [ -z "$DB_TUNNEL" ]; then
+          echo "❌ ngrok tunnel failed to start"
+          cat /tmp/ngrok-db.log
           exit 1
         fi
 
-        echo "REDIS_TUNNEL=edge.rustunnel.com:$REDIS_PORT" >> $GITHUB_ENV
-        echo "DB_TUNNEL=edge.rustunnel.com:$DB_PORT" >> $GITHUB_ENV
-
-        echo "================================="
-        echo " Redis TCP: edge.rustunnel.com:$REDIS_PORT"
-        echo " Postgres TCP: edge.rustunnel.com:$DB_PORT"
-        echo "================================="
-
-    - name: Verify TCP tunnels
-      run: |
-        echo "Testing Redis..."
-        HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
-        PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
-        nc -zv $HOST $PORT || exit 1
-
-        echo "Testing Postgres..."
-        HOST=$(echo $DB_TUNNEL | cut -d: -f1)
-        PORT=$(echo $DB_TUNNEL | cut -d: -f2)
-        nc -zv $HOST $PORT || exit 1
-
-        echo "✅ TCP tunnels working"
-
-    - name: Test Redis internally
-      run: |
-        CONTAINER=$(docker ps --format '{{.Names}}' | grep redis | head -1)
-        echo "Redis container: $CONTAINER"
-        docker exec $CONTAINER redis-cli ping 
-
-    - name: Test Postgres internally
-      run: |
-        docker exec event_postgres pg_isready
-
-    - name: Verify tunnel port assignments
-      run: |
-        # Confirm which port is Redis by sending a PING
-        REDIS_HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
-        REDIS_PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
+        DB_HOST=$(echo $DB_TUNNEL | cut -d: -f1)
         DB_PORT=$(echo $DB_TUNNEL | cut -d: -f2)
 
-        # Try PING on REDIS_PORT
-        REDIS_RESP=$(echo -e "*1\r\n\$4\r\nPING\r\n" | nc -w 2 $REDIS_HOST $REDIS_PORT 2>/dev/null || true)
-        if echo "$REDIS_RESP" | grep -q "PONG"; then
-          echo "✅ REDIS_TUNNEL port $REDIS_PORT confirmed Redis"
-        else
-          echo "⚠️  Ports appear swapped — fixing..."
-          ORIG_REDIS=$REDIS_TUNNEL
-          ORIG_DB=$DB_TUNNEL
-          # Swap them
-          sed -i "s|REDIS_TUNNEL=.*|REDIS_TUNNEL=$ORIG_DB|" $GITHUB_ENV
-          sed -i "s|DB_TUNNEL=.*|DB_TUNNEL=$ORIG_REDIS|" $GITHUB_ENV
-          echo "REDIS_TUNNEL=$ORIG_DB" >> $GITHUB_ENV
-          echo "DB_TUNNEL=$ORIG_REDIS" >> $GITHUB_ENV
-          echo "✅ Swapped: Redis=$ORIG_DB  DB=$ORIG_REDIS"
-        fi
-        
-    # 14 pgweb (Postgres browser UI)
-    # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
-    #    watchdog. Cloudflare free tunnels silently expire — the watchdog
-    #    detects when the URL stops resolving and spins up a fresh one.
-    #    The new URL is written to /tmp/pgweb_url so the keep-alive loop
-    #    can print the current live URL every 5 minutes.
+        echo "DB_TUNNEL=$DB_TUNNEL" >> $GITHUB_ENV
+        echo "DB_HOST=$DB_HOST"     >> $GITHUB_ENV
+        echo "DB_PORT=$DB_PORT"     >> $GITHUB_ENV
+
+        echo "================================="
+        echo " Redis:    Upstash (no tunnel needed)"
+        echo " Postgres: $DB_TUNNEL"
+        echo "================================="
+
+    # 14 Verify both connections work end-to-end
+    - name: Verify Redis + Postgres connections
+      env:
+        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
+      run: |
+        echo "=== Testing Upstash Redis ==="
+        python3 -c "
+import redis
+r = redis.from_url('${UPSTASH_REDIS_URL}')
+pong = r.ping()
+print('✅ Redis ping:', pong)
+queues = ['photo','celery','ai','finalize','default']
+for q in queues:
+    depth = r.llen(q)
+    if depth > 0:
+        print(f'   {q}: {depth} tasks')
+print('   All queues checked')
+"
+
+        echo ""
+        echo "=== Testing Postgres via ngrok ==="
+        PGPASSWORD=admin123 psql \
+          -h "$DB_HOST" \
+          -p "$DB_PORT" \
+          -U postgres \
+          -d event_ai \
+          -c "SELECT COUNT(*) as total_photos FROM photos;" \
+          && echo "✅ Postgres via ngrok working" \
+          || echo "❌ Postgres connection failed"
+
+    # 14.5 Start ngrok watchdog (keeps tunnel alive if it dies)
+    - name: Start ngrok watchdog
+      env:
+        NGROK_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      run: |
+        (
+          while true; do
+            sleep 30
+            if ! pgrep -f "ngrok tcp" >/dev/null 2>&1; then
+              echo "[ngrok watchdog] Dead — restarting at $(date)"
+              ngrok tcp 5432 --log=stdout >> /tmp/ngrok-db.log 2>&1 &
+              sleep 10
+
+              NEW_TUNNEL=$(curl -sf http://localhost:4040/api/tunnels 2>/dev/null \
+                | python3 -c "
+import json,sys
+try:
+    t=json.load(sys.stdin)['tunnels']
+    if t: print(t[0]['public_url'].replace('tcp://',''))
+except: pass
+" 2>/dev/null || true)
+
+              if [ -n "$NEW_TUNNEL" ]; then
+                NEW_HOST=$(echo $NEW_TUNNEL | cut -d: -f1)
+                NEW_PORT=$(echo $NEW_TUNNEL | cut -d: -f2)
+                echo "DB_TUNNEL=$NEW_TUNNEL" >> $GITHUB_ENV
+                echo "DB_HOST=$NEW_HOST"     >> $GITHUB_ENV
+                echo "DB_PORT=$NEW_PORT"     >> $GITHUB_ENV
+                echo "[ngrok watchdog] ✅ New tunnel: $NEW_TUNNEL"
+              else
+                echo "[ngrok watchdog] ❌ Failed to get new tunnel URL"
+              fi
+            fi
+          done
+        ) > /tmp/ngrok-watchdog.log 2>&1 &
+        disown $!
+        echo "✅ ngrok watchdog started (PID=$!)"
+
+    # 15 pgweb (Postgres browser UI)
     - name: Start pgweb (Postgres UI)
       if: ${{ github.event.inputs.enable_db_ui == 'true' }}
       run: |
-        # ── Find the postgres container ──
         if docker inspect event_postgres >/dev/null 2>&1; then
           PG_CONTAINER="event_postgres"
-          echo "Using known container: event_postgres"
         else
           PG_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
             | grep -i postgres | awk '{print $1}' | head -1)
-          echo "Auto-detected container: $PG_CONTAINER"
         fi
 
-        if [ -z "$PG_CONTAINER" ]; then
-          echo "ERROR: No running postgres container found."
-          docker ps --format '{{.Names}}\t{{.Image}}'
-          exit 1
-        fi
-
-        DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER     2>/dev/null || echo "postgres")
-        DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD  2>/dev/null || echo "admin123")
-        DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB        2>/dev/null || echo "event_ai")
+        DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER    2>/dev/null || echo "postgres")
+        DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "admin123")
+        DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB       2>/dev/null || echo "event_ai")
         PG_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PG_CONTAINER" | head -1)
-        echo "Postgres IP: $PG_IP  DB: $DB_NAME  User: $DB_USER"
 
         COMPOSE_NETWORK=$(docker network ls \
           --filter "label=com.docker.compose.project" \
           --format "{{.Name}}" | head -1)
-        echo "Compose network: $COMPOSE_NETWORK"
 
         DB_URL="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
 
-        # Start pgweb on the compose network so it can reach Postgres by IP
         docker rm -f pgweb 2>/dev/null || true
         docker run -d \
           --name pgweb \
@@ -425,9 +446,7 @@ jobs:
           curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
           sleep 2
         done
-        docker logs pgweb --tail=5 2>/dev/null | sed 's/^/  [pgweb] /'
 
-        # ── Start pgweb tunnel (with process alive-check) ──────────────────
         start_pgweb_tunnel() {
           local ATTEMPTS=5
           for attempt in $(seq 1 $ATTEMPTS); do
@@ -439,10 +458,7 @@ jobs:
             local URL=""
             for i in $(seq 1 40); do
               sleep 1
-              if ! kill -0 "$TPID" 2>/dev/null; then
-                echo "  pgweb tunnel attempt $attempt: process died early"
-                break
-              fi
+              kill -0 "$TPID" 2>/dev/null || break
               URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
               [ -n "$URL" ] && break
             done
@@ -452,133 +468,67 @@ jobs:
                 echo "$URL" > /tmp/pgweb_url
                 echo "pgweb tunnel ready: $URL"
                 return 0
-              else
-                echo "  pgweb tunnel attempt $attempt: died after printing URL"
               fi
             fi
-            echo "  pgweb tunnel attempt $attempt failed, retrying in 5s..."
+            echo "  pgweb tunnel attempt $attempt failed"
             sleep 5
           done
-          echo "WARNING: pgweb tunnel failed after $ATTEMPTS attempts" >&2
-          cat /tmp/pgweb-tunnel.log >&2
         }
 
         start_pgweb_tunnel
-
         PGWEB_URL=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
         echo "PGWEB_URL=$PGWEB_URL" >> "$GITHUB_ENV"
+
         echo "================================="
-        echo " Postgres UI (pgweb)"
-        echo " URL:  $PGWEB_URL"
-        echo " No login — direct DB access"
-        echo " DB:   $DB_NAME  User: $DB_USER"
+        echo " pgweb DB UI: $PGWEB_URL"
         echo "================================="
 
-        # ── Background watchdog: restart pgweb container + tunnel if down ──
+        # watchdog
         (
           PGWEB_DB_URL="$DB_URL"
           PGWEB_COMPOSE_NET="${COMPOSE_NETWORK:-host}"
-
           while true; do
             sleep 60
-
-            # 1. Restart pgweb container if HTTP is down
             if ! curl -sf --max-time 5 http://localhost:8081 >/dev/null 2>&1; then
-              echo "[pgweb watchdog] pgweb down — restarting at $(date)"
               docker rm -f pgweb 2>/dev/null || true
               sleep 1
-              docker run -d \
-                --name pgweb \
-                --network "$PGWEB_COMPOSE_NET" \
-                -p 8081:8081 \
-                sosedoff/pgweb \
+              docker run -d --name pgweb --network "$PGWEB_COMPOSE_NET" \
+                -p 8081:8081 sosedoff/pgweb \
                 pgweb --bind=0.0.0.0 --listen=8081 --url="$PGWEB_DB_URL"
-              for i in $(seq 1 15); do
-                sleep 1
-                curl -sf --max-time 3 http://localhost:8081 >/dev/null 2>&1 \
-                  && echo "[pgweb watchdog] pgweb back up" && break
-              done
             fi
-
-            # 2. Restart tunnel if process is dead
             if ! pgrep -f "cloudflared tunnel.*8081" >/dev/null 2>&1; then
-              echo "[pgweb watchdog] Tunnel dead — restarting at $(date)"
-              for wdattempt in 1 2 3; do
-                sleep 2
-                rm -f /tmp/pgweb-tunnel.log
-                cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
-                WD_PID=$!
-                NEW_URL=""
-                for i in $(seq 1 40); do
-                  sleep 1
-                  kill -0 "$WD_PID" 2>/dev/null || break
-                  NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
-                  [ -n "$NEW_URL" ] && break
-                done
-                if [ -n "$NEW_URL" ] && kill -0 "$WD_PID" 2>/dev/null; then
-                  sleep 2
-                  if kill -0 "$WD_PID" 2>/dev/null; then
-                    echo "$NEW_URL" > /tmp/pgweb_url
-                    echo "[pgweb watchdog] New URL: $NEW_URL"
-                    break
-                  fi
-                fi
-                echo "[pgweb watchdog] restart attempt $wdattempt failed"
-              done
-            fi
-
-            # 3. Proactive rotation every 50 min (Cloudflare free tunnel limit)
-            TUNNEL_AGE=$(( $(date +%s) - $(stat -c %Y /tmp/pgweb-tunnel.log 2>/dev/null || echo $(date +%s)) ))
-            if [ "$TUNNEL_AGE" -gt 3000 ]; then
-              echo "[pgweb watchdog] Proactive rotation at $(date)"
-              pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
-              sleep 2
-              rm -f /tmp/pgweb-tunnel.log
               cloudflared tunnel --url http://localhost:8081 > /tmp/pgweb-tunnel.log 2>&1 &
-              ROT_PID=$!
-              NEW_URL=""
-              for i in $(seq 1 40); do
-                sleep 1
-                kill -0 "$ROT_PID" 2>/dev/null || break
-                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/pgweb-tunnel.log | head -1)
-                [ -n "$NEW_URL" ] && break
-              done
-              if [ -n "$NEW_URL" ] && kill -0 "$ROT_PID" 2>/dev/null; then
-                sleep 2
-                kill -0 "$ROT_PID" 2>/dev/null \
-                  && echo "$NEW_URL" > /tmp/pgweb_url \
-                  && echo "[pgweb watchdog] Rotated URL: $NEW_URL"
-              fi
+              sleep 15
+              NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
+                /tmp/pgweb-tunnel.log | head -1)
+              [ -n "$NEW_URL" ] && echo "$NEW_URL" > /tmp/pgweb_url
             fi
           done
         ) > /tmp/pgweb-watchdog.log 2>&1 &
         disown $!
-        echo "pgweb watchdog started (PID=$!) — checks every 60s"
 
-    # 15 MinIO Console tunnel
+    # 16 MinIO Console tunnel
     - name: Start MinIO Console tunnel
       if: ${{ github.event.inputs.enable_minio_console == 'true' }}
       run: |
         cloudflared tunnel --url http://localhost:9001 > /tmp/minio-console-tunnel.log 2>&1 &
         for i in $(seq 1 30); do
           sleep 1
-          MINIO_CONSOLE_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/minio-console-tunnel.log | head -1)
+          MINIO_CONSOLE_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
+            /tmp/minio-console-tunnel.log | head -1)
           [ -n "$MINIO_CONSOLE_URL" ] && break
         done
         echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL" >> "$GITHUB_ENV"
         echo "MinIO Console: $MINIO_CONSOLE_URL"
-        echo " User: minioadmin / minioadmin"
 
-    # 16 Keep-alive loop
-    # Prints all tunnel URLs every 5 min. Reads pgweb URL from /tmp/pgweb_url
-    # so it always shows the current live URL after a watchdog restart.
+    # 17 Keep-alive loop
     - name: Keep preview alive
       if: always()
       env:
-        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
-        SHOW_CELERY_LOGS: ${{ github.event.inputs.show_celery_logs }}
+        PREVIEW_DURATION:  ${{ github.event.inputs.duration_hours || '2' }}
+        SHOW_CELERY_LOGS:  ${{ github.event.inputs.show_celery_logs }}
+        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
       run: |
-        # ── Initial URL summary ───────────────────────────────────────────────
         print_urls() {
           local PGWEB_LIVE
           PGWEB_LIVE=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
@@ -589,10 +539,12 @@ jobs:
           echo " App:          $PREVIEW_URL"
           echo " API docs:     $PREVIEW_URL/api/docs"
           echo " MinIO tunnel: $MINIO_TUNNEL_URL"
-          echo " Redis tunnel: $REDIS_TUNNEL_URL"
-          echo " DB tunnel:    $DB_TUNNEL_URL"
-          [ -n "$PGWEB_LIVE" ]          && echo " pgweb DB UI:  $PGWEB_LIVE"
-          [ -n "$MINIO_CONSOLE_URL" ]   && echo " MinIO UI:     $MINIO_CONSOLE_URL"
+          echo "---------------------------------"
+          echo " 🔌 Colab Connections"
+          echo " Redis:        Upstash (use secret — no tunnel)"
+          echo " Postgres TCP: $DB_TUNNEL"
+          [ -n "$PGWEB_LIVE" ]        && echo " pgweb DB UI:  $PGWEB_LIVE"
+          [ -n "$MINIO_CONSOLE_URL" ] && echo " MinIO UI:     $MINIO_CONSOLE_URL"
           echo "---------------------------------"
           echo " 🔑 Test Accounts"
           echo " Admin → admin@admin.com / 123456  (role: admin)"
@@ -602,17 +554,27 @@ jobs:
 
         print_urls
 
+        # Verify Upstash is receiving tasks from backend
+        python3 -c "
+import redis, os
+r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
+print('Upstash Redis ping:', r.ping())
+for q in ['photo','celery','ai','finalize','default']:
+    d = r.llen(q)
+    if d: print(f'  queue {q}: {d} tasks')
+" 2>/dev/null || true
+
         # Verify admin role
         docker exec event_backend python3 -c "
-        from app.database.db import SessionLocal
-        from app.models.user import User
-        db=SessionLocal()
-        u=db.query(User).filter(User.email=='admin@admin.com').first()
-        print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
-        db.close()
-        " 2>/dev/null || true
+from app.database.db import SessionLocal
+from app.models.user import User
+db=SessionLocal()
+u=db.query(User).filter(User.email=='admin@admin.com').first()
+print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
+db.close()
+" 2>/dev/null || true
 
-        # ── Start log tailing ─────────────────────────────────────────────────
+        # ── Log tailing ──
         CELERY_LOG=/tmp/celery_all.log
         > "$CELERY_LOG"
 
@@ -622,22 +584,21 @@ jobs:
             | sed -u "s/^/[$LABEL] /" >> "$CELERY_LOG" &
         }
 
-        tail_worker event_celery_photo    "PHOTO   "
         tail_worker event_celery_finalize "FINALIZE"
         tail_worker event_celery_ai       "AI      "
         tail_worker event_celery_default  "DEFAULT "
         tail_worker event_celery_beat     "BEAT    "
         tail_worker event_backend         "BACKEND "
         tail_worker event_frontend        "FRONTEND"
+        # NOTE: event_celery_photo is stopped — Colab handles it
 
-        # Tail pgweb watchdog log if it exists (only when enable_db_ui=true)
         if [ -f /tmp/pgweb-watchdog.log ]; then
           tail -f /tmp/pgweb-watchdog.log | sed -u 's/^/[PGWEB-WD] /' >> "$CELERY_LOG" &
         fi
+        tail -f /tmp/ngrok-watchdog.log 2>/dev/null \
+          | sed -u 's/^/[NGROK-WD] /' >> "$CELERY_LOG" &
 
         LOG_OFFSET=0
-
-        # ── Keep-alive loop ───────────────────────────────────────────────────
         SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
         ITERATION=0
 
@@ -651,23 +612,28 @@ jobs:
           echo "[$REM min remaining]  $(date '+%H:%M:%S')"
           echo "──────────────────────────────────────────"
 
-          # Backend health check
           curl -sf http://localhost/api/docs >/dev/null \
             && echo "  ✓ Backend healthy" \
             || echo "  ⚠ WARNING: backend health check failed"
 
-          # ── Print all URLs every 5 minutes ────────────────────────────────
-          # Always reads /tmp/pgweb_url so the watchdog-refreshed URL shows up
           if (( ITERATION % 5 == 0 )); then
             print_urls
           else
-            # Short summary every minute with just the pgweb URL
             PGWEB_LIVE=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
-            echo " App: $PREVIEW_URL"
-            [ -n "$PGWEB_LIVE" ] && echo " pgweb DB UI: $PGWEB_LIVE"
+            echo " App:      $PREVIEW_URL"
+            echo " Postgres: $DB_TUNNEL"
+            [ -n "$PGWEB_LIVE" ] && echo " pgweb: $PGWEB_LIVE"
           fi
 
-          # ── Celery / service logs ─────────────────────────────────────────
+          # Queue depth check every minute
+          python3 -c "
+import redis, os
+r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
+for q in ['photo','celery','ai','finalize']:
+    d = r.llen(q)
+    if d: print(f'  📋 queue {q}: {d} pending tasks')
+" 2>/dev/null || true
+
           if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
             TOTAL_LINES=$(wc -l < "$CELERY_LOG")
             NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
@@ -679,12 +645,11 @@ jobs:
             LOG_OFFSET=$TOTAL_LINES
           fi
 
-          # ── Container health summary every 5 min ─────────────────────────
           if (( ITERATION % 5 == 0 )); then
             echo "--- Container status ---"
             for C in event_backend event_frontend event_celery_photo \
-                     event_celery_finalize event_celery_ai event_celery_default \
-                     event_celery_beat pgweb; do
+                     event_celery_finalize event_celery_ai \
+                     event_celery_default event_celery_beat pgweb; do
               STATUS=$(docker inspect --format='{{.State.Status}}' "$C" 2>/dev/null || echo "not found")
               echo "  $C → $STATUS"
             done
@@ -692,36 +657,36 @@ jobs:
           fi
         done
 
-    # 17 Show logs on failure
+    # 18 Show logs on failure
     - name: Show logs on failure
       if: failure()
       run: |
         echo "===== BACKEND ====="
-        docker compose logs backend  --tail=50
+        docker compose logs backend      --tail=50
         echo "===== FRONTEND ====="
-        docker compose logs frontend --tail=50
+        docker compose logs frontend     --tail=50
         echo "===== NGINX ====="
-        docker compose logs nginx    --tail=50
-        echo "===== CELERY PHOTO ====="
-        docker compose logs celery_photo    --tail=50
+        docker compose logs nginx        --tail=50
         echo "===== CELERY FINALIZE ====="
         docker compose logs celery_finalize --tail=50
         echo "===== CELERY AI ====="
-        docker compose logs celery_ai       --tail=50
+        docker compose logs celery_ai    --tail=50
         echo "===== CELERY DEFAULT ====="
-        docker compose logs celery_default  --tail=50
+        docker compose logs celery_default --tail=50
         echo "===== CELERY BEAT ====="
-        docker compose logs celery_beat     --tail=50
-        cat tunnel-app.log                  || true
-        cat tunnel-minio.log                || true
-        cat /tmp/minio-console-tunnel.log   || true
-        cat /tmp/pgweb-tunnel.log           || true
-        docker logs pgweb 2>/dev/null       || true
+        docker compose logs celery_beat  --tail=50
+        cat tunnel-app.log               || true
+        cat tunnel-minio.log             || true
+        cat /tmp/ngrok-db.log            || true
+        cat /tmp/ngrok-watchdog.log      || true
+        cat /tmp/pgweb-tunnel.log        || true
+        docker logs pgweb 2>/dev/null    || true
 
-    # 18 Cleanup
+    # 19 Cleanup
     - name: Cleanup
       if: always()
       run: |
         pkill cloudflared || true
+        pkill ngrok       || true
         docker compose down -v
         echo "Cleanup complete"
