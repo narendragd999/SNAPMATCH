@@ -239,32 +239,33 @@ jobs:
           fi
           echo "All services ready"
 
-      # ── 10 Inject nginx routes for optional UIs ───────────────────────────────
-      # pgweb and minio-console are NOT separate HTTP tunnels.
-      # They're exposed as sub-paths of the single app tunnel via nginx.
-      #
-      #   APP_URL/pgweb/          → pgweb container on :8081
-      #   APP_URL/minio-console/  → minio on :9001
-      #
-      # We write a file to the runner and copy it into the nginx container,
-      # then reload nginx. This avoids all shell quoting issues with docker exec.
-      # ── 10 Start pgweb and inject nginx routes for optional UIs ─────────────
+      # ── 10 Start pgweb and inject nginx routes for optional UIs ──────────────
       # pgweb and minio-console are NOT separate HTTP tunnels (rustunnel hosted
       # does not support multiple reliable HTTP tunnels). Instead they are served
       # as sub-paths of the single app tunnel via nginx:
       #   APP_URL/pgweb/          -> pgweb:8081
       #   APP_URL/minio-console/  -> minio:9001
-      # The nginx config snippet is generated via Python so nginx $variables
-      # never appear as unindented YAML content (which breaks YAML parsing).
+      #
+      # FIX 1: Nginx container grep uses 'nginx|proxy' to match 'event_proxy'.
+      # FIX 2: Python heredoc written to /tmp/gen_nginx.py first, then executed.
+      #         Bash requires heredoc terminators to be at column 0 — they cannot
+      #         be indented inside if-blocks. Writing to a file sidesteps this.
       - name: Start pgweb and inject nginx routes
         env:
           ENABLE_DB_UI: ${{ github.event.inputs.enable_db_ui }}
           ENABLE_MINIO_CONSOLE: ${{ github.event.inputs.enable_minio_console }}
         run: |
+          # FIX 1: match event_proxy / nginx / any proxy container name
           NGINX_CONTAINER=$(docker ps --format '{{.Names}}' | grep -iE 'nginx|proxy' | head -1)
           echo "Nginx container: ${NGINX_CONTAINER:-NOT FOUND}"
 
-          # ── Start pgweb if requested ──────────────────────────────────────────
+          if [ -z "$NGINX_CONTAINER" ]; then
+            echo "ERROR: could not find nginx/proxy container. Running containers:"
+            docker ps --format '{{.Names}}'
+            exit 1
+          fi
+
+          # ── Start pgweb if requested ────────────────────────────────────────
           if [ "$ENABLE_DB_UI" = "true" ]; then
             echo "Starting pgweb..."
             if docker inspect event_postgres >/dev/null 2>&1; then
@@ -290,7 +291,7 @@ jobs:
             done
           fi
 
-          # ── Inject nginx extras ───────────────────────────────────────────────
+          # ── Inject nginx extras ─────────────────────────────────────────────
           if [ "$ENABLE_DB_UI" = "true" ] || [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
             MINIO_IP="minio"
             if [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
@@ -300,46 +301,46 @@ jobs:
               MINIO_IP=${MINIO_IP:-minio}
             fi
 
-            # Write Python script to a file first — heredoc delimiter MUST be
-            # at column 0 in bash, so we avoid inline heredoc inside if-blocks.
+            # FIX 2: Write Python to a file so the PYEOF terminator can sit at
+            # column 0 — bash heredoc terminators MUST NOT be indented.
             cat > /tmp/gen_nginx.py << 'PYEOF'
-            import os
-            enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
-            enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
-            minio_ip     = os.environ.get("MINIO_IP", "minio")
-            lines = [
-                "# GHA preview extras",
-                "server {",
-                "    listen 80;",
-                "    server_name _;",
-            ]
-            if enable_db:
-                lines += [
-                    "    location /pgweb/ {",
-                    "        proxy_pass         http://127.0.0.1:8081/;",
-                    "        proxy_set_header   Host $host;",
-                    "        proxy_set_header   X-Real-IP $remote_addr;",
-                    "        proxy_http_version 1.1;",
-                    "        proxy_set_header   Upgrade $http_upgrade;",
-                    '        proxy_set_header   Connection "upgrade";',
-                    "    }",
-                ]
-            if enable_minio:
-                lines += [
-                    "    location /minio-console/ {",
-                    f"        proxy_pass         http://{minio_ip}:9001/;",
-                    "        proxy_set_header   Host $host;",
-                    "        proxy_set_header   X-Real-IP $remote_addr;",
-                    "        proxy_http_version 1.1;",
-                    "    }",
-                ]
-            lines.append("}")
-            txt = "\n".join(lines) + "\n"
-            with open("/tmp/gha-extras.conf", "w") as f:
-                f.write(txt)
-            print("nginx snippet written:")
-            print(txt)
-            PYEOF
+import os
+enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
+enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
+minio_ip     = os.environ.get("MINIO_IP", "minio")
+lines = [
+    "# GHA preview extras",
+    "server {",
+    "    listen 80;",
+    "    server_name _;",
+]
+if enable_db:
+    lines += [
+        "    location /pgweb/ {",
+        "        proxy_pass         http://127.0.0.1:8081/;",
+        "        proxy_set_header   Host $host;",
+        "        proxy_set_header   X-Real-IP $remote_addr;",
+        "        proxy_http_version 1.1;",
+        "        proxy_set_header   Upgrade $http_upgrade;",
+        '        proxy_set_header   Connection "upgrade";',
+        "    }",
+    ]
+if enable_minio:
+    lines += [
+        "    location /minio-console/ {",
+        f"        proxy_pass         http://{minio_ip}:9001/;",
+        "        proxy_set_header   Host $host;",
+        "        proxy_set_header   X-Real-IP $remote_addr;",
+        "        proxy_http_version 1.1;",
+        "    }",
+    ]
+lines.append("}")
+txt = "\n".join(lines) + "\n"
+with open("/tmp/gha-extras.conf", "w") as f:
+    f.write(txt)
+print("nginx snippet written:")
+print(txt)
+PYEOF
 
             MINIO_IP="$MINIO_IP" python3 /tmp/gen_nginx.py
 
@@ -357,7 +358,7 @@ jobs:
       # ── 11 Seed default users ─────────────────────────────────────────────────
       - name: Seed default users
         run: |
-          echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
+          echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsKCMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
 
       # ── 12 Start all tunnels via rustunnel ────────────────────────────────────
       # ONE HTTP tunnel → nginx on :80.  TWO TCP tunnels → Redis + Postgres.
@@ -531,7 +532,14 @@ jobs:
             echo "================================="
           }
 
-          print_urls
+          # Guard: if tunnels never came up, warn but continue the keep-alive
+          # so logs remain accessible for debugging (step runs with if: always())
+          if [ -z "$PREVIEW_URL" ]; then
+            echo "WARNING: PREVIEW_URL is empty — tunnels did not start correctly."
+            echo "Check Step 12 logs for rustunnel errors."
+          else
+            print_urls
+          fi
 
           # Verify admin user seeded correctly
           docker exec event_backend python3 -c "
@@ -557,7 +565,13 @@ jobs:
           tail_worker event_celery_beat     "BEAT    "
           tail_worker event_backend         "BACKEND "
           tail_worker event_frontend        "FRONTEND"
-          tail -f /tmp/rustunnel.log | sed -u 's/^/[RUSTUNNEL] /' >> "$CELERY_LOG" &
+
+          # FIX 3: only tail rustunnel log if it exists
+          if [ -f /tmp/rustunnel.log ]; then
+            tail -f /tmp/rustunnel.log | sed -u 's/^/[RUSTUNNEL] /' >> "$CELERY_LOG" &
+          else
+            echo "WARNING: /tmp/rustunnel.log not found — rustunnel may not have started"
+          fi
 
           LOG_OFFSET=0
           SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
@@ -577,9 +591,16 @@ jobs:
               && echo "  ✓ Backend healthy" \
               || echo "  ⚠ WARNING: backend health check failed"
 
-            # Watchdog: restart rustunnel if it dies
+            # FIX 4: safe rustunnel watchdog — guard against missing PID file
             RT_PID=$(cat /tmp/rustunnel.pid 2>/dev/null)
-            if ! kill -0 "$RT_PID" 2>/dev/null; then
+            if [ -z "$RT_PID" ]; then
+              echo "  ⚠ rustunnel PID file missing — attempting restart..."
+              rustunnel start --config /tmp/rustunnel-config.yml \
+                >> /tmp/rustunnel.log 2>&1 &
+              echo $! > /tmp/rustunnel.pid
+              sleep 15
+              echo "  rustunnel started (pid=$(cat /tmp/rustunnel.pid))"
+            elif ! kill -0 "$RT_PID" 2>/dev/null; then
               echo "  ⚠ rustunnel died — restarting..."
               rustunnel start --config /tmp/rustunnel-config.yml \
                 >> /tmp/rustunnel.log 2>&1 &
@@ -593,9 +614,9 @@ jobs:
             if (( ITERATION % 5 == 0 )); then
               print_urls
             else
-              echo "  App:      $PREVIEW_URL"
-              echo "  Redis:    edge.rustunnel.com:$REDIS_PORT"
-              echo "  Postgres: edge.rustunnel.com:$PG_PORT"
+              echo "  App:      ${PREVIEW_URL:-NOT SET}"
+              echo "  Redis:    edge.rustunnel.com:${REDIS_PORT:-NOT SET}"
+              echo "  Postgres: edge.rustunnel.com:${PG_PORT:-NOT SET}"
             fi
 
             if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
