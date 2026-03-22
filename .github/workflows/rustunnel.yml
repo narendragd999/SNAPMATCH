@@ -1,4 +1,4 @@
-name: SnapFind Rustunnel Preview
+name: SnapFind Preview
 
 on:
   workflow_dispatch:
@@ -62,10 +62,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # ── 4 Install rustunnel client ────────────────────────────────────────────
-      # rustunnel exposes ALL ports through one connection to edge.rustunnel.com:
-      #   HTTP tunnels → App, MinIO, MinIO Console, pgweb  (public HTTPS URLs)
-      #   TCP  tunnels → Redis, Postgres                    (native protocol)
-      # No cloudflared. No Python proxy scripts. No bore. Just one binary.
       - name: Install rustunnel client
         run: |
           RT_VERSION=$(curl -sI https://github.com/joaoh82/rustunnel/releases/latest \
@@ -81,8 +77,6 @@ jobs:
       # ── 5 Write rustunnel config ──────────────────────────────────────────────
       - name: Write rustunnel config
         run: |
-          # Build tunnel list — always include core tunnels
-          # Conditionally add pgweb and minio-console based on inputs
           cat > /tmp/rustunnel-config.yml << EOF
           server:     edge.rustunnel.com:4040
           auth_token: ${{ secrets.RUSTUNNEL_TOKEN }}
@@ -107,7 +101,6 @@ jobs:
               local_port: 5432
           EOF
 
-          # Append pgweb tunnel if enabled
           if [ "${{ github.event.inputs.enable_db_ui }}" = "true" ]; then
             cat >> /tmp/rustunnel-config.yml << EOF
 
@@ -118,7 +111,6 @@ jobs:
           EOF
           fi
 
-          # Append minio console tunnel if enabled
           if [ "${{ github.event.inputs.enable_minio_console }}" = "true" ]; then
             cat >> /tmp/rustunnel-config.yml << EOF
 
@@ -217,9 +209,9 @@ jobs:
             PG_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
               | grep -i postgres | awk '{print $1}' | head -1)
           fi
-          DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER     2>/dev/null || echo "postgres")
-          DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD  2>/dev/null || echo "admin123")
-          DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB        2>/dev/null || echo "event_ai")
+          DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER    2>/dev/null || echo "postgres")
+          DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "admin123")
+          DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB       2>/dev/null || echo "event_ai")
           PG_IP=$(docker inspect \
             -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
             "$PG_CONTAINER" | head -1)
@@ -247,13 +239,9 @@ jobs:
           echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
 
       # ── 11 Start all tunnels via rustunnel ────────────────────────────────────
-      # One command exposes everything:
-      #   App       → https://snapfind-app.edge.rustunnel.com
-      #   MinIO     → https://snapfind-minio.edge.rustunnel.com
-      #   pgweb     → https://snapfind-pgweb.edge.rustunnel.com      (if enabled)
-      #   MinIO UI  → https://snapfind-minio-console.edge.rustunnel.com (if enabled)
-      #   Redis     → edge.rustunnel.com:20000  (native TCP)
-      #   Postgres  → edge.rustunnel.com:20001  (native TCP)
+      # rustunnel log format:
+      #   http tunnel app → https://snapfind-app.edge.rustunnel.com
+      #   tcp tunnel redis → tcp://edge.rustunnel.com:20000
       - name: Start all tunnels via rustunnel
         env:
           RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
@@ -262,67 +250,72 @@ jobs:
             > /tmp/rustunnel.log 2>&1 &
           echo $! > /tmp/rustunnel.pid
 
-          # Wait for all tunnels to be established
+          # ── Wait up to 120s, print raw log every 15s ─────────────────────────
           echo "Waiting for rustunnel tunnels..."
-          for i in $(seq 1 60); do
-            sleep 2
+          for i in $(seq 1 8); do
+            sleep 15
 
-            # Parse HTTP tunnel URLs from log
-            APP_URL=$(grep -oP 'app.*https://\S+\.edge\.rustunnel\.com' \
-              /tmp/rustunnel.log | grep -oP 'https://\S+' | head -1)
-            MINIO_URL=$(grep -oP 'minio.*https://\S+\.edge\.rustunnel\.com' \
-              /tmp/rustunnel.log | grep -oP 'https://\S+' | head -1)
+            echo ""
+            echo "===== rustunnel raw log (${i}×15s) ====="
+            cat /tmp/rustunnel.log
+            echo "===== end log ====="
 
-            # Parse TCP tunnel ports from log
-            # rustunnel prints: "tcp tunnel  →  tcp://edge.rustunnel.com:PORT"
-            REDIS_PORT=$(grep -oP 'redis.*tcp://edge\.rustunnel\.com:\K[0-9]+' \
-              /tmp/rustunnel.log | head -1)
-            PG_PORT=$(grep -oP 'postgres.*tcp://edge\.rustunnel\.com:\K[0-9]+' \
-              /tmp/rustunnel.log | head -1)
+            # ── Bulletproof parsing — extract ALL URLs and ports first ─────────
+            ALL_URLS=$(grep -oP 'https://\S+\.edge\.rustunnel\.com' /tmp/rustunnel.log)
+            ALL_PORTS=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' /tmp/rustunnel.log)
 
-            # Check if all core tunnels are up
-            if [ -n "$APP_URL" ] && [ -n "$MINIO_URL" ] \
-               && [ -n "$REDIS_PORT" ] && [ -n "$PG_PORT" ]; then
+            APP_URL=$(echo "$ALL_URLS"  | grep 'snapfind-app'           | head -1)
+            MINIO_URL=$(echo "$ALL_URLS" | grep 'snapfind-minio' | grep -v 'console' | head -1)
+            REDIS_PORT=$(echo "$ALL_PORTS" | sed -n '1p')
+            PG_PORT=$(echo "$ALL_PORTS"    | sed -n '2p')
+
+            echo "  Parsed → APP=$APP_URL  MINIO=$MINIO_URL  REDIS_PORT=$REDIS_PORT  PG_PORT=$PG_PORT"
+
+            if [ -n "$APP_URL" ] && [ -n "$REDIS_PORT" ] && [ -n "$PG_PORT" ]; then
               echo "All core tunnels established!"
               break
             fi
-
-            echo "  attempt $i — waiting for tunnels..."
           done
 
-          # Re-parse all values
-          APP_URL=$(grep -oP 'https://snapfind-app\S*\.edge\.rustunnel\.com' \
-            /tmp/rustunnel.log | head -1)
-          MINIO_URL=$(grep -oP 'https://snapfind-minio[^-]\S*\.edge\.rustunnel\.com' \
-            /tmp/rustunnel.log | head -1)
-          PGWEB_URL=$(grep -oP 'https://snapfind-pgweb\S*\.edge\.rustunnel\.com' \
-            /tmp/rustunnel.log | head -1)
-          MINIO_CONSOLE_URL=$(grep -oP 'https://snapfind-minio-console\S*\.edge\.rustunnel\.com' \
-            /tmp/rustunnel.log | head -1)
-          REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-            /tmp/rustunnel.log | sed -n '1p')
-          PG_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-            /tmp/rustunnel.log | sed -n '2p')
+          # ── Final parse after wait loop ───────────────────────────────────────
+          echo ""
+          echo "===== FINAL rustunnel.log ====="
+          cat /tmp/rustunnel.log
+          echo "===== END ====="
 
-          # Fail if core tunnels missing
+          ALL_URLS=$(grep -oP 'https://\S+\.edge\.rustunnel\.com' /tmp/rustunnel.log)
+          ALL_PORTS=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' /tmp/rustunnel.log)
+
+          echo "All HTTPS URLs: $ALL_URLS"
+          echo "All TCP ports:  $ALL_PORTS"
+
+          APP_URL=$(echo "$ALL_URLS"          | grep 'snapfind-app'     | head -1)
+          MINIO_URL=$(echo "$ALL_URLS"         | grep 'snapfind-minio'  | grep -v 'console' | head -1)
+          PGWEB_URL=$(echo "$ALL_URLS"         | grep 'snapfind-pgweb'  | head -1)
+          MINIO_CONSOLE_URL=$(echo "$ALL_URLS" | grep 'minio-console'   | head -1)
+          REDIS_PORT=$(echo "$ALL_PORTS"       | sed -n '1p')
+          PG_PORT=$(echo "$ALL_PORTS"          | sed -n '2p')
+
+          # ── Fail loudly if core tunnels missing ───────────────────────────────
           if [ -z "$APP_URL" ] || [ -z "$REDIS_PORT" ] || [ -z "$PG_PORT" ]; then
+            echo ""
             echo "ERROR: core tunnels failed to establish"
-            cat /tmp/rustunnel.log
+            echo "rustunnel process alive: $(kill -0 $(cat /tmp/rustunnel.pid 2>/dev/null) 2>/dev/null && echo YES || echo NO)"
             exit 1
           fi
 
-          # Export to env
-          echo "PREVIEW_URL=$APP_URL"                   >> "$GITHUB_ENV"
-          echo "MINIO_TUNNEL_URL=$MINIO_URL"            >> "$GITHUB_ENV"
-          echo "PGWEB_URL=$PGWEB_URL"                   >> "$GITHUB_ENV"
-          echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL"   >> "$GITHUB_ENV"
-          echo "REDIS_PORT=$REDIS_PORT"                 >> "$GITHUB_ENV"
-          echo "PG_PORT=$PG_PORT"                       >> "$GITHUB_ENV"
+          # ── Export to GITHUB_ENV ──────────────────────────────────────────────
+          echo "PREVIEW_URL=$APP_URL"                 >> "$GITHUB_ENV"
+          echo "MINIO_TUNNEL_URL=$MINIO_URL"          >> "$GITHUB_ENV"
+          echo "PGWEB_URL=$PGWEB_URL"                 >> "$GITHUB_ENV"
+          echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL" >> "$GITHUB_ENV"
+          echo "REDIS_PORT=$REDIS_PORT"               >> "$GITHUB_ENV"
+          echo "PG_PORT=$PG_PORT"                     >> "$GITHUB_ENV"
 
           REDIS_URL="redis://edge.rustunnel.com:${REDIS_PORT}/0"
           DB_URL="postgresql://postgres:admin123@edge.rustunnel.com:${PG_PORT}/event_ai"
-          echo "REDIS_URL=$REDIS_URL"                   >> "$GITHUB_ENV"
-          echo "DB_URL=$DB_URL"                         >> "$GITHUB_ENV"
+          echo "REDIS_URL=$REDIS_URL" >> "$GITHUB_ENV"
+          echo "DB_URL=$DB_URL"       >> "$GITHUB_ENV"
 
           echo "================================="
           echo "  SnapFind Preview — ALL TUNNELS LIVE"
@@ -330,13 +323,13 @@ jobs:
           echo "  App:          $APP_URL"
           echo "  API docs:     $APP_URL/api/docs"
           echo "  MinIO:        $MINIO_URL"
-          [ -n "$PGWEB_URL" ]        && echo "  pgweb DB UI:  $PGWEB_URL"
+          [ -n "$PGWEB_URL" ]         && echo "  pgweb DB UI:  $PGWEB_URL"
           [ -n "$MINIO_CONSOLE_URL" ] && echo "  MinIO UI:     $MINIO_CONSOLE_URL"
           echo "---------------------------------"
           echo "  Redis:    edge.rustunnel.com:$REDIS_PORT"
           echo "  Postgres: edge.rustunnel.com:$PG_PORT"
           echo "---------------------------------"
-          echo "  Colab GPU worker env vars:"
+          echo "  Colab GPU worker:"
           echo "  CELERY_BROKER_URL = \"$REDIS_URL\""
           echo "  DATABASE_URL      = \"$DB_URL\""
           echo "================================="
@@ -396,7 +389,6 @@ jobs:
 
           print_urls
 
-          # Verify admin role
           docker exec event_backend python3 -c "
           from app.database.db import SessionLocal
           from app.models.user import User
@@ -406,7 +398,6 @@ jobs:
           db.close()
           " 2>/dev/null || true
 
-          # Tail all service logs
           CELERY_LOG=/tmp/celery_all.log
           > "$CELERY_LOG"
           tail_worker() {
@@ -420,8 +411,6 @@ jobs:
           tail_worker event_celery_beat     "BEAT    "
           tail_worker event_backend         "BACKEND "
           tail_worker event_frontend        "FRONTEND"
-
-          # Tail rustunnel log
           tail -f /tmp/rustunnel.log | sed -u 's/^/[RUSTUNNEL] /' >> "$CELERY_LOG" &
 
           LOG_OFFSET=0
@@ -438,24 +427,23 @@ jobs:
             echo "[$REM min remaining] $(date '+%H:%M:%S')"
             echo "──────────────────────────────────────────"
 
-            # Backend health check
             curl -sf http://localhost/api/docs >/dev/null \
               && echo "  ✓ Backend healthy" \
               || echo "  ⚠ WARNING: backend health check failed"
 
-            # Rustunnel process check + auto-restart if dead
-            if ! kill -0 "$(cat /tmp/rustunnel.pid 2>/dev/null)" 2>/dev/null; then
+            # rustunnel auto-restart if process died
+            RT_PID=$(cat /tmp/rustunnel.pid 2>/dev/null)
+            if ! kill -0 "$RT_PID" 2>/dev/null; then
               echo "  ⚠ rustunnel died — restarting..."
               rustunnel start --config /tmp/rustunnel-config.yml \
                 >> /tmp/rustunnel.log 2>&1 &
               echo $! > /tmp/rustunnel.pid
-              sleep 10
+              sleep 15
               echo "  rustunnel restarted (pid=$(cat /tmp/rustunnel.pid))"
             else
-              echo "  ✓ rustunnel healthy (pid=$(cat /tmp/rustunnel.pid))"
+              echo "  ✓ rustunnel healthy (pid=$RT_PID)"
             fi
 
-            # Print full URLs every 5 min
             if (( ITERATION % 5 == 0 )); then
               print_urls
             else
@@ -464,7 +452,6 @@ jobs:
               echo "  Postgres: edge.rustunnel.com:$PG_PORT"
             fi
 
-            # Service logs
             if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
               TOTAL_LINES=$(wc -l < "$CELERY_LOG")
               NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
@@ -476,7 +463,6 @@ jobs:
               LOG_OFFSET=$TOTAL_LINES
             fi
 
-            # Container status every 5 min
             if (( ITERATION % 5 == 0 )); then
               echo "--- Container status ---"
               for C in event_backend event_frontend event_celery_photo \
@@ -501,7 +487,7 @@ jobs:
           echo "===== FRONTEND ====="
           docker compose logs frontend --tail=50
           echo "===== NGINX ====="
-          docker compose logs nginx --tail=50
+          docker compose logs nginx --tail=30
           echo "===== CELERY PHOTO ====="
           docker compose logs celery_photo --tail=30
           echo "===== CELERY FINALIZE ====="
