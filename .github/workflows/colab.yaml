@@ -51,7 +51,7 @@ jobs:
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
         df -h
 
-    # 2.5 Force clean (optional)
+    # 2.5 Force clean
     - name: Force clean Docker cache (only when requested)
       if: ${{ github.event.inputs.force_clean == 'true' }}
       run: |
@@ -78,19 +78,17 @@ jobs:
     - name: Install proxy dependencies
       run: pip install flask redis psycopg2-binary -q
 
-    # 6 Write GHA .env
+    # 6 Write GHA .env — local Redis (no Upstash, no external Redis)
     - name: Write GHA .env
-      env:
-        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
       run: |
-        cat > .env << EOF
+        cat > .env << 'EOF'
         SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
         ENV=prod
 
-        # Redis — Upstash cloud (accessible from GHA + Colab without any tunnel)
-        REDIS_URL=${UPSTASH_REDIS_URL}
-        CELERY_BROKER_URL=${UPSTASH_REDIS_URL}
-        CELERY_RESULT_BACKEND=${UPSTASH_REDIS_URL}
+        # Redis — local Docker Redis (Colab connects via Pinggy TCP tunnel)
+        REDIS_URL=redis://redis:6379/0
+        CELERY_BROKER_URL=redis://redis:6379/0
+        CELERY_RESULT_BACKEND=redis://redis:6379/0
 
         # Storage
         STORAGE_BACKEND=minio
@@ -125,8 +123,8 @@ jobs:
         DEFAULT_EVENT_PIN=0000
         EOF
         sed -i 's/^[[:space:]]*//' .env
-        echo "--- .env written (secrets hidden) ---"
-        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY | grep -v TOKEN | grep -v REDIS
+        echo "--- .env written ---"
+        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY | grep -v TOKEN
 
     # 7 Build and start Docker stack
     - name: Start Docker containers
@@ -177,13 +175,12 @@ jobs:
       run: |
         docker stop event_celery_photo || true
         echo "✅ celery_photo stopped — Colab GPU worker will consume photo queue"
-        echo "--- Remaining celery workers ---"
         docker ps --format '{{.Names}}\t{{.Status}}' | grep celery || true
 
     # 9 Seed default users
     - name: Seed default users
       run: |
-        echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
+        echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIV0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
 
     # 10 Install cloudflared
     - name: Install Cloudflare tunnel
@@ -263,40 +260,54 @@ jobs:
           docker compose up -d --no-deps --force-recreate backend
 
         for i in {1..30}; do
-          curl -sf http://localhost:8000/docs >/dev/null && echo "Backend ready" && break
+          curl -sf http://localhost:8000/docs >/dev/null \
+            && echo "Backend ready at attempt $i" && break
+          echo "  waiting for backend... ($i)"
           sleep 2
         done
+
+        # Restart celery workers so they pick up recreated backend network
+        for WORKER in event_celery_finalize event_celery_ai \
+                      event_celery_default event_celery_beat; do
+          docker restart "$WORKER" 2>/dev/null || true
+          echo "  restarted $WORKER"
+        done
+
+        # Re-stop celery_photo (recreate may have restarted it)
+        docker stop event_celery_photo || true
+        echo "✅ celery_photo re-stopped after backend recreate"
 
         BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
         LIVE=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
         if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
           echo "MINIO_PRESIGN_ENDPOINT confirmed: $LIVE"
         else
-          echo "ERROR: var not found. Got: '$LIVE', Expected: '$MINIO_TUNNEL_URL'"
+          echo "ERROR: Got: '$LIVE', Expected: '$MINIO_TUNNEL_URL'"
           exit 1
         fi
 
-    # 13 Verify Upstash Redis from GHA
-    - name: Verify Upstash Redis
-      env:
-        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
+    # 13 Start Redis + Postgres TCP tunnels via Pinggy (no auth, no card)
+    - name: Start Redis + Postgres TCP tunnels (Pinggy)
       run: |
-        echo "=== Verifying Upstash Redis ==="
-        python3 -c "
-        import redis
-        r = redis.from_url('${UPSTASH_REDIS_URL}')
-        print('✅ Upstash Redis ping:', r.ping())
-        for q in ['photo','celery','ai','finalize','default']:
-            d = r.llen(q)
-            if d: print(f'   queue {q}: {d} tasks')
-        print('   All queues empty — ready for tasks')
-        " || { echo "❌ Upstash Redis failed — check UPSTASH_REDIS_URL secret"; exit 1; }
+        echo "Starting Pinggy TCP tunnels..."
 
-    # 14 Start Postgres TCP tunnel via Pinggy (no auth, no card)
-    - name: Start Postgres TCP tunnel (Pinggy)
-      run: |
-        echo "Starting Pinggy TCP tunnel for Postgres..."
+        # ── Redis tunnel ──
+        ssh -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -o ExitOnForwardFailure=yes \
+            -o LogLevel=VERBOSE \
+            -R 0:localhost:6379 \
+            -p 443 \
+            tcp@a.pinggy.io \
+            > /tmp/pinggy-redis.log 2>&1 &
+        REDIS_PID=$!
+        echo "Redis tunnel PID: $REDIS_PID"
 
+        # Small delay so Pinggy assigns different ports
+        sleep 4
+
+        # ── Postgres tunnel ──
         ssh -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=10 \
@@ -306,97 +317,181 @@ jobs:
             -p 443 \
             tcp@a.pinggy.io \
             > /tmp/pinggy-db.log 2>&1 &
-        PINGGY_PID=$!
-        echo "Pinggy PID: $PINGGY_PID"
+        DB_PID=$!
+        echo "Postgres tunnel PID: $DB_PID"
 
-        # Wait up to 40s for tunnel URL
+        # ── Wait up to 40s for both URLs ──
         for i in $(seq 1 40); do
           sleep 1
-          if ! kill -0 "$PINGGY_PID" 2>/dev/null; then
-            echo "❌ Pinggy process died"
+
+          REDIS_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
+            /tmp/pinggy-redis.log | head -1 | sed 's|tcp://||')
+          DB_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
+            /tmp/pinggy-db.log | head -1 | sed 's|tcp://||')
+
+          if [ -n "$REDIS_TUNNEL" ] && [ -n "$DB_TUNNEL" ]; then
+            echo "✅ Both tunnels ready at attempt $i"
+            break
+          fi
+
+          # Check processes still alive
+          if ! kill -0 "$REDIS_PID" 2>/dev/null; then
+            echo "❌ Redis tunnel process died"
+            cat /tmp/pinggy-redis.log
+            exit 1
+          fi
+          if ! kill -0 "$DB_PID" 2>/dev/null; then
+            echo "❌ Postgres tunnel process died"
             cat /tmp/pinggy-db.log
             exit 1
           fi
-          DB_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' /tmp/pinggy-db.log \
-            | head -1 | sed 's|tcp://||')
-          if [ -n "$DB_TUNNEL" ]; then
-            echo "✅ Pinggy tunnel ready at attempt $i: $DB_TUNNEL"
-            break
-          fi
+
+          echo "  waiting... redis=$REDIS_TUNNEL db=$DB_TUNNEL ($i)"
         done
 
-        if [ -z "$DB_TUNNEL" ]; then
-          echo "❌ Pinggy tunnel failed to start"
-          echo "=== Pinggy log ==="
-          cat /tmp/pinggy-db.log
+        if [ -z "$REDIS_TUNNEL" ] || [ -z "$DB_TUNNEL" ]; then
+          echo "❌ One or both tunnels failed"
+          echo "=== Redis log ===" && cat /tmp/pinggy-redis.log
+          echo "=== DB log ===" && cat /tmp/pinggy-db.log
           exit 1
         fi
 
-        DB_HOST=$(echo $DB_TUNNEL | cut -d: -f1)
-        DB_PORT=$(echo $DB_TUNNEL | cut -d: -f2)
+        REDIS_HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
+        REDIS_PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
+        DB_HOST=$(echo $DB_TUNNEL    | cut -d: -f1)
+        DB_PORT=$(echo $DB_TUNNEL    | cut -d: -f2)
 
-        echo "DB_TUNNEL=$DB_TUNNEL" >> $GITHUB_ENV
-        echo "DB_HOST=$DB_HOST"     >> $GITHUB_ENV
-        echo "DB_PORT=$DB_PORT"     >> $GITHUB_ENV
+        echo "REDIS_TUNNEL=$REDIS_TUNNEL" >> $GITHUB_ENV
+        echo "REDIS_HOST=$REDIS_HOST"     >> $GITHUB_ENV
+        echo "REDIS_PORT=$REDIS_PORT"     >> $GITHUB_ENV
+        echo "DB_TUNNEL=$DB_TUNNEL"       >> $GITHUB_ENV
+        echo "DB_HOST=$DB_HOST"           >> $GITHUB_ENV
+        echo "DB_PORT=$DB_PORT"           >> $GITHUB_ENV
 
         echo "================================="
-        echo " Redis:    Upstash (no tunnel)"
-        echo " Postgres: tcp://$DB_TUNNEL"
+        echo " Redis TCP:    $REDIS_TUNNEL"
+        echo " Postgres TCP: $DB_TUNNEL"
         echo "================================="
 
-    # 15 Verify Postgres via Pinggy tunnel
-    - name: Verify Postgres via Pinggy
+    # 14 Verify tunnels + auto-fix swap
+    - name: Verify tunnels + auto-fix port swap
       run: |
-        echo "=== Testing Postgres via Pinggy ==="
-        for i in $(seq 1 10); do
+        echo "=== Verifying Redis tunnel ==="
+        REDIS_RESP=$(docker exec event_redis \
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null || true)
+        echo "Redis response: '$REDIS_RESP'"
+
+        echo "=== Verifying Postgres tunnel ==="
+        PG_OK=false
+        for i in $(seq 1 5); do
           PGPASSWORD=admin123 psql \
-            -h "$DB_HOST" \
-            -p "$DB_PORT" \
-            -U postgres \
-            -d event_ai \
-            -c "SELECT COUNT(*) as total_photos FROM photos;" \
-            && echo "✅ Postgres via Pinggy working" \
-            && break \
-            || echo "  attempt $i failed, retrying..."
+            -h "$DB_HOST" -p "$DB_PORT" \
+            -U postgres -d event_ai \
+            -c "SELECT 1;" >/dev/null 2>&1 \
+            && PG_OK=true && break
           sleep 3
         done
+        $PG_OK && echo "✅ Postgres tunnel working" || echo "⚠️ Postgres tunnel check failed"
 
-    # 15.5 Start Pinggy watchdog (restarts if tunnel dies or rotates after 60min)
+        # ── Auto-detect and fix port swap ──
+        if echo "$REDIS_RESP" | grep -q "PONG"; then
+          echo "✅ Redis confirmed on port $REDIS_PORT"
+        else
+          echo "⚠️  Redis not responding — checking if ports are swapped..."
+          SWAP_RESP=$(docker exec event_redis \
+            redis-cli -h "$DB_HOST" -p "$DB_PORT" PING 2>/dev/null || true)
+          if echo "$SWAP_RESP" | grep -q "PONG"; then
+            echo "🔄 Ports swapped — fixing..."
+            ORIG_REDIS=$REDIS_TUNNEL
+            ORIG_DB=$DB_TUNNEL
+            echo "REDIS_TUNNEL=$ORIG_DB"                       >> $GITHUB_ENV
+            echo "REDIS_HOST=$(echo $ORIG_DB    | cut -d: -f1)" >> $GITHUB_ENV
+            echo "REDIS_PORT=$(echo $ORIG_DB    | cut -d: -f2)" >> $GITHUB_ENV
+            echo "DB_TUNNEL=$ORIG_REDIS"                        >> $GITHUB_ENV
+            echo "DB_HOST=$(echo $ORIG_REDIS    | cut -d: -f1)" >> $GITHUB_ENV
+            echo "DB_PORT=$(echo $ORIG_REDIS    | cut -d: -f2)" >> $GITHUB_ENV
+            echo "✅ Swapped: Redis=$ORIG_DB  Postgres=$ORIG_REDIS"
+          else
+            echo "⚠️ Could not confirm Redis on either port — tunnel may need more time"
+          fi
+        fi
+
+        echo ""
+        echo "================================="
+        echo " Final tunnel assignments:"
+        echo " Redis:    $REDIS_TUNNEL"
+        echo " Postgres: $DB_TUNNEL"
+        echo "================================="
+
+    # 14.5 Test Redis + Postgres internally
+    - name: Test Redis + Postgres internally
+      run: |
+        echo "=== Internal Redis test ==="
+        docker exec event_redis redis-cli ping
+
+        echo "=== Internal Postgres test ==="
+        docker exec event_postgres pg_isready
+
+    # 15 Start Pinggy watchdog
     - name: Start Pinggy watchdog
       run: |
         (
           while true; do
             sleep 30
 
-            if ! pgrep -f "ssh.*pinggy" >/dev/null 2>&1; then
-              echo "[pinggy watchdog] Tunnel dead — restarting at $(date)"
-
+            # ── Redis tunnel watchdog ──
+            if ! pgrep -f "ssh.*6379.*pinggy\|pinggy.*6379" >/dev/null 2>&1 && \
+               ! grep -q "tcp://" /tmp/pinggy-redis.log 2>/dev/null; then
+              : # still starting
+            elif ! kill -0 $(pgrep -f "ssh.*pinggy" | head -1) 2>/dev/null || \
+                 ! docker exec event_redis redis-cli \
+                   -h "$REDIS_HOST" -p "$REDIS_PORT" \
+                   PING 2>/dev/null | grep -q "PONG"; then
+              echo "[pinggy watchdog] Redis tunnel dead — restarting at $(date)"
+              pkill -f "ssh.*6379" 2>/dev/null || true
+              sleep 2
               ssh -o StrictHostKeyChecking=no \
                   -o ServerAliveInterval=30 \
-                  -o ServerAliveCountMax=10 \
                   -o ExitOnForwardFailure=yes \
-                  -R 0:localhost:5432 \
-                  -p 443 \
+                  -R 0:localhost:6379 -p 443 \
                   tcp@a.pinggy.io \
-                  >> /tmp/pinggy-db.log 2>&1 &
-
-              sleep 15
-
-              NEW_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' /tmp/pinggy-db.log \
-                | tail -1 | sed 's|tcp://||')
-
-              if [ -n "$NEW_TUNNEL" ]; then
-                NEW_HOST=$(echo $NEW_TUNNEL | cut -d: -f1)
-                NEW_PORT=$(echo $NEW_TUNNEL | cut -d: -f2)
-                echo "DB_TUNNEL=$NEW_TUNNEL" >> $GITHUB_ENV
-                echo "DB_HOST=$NEW_HOST"     >> $GITHUB_ENV
-                echo "DB_PORT=$NEW_PORT"     >> $GITHUB_ENV
-                echo "[pinggy watchdog] ✅ New tunnel: $NEW_TUNNEL"
-              else
-                echo "[pinggy watchdog] ❌ Failed to get new URL"
-                tail -5 /tmp/pinggy-db.log
+                  >> /tmp/pinggy-redis.log 2>&1 &
+              sleep 12
+              NEW_REDIS=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
+                /tmp/pinggy-redis.log | tail -1 | sed 's|tcp://||')
+              if [ -n "$NEW_REDIS" ]; then
+                echo "REDIS_TUNNEL=$NEW_REDIS"                        >> $GITHUB_ENV
+                echo "REDIS_HOST=$(echo $NEW_REDIS | cut -d: -f1)"    >> $GITHUB_ENV
+                echo "REDIS_PORT=$(echo $NEW_REDIS | cut -d: -f2)"    >> $GITHUB_ENV
+                echo "[pinggy watchdog] ✅ New Redis tunnel: $NEW_REDIS"
               fi
             fi
+
+            # ── Postgres tunnel watchdog ──
+            if ! PGPASSWORD=admin123 psql \
+                -h "$DB_HOST" -p "$DB_PORT" \
+                -U postgres -d event_ai \
+                -c "SELECT 1;" >/dev/null 2>&1; then
+              echo "[pinggy watchdog] DB tunnel dead — restarting at $(date)"
+              pkill -f "ssh.*5432" 2>/dev/null || true
+              sleep 2
+              ssh -o StrictHostKeyChecking=no \
+                  -o ServerAliveInterval=30 \
+                  -o ExitOnForwardFailure=yes \
+                  -R 0:localhost:5432 -p 443 \
+                  tcp@a.pinggy.io \
+                  >> /tmp/pinggy-db.log 2>&1 &
+              sleep 12
+              NEW_DB=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
+                /tmp/pinggy-db.log | tail -1 | sed 's|tcp://||')
+              if [ -n "$NEW_DB" ]; then
+                echo "DB_TUNNEL=$NEW_DB"                          >> $GITHUB_ENV
+                echo "DB_HOST=$(echo $NEW_DB | cut -d: -f1)"      >> $GITHUB_ENV
+                echo "DB_PORT=$(echo $NEW_DB | cut -d: -f2)"      >> $GITHUB_ENV
+                echo "[pinggy watchdog] ✅ New DB tunnel: $NEW_DB"
+              fi
+            fi
+
           done
         ) > /tmp/pinggy-watchdog.log 2>&1 &
         disown $!
@@ -440,8 +535,7 @@ jobs:
         done
 
         start_pgweb_tunnel() {
-          local ATTEMPTS=5
-          for attempt in $(seq 1 $ATTEMPTS); do
+          for attempt in $(seq 1 5); do
             pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
             sleep 2
             rm -f /tmp/pgweb-tunnel.log
@@ -464,37 +558,30 @@ jobs:
                 return 0
               fi
             fi
-            echo "  pgweb tunnel attempt $attempt failed, retrying..."
+            echo "  pgweb tunnel attempt $attempt failed"
             sleep 5
           done
-          echo "WARNING: pgweb tunnel failed"
         }
 
         start_pgweb_tunnel
         PGWEB_URL=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
         echo "PGWEB_URL=$PGWEB_URL" >> "$GITHUB_ENV"
-
-        echo "================================="
-        echo " pgweb DB UI: $PGWEB_URL"
-        echo "================================="
+        echo "pgweb DB UI: $PGWEB_URL"
 
         # pgweb watchdog
         (
           PGWEB_DB_URL="$DB_URL"
-          PGWEB_COMPOSE_NET="${COMPOSE_NETWORK:-host}"
+          PGWEB_NET="${COMPOSE_NETWORK:-host}"
           while true; do
             sleep 60
             if ! curl -sf --max-time 5 http://localhost:8081 >/dev/null 2>&1; then
-              echo "[pgweb watchdog] Restarting pgweb at $(date)"
               docker rm -f pgweb 2>/dev/null || true
               sleep 1
-              docker run -d --name pgweb \
-                --network "$PGWEB_COMPOSE_NET" \
+              docker run -d --name pgweb --network "$PGWEB_NET" \
                 -p 8081:8081 sosedoff/pgweb \
                 pgweb --bind=0.0.0.0 --listen=8081 --url="$PGWEB_DB_URL"
             fi
             if ! pgrep -f "cloudflared tunnel.*8081" >/dev/null 2>&1; then
-              echo "[pgweb watchdog] Restarting tunnel at $(date)"
               cloudflared tunnel --url http://localhost:8081 \
                 > /tmp/pgweb-tunnel.log 2>&1 &
               sleep 15
@@ -506,7 +593,6 @@ jobs:
           done
         ) > /tmp/pgweb-watchdog.log 2>&1 &
         disown $!
-        echo "pgweb watchdog started"
 
     # 17 MinIO Console tunnel
     - name: Start MinIO Console tunnel
@@ -528,9 +614,8 @@ jobs:
     - name: Keep preview alive
       if: always()
       env:
-        PREVIEW_DURATION:  ${{ github.event.inputs.duration_hours || '2' }}
-        SHOW_CELERY_LOGS:  ${{ github.event.inputs.show_celery_logs }}
-        UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
+        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
+        SHOW_CELERY_LOGS: ${{ github.event.inputs.show_celery_logs }}
       run: |
         print_urls() {
           local PGWEB_LIVE
@@ -544,7 +629,7 @@ jobs:
           echo " MinIO:        $MINIO_TUNNEL_URL"
           echo "---------------------------------"
           echo " 🔌 Colab Connections"
-          echo " Redis:        Upstash (permanent — use secret)"
+          echo " Redis TCP:    $REDIS_TUNNEL"
           echo " Postgres TCP: $DB_TUNNEL"
           [ -n "$PGWEB_LIVE" ]        && echo " pgweb DB UI:  $PGWEB_LIVE"
           [ -n "$MINIO_CONSOLE_URL" ] && echo " MinIO UI:     $MINIO_CONSOLE_URL"
@@ -567,13 +652,6 @@ jobs:
         db.close()
         " 2>/dev/null || true
 
-                # Verify Upstash receiving tasks
-                python3 -c "
-        import redis, os
-        r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
-        print('Upstash Redis:', r.ping())
-        " 2>/dev/null || true
-
         # ── Log tailing ──
         CELERY_LOG=/tmp/celery_all.log
         > "$CELERY_LOG"
@@ -584,7 +662,7 @@ jobs:
             | sed -u "s/^/[$LABEL] /" >> "$CELERY_LOG" &
         }
 
-        # NOTE: event_celery_photo is stopped — Colab handles it
+        # NOTE: event_celery_photo stopped — Colab handles it
         tail_worker event_celery_finalize "FINALIZE"
         tail_worker event_celery_ai       "AI      "
         tail_worker event_celery_default  "DEFAULT "
@@ -613,31 +691,20 @@ jobs:
           echo "[$REM min remaining]  $(date '+%H:%M:%S')"
           echo "──────────────────────────────────────────"
 
-          # Backend health
           curl -sf http://localhost/api/docs >/dev/null \
             && echo "  ✓ Backend healthy" \
             || echo "  ⚠ WARNING: backend health check failed"
 
-          # Print full URLs every 5 min
           if (( ITERATION % 5 == 0 )); then
             print_urls
           else
             PGWEB_LIVE=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
             echo " App:      $PREVIEW_URL"
+            echo " Redis:    $REDIS_TUNNEL"
             echo " Postgres: $DB_TUNNEL"
             [ -n "$PGWEB_LIVE" ] && echo " pgweb:    $PGWEB_LIVE"
           fi
 
-          # Queue depth every minute
-          python3 -c "
-          import redis, os
-          r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
-          for q in ['photo','celery','ai','finalize','default']:
-              d = r.llen(q)
-              if d: print(f'  📋 {q}: {d} pending tasks')
-          " 2>/dev/null || true
-
-          # Service logs
           if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
             TOTAL_LINES=$(wc -l < "$CELERY_LOG")
             NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
@@ -649,7 +716,6 @@ jobs:
             LOG_OFFSET=$TOTAL_LINES
           fi
 
-          # Container health every 5 min
           if (( ITERATION % 5 == 0 )); then
             echo "--- Container status ---"
             for C in event_backend event_frontend \
@@ -684,6 +750,7 @@ jobs:
         docker compose logs celery_beat     --tail=50
         cat tunnel-app.log                  || true
         cat tunnel-minio.log                || true
+        cat /tmp/pinggy-redis.log           || true
         cat /tmp/pinggy-db.log              || true
         cat /tmp/pinggy-watchdog.log        || true
         cat /tmp/pgweb-tunnel.log           || true
@@ -693,7 +760,7 @@ jobs:
     - name: Cleanup
       if: always()
       run: |
-        pkill cloudflared        || true
-        pkill -f "ssh.*pinggy"   || true
+        pkill cloudflared      || true
+        pkill -f "ssh.*pinggy" || true
         docker compose down -v
         echo "Cleanup complete"
