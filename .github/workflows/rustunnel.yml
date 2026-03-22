@@ -121,34 +121,34 @@ jobs:
 # ─────────────────────────────
 # 9. Start rustunnel
 # ─────────────────────────────
-      - name: Start rustunnel (FINAL FIX)
-        run: |
-          rustunnel start --config rt.yml > tunnel.log 2>&1 &
-          sleep 25
+    - name: Start rustunnel (FINAL FIX)
+      run: |
+        rustunnel start --config rt.yml > tunnel.log 2>&1 &
+        sleep 25
 
-          echo "==== LOG ===="
-          cat tunnel.log
+        echo "==== LOG ===="
+        cat tunnel.log
 
-          # APP is fixed (subdomain)
-          APP_URL="http://snapfind-app.edge.rustunnel.com"
+        # APP is fixed (subdomain)
+        APP_URL="http://snapfind-app.edge.rustunnel.com"
 
-          # Extract OTHER HTTP URLs
-          OTHERS=($(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | grep -v snapfind-app))
+        # Extract OTHER HTTP URLs
+        OTHERS=($(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | grep -v snapfind-app))
 
-          PGWEB_URL=${OTHERS[0]}
-          MINIO_UI=${OTHERS[1]}
+        PGWEB_URL=${OTHERS[0]}
+        MINIO_UI=${OTHERS[1]}
 
-          # TCP
-          TCP_PORTS=($(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log))
+        # TCP
+        TCP_PORTS=($(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log))
 
-          REDIS_PORT=${TCP_PORTS[0]}
-          DB_PORT=${TCP_PORTS[1]}
+        REDIS_PORT=${TCP_PORTS[0]}
+        DB_PORT=${TCP_PORTS[1]}
 
-          echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
-          echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
-          echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
-          echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
-          echo "DB_PORT=$DB_PORT" >> $GITHUB_ENV
+        echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
+        echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
+        echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
+        echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
+        echo "DB_PORT=$DB_PORT" >> $GITHUB_ENV
 
 # ─────────────────────────────
 # 10. Fix HTTPS (NO mixed content)
