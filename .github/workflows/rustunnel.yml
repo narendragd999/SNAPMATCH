@@ -334,6 +334,9 @@ jobs:
 
         echo "✅ TCP tunnels working"
 
+    - name: Test Redis internally
+      run: |
+        docker exec -it $(docker ps --format '{{.Names}}' | grep redis) redis-cli ping    
 
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
