@@ -74,129 +74,102 @@ jobs:
           sudo install -Dm755 rustunnel /usr/local/bin/rustunnel
           rustunnel --version
 
-      # ── 5 Write rustunnel config ──────────────────────────────────────────────
-      # Written with Python to guarantee correct YAML indentation.
-      # The heredoc + sed approach strips leading spaces and breaks YAML structure.
+      # ── 5 Verify RUSTUNNEL_TOKEN secret is set ────────────────────────────────
+      - name: Verify RUSTUNNEL_TOKEN secret
+        env:
+          RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
+        run: |
+          if [ -z "$RUSTUNNEL_TOKEN" ]; then
+            echo "ERROR: RUSTUNNEL_TOKEN secret is not set!"
+            exit 1
+          fi
+          echo "RUSTUNNEL_TOKEN is set (length=${#RUSTUNNEL_TOKEN})"
+
+      # ── 6 Write rustunnel config ──────────────────────────────────────────────
+      # Uses printf to write exact YAML — no heredoc indentation issues.
       - name: Write rustunnel config
         env:
           RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
           ENABLE_DB_UI: ${{ github.event.inputs.enable_db_ui }}
           ENABLE_MINIO_CONSOLE: ${{ github.event.inputs.enable_minio_console }}
         run: |
-          python3 << 'PYEOF'
-          import os
+          printf 'server: edge.rustunnel.com:4040\n'   >  /tmp/rustunnel-config.yml
+          printf 'auth_token: %s\n' "$RUSTUNNEL_TOKEN" >> /tmp/rustunnel-config.yml
+          printf '\n'                                   >> /tmp/rustunnel-config.yml
+          printf 'tunnels:\n'                           >> /tmp/rustunnel-config.yml
+          printf '  app:\n'                             >> /tmp/rustunnel-config.yml
+          printf '    proto: http\n'                    >> /tmp/rustunnel-config.yml
+          printf '    local_port: 80\n'                 >> /tmp/rustunnel-config.yml
+          printf '    subdomain: snapfind-app\n'        >> /tmp/rustunnel-config.yml
+          printf '\n'                                   >> /tmp/rustunnel-config.yml
+          printf '  minio:\n'                           >> /tmp/rustunnel-config.yml
+          printf '    proto: http\n'                    >> /tmp/rustunnel-config.yml
+          printf '    local_port: 9000\n'               >> /tmp/rustunnel-config.yml
+          printf '    subdomain: snapfind-minio\n'      >> /tmp/rustunnel-config.yml
+          printf '\n'                                   >> /tmp/rustunnel-config.yml
+          printf '  redis:\n'                           >> /tmp/rustunnel-config.yml
+          printf '    proto: tcp\n'                     >> /tmp/rustunnel-config.yml
+          printf '    local_port: 6379\n'               >> /tmp/rustunnel-config.yml
+          printf '\n'                                   >> /tmp/rustunnel-config.yml
+          printf '  postgres:\n'                        >> /tmp/rustunnel-config.yml
+          printf '    proto: tcp\n'                     >> /tmp/rustunnel-config.yml
+          printf '    local_port: 5432\n'               >> /tmp/rustunnel-config.yml
 
-          token      = os.environ["RUSTUNNEL_TOKEN"]
-          db_ui      = os.environ.get("ENABLE_DB_UI", "false").lower() == "true"
-          minio_ui   = os.environ.get("ENABLE_MINIO_CONSOLE", "false").lower() == "true"
+          if [ "$ENABLE_DB_UI" = "true" ]; then
+            printf '\n'                                 >> /tmp/rustunnel-config.yml
+            printf '  pgweb:\n'                         >> /tmp/rustunnel-config.yml
+            printf '    proto: http\n'                  >> /tmp/rustunnel-config.yml
+            printf '    local_port: 8081\n'             >> /tmp/rustunnel-config.yml
+            printf '    subdomain: snapfind-pgweb\n'    >> /tmp/rustunnel-config.yml
+          fi
 
-          lines = [
-              f"server: edge.rustunnel.com:4040",
-              f"auth_token: {token}",
-              f"",
-              f"tunnels:",
-              f"  app:",
-              f"    proto: http",
-              f"    local_port: 80",
-              f"    subdomain: snapfind-app",
-              f"",
-              f"  minio:",
-              f"    proto: http",
-              f"    local_port: 9000",
-              f"    subdomain: snapfind-minio",
-              f"",
-              f"  redis:",
-              f"    proto: tcp",
-              f"    local_port: 6379",
-              f"",
-              f"  postgres:",
-              f"    proto: tcp",
-              f"    local_port: 5432",
-          ]
+          if [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
+            printf '\n'                                       >> /tmp/rustunnel-config.yml
+            printf '  minio-console:\n'                       >> /tmp/rustunnel-config.yml
+            printf '    proto: http\n'                        >> /tmp/rustunnel-config.yml
+            printf '    local_port: 9001\n'                   >> /tmp/rustunnel-config.yml
+            printf '    subdomain: snapfind-minio-console\n'  >> /tmp/rustunnel-config.yml
+          fi
 
-          if db_ui:
-              lines += [
-                  f"",
-                  f"  pgweb:",
-                  f"    proto: http",
-                  f"    local_port: 8081",
-                  f"    subdomain: snapfind-pgweb",
-              ]
+          echo "--- rustunnel config (token masked) ---"
+          sed 's/\(auth_token: \).*/\1***/' /tmp/rustunnel-config.yml
 
-          if minio_ui:
-              lines += [
-                  f"",
-                  f"  minio-console:",
-                  f"    proto: http",
-                  f"    local_port: 9001",
-                  f"    subdomain: snapfind-minio-console",
-              ]
+          if ! grep -q "^auth_token: .\{3,\}" /tmp/rustunnel-config.yml; then
+            echo "ERROR: token was not written to config!"
+            exit 1
+          fi
+          echo "Token written: OK"
 
-          config = "\n".join(lines) + "\n"
-
-          with open("/tmp/rustunnel-config.yml", "w") as f:
-              f.write(config)
-
-          print("--- rustunnel config written ---")
-          # Print with token redacted
-          for line in lines:
-              if "auth_token" in line:
-                  print("auth_token: ***")
-              else:
-                  print(line)
-          PYEOF
-
-      # ── 6 Write GHA .env ──────────────────────────────────────────────────────
+      # ── 7 Write GHA .env ──────────────────────────────────────────────────────
       - name: Write GHA .env
         run: |
-          python3 << 'PYEOF'
-          import os
+          printf 'SECRET_KEY=%s\n'              "${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}" > .env
+          printf 'ENV=prod\n'                                                                            >> .env
+          printf 'STORAGE_BACKEND=minio\n'                                                              >> .env
+          printf 'MINIO_ENDPOINT=http://minio:9000\n'                                                   >> .env
+          printf 'MINIO_ACCESS_KEY=minioadmin\n'                                                        >> .env
+          printf 'MINIO_SECRET_KEY=minioadmin\n'                                                        >> .env
+          printf 'MINIO_BUCKET=snapfind\n'                                                              >> .env
+          printf 'MINIO_PUBLIC_URL=/storage\n'                                                          >> .env
+          printf 'MINIO_PRESIGN_ENDPOINT=\n'                                                            >> .env
+          printf 'RAZORPAY_KEY_ID=%s\n'         "${{ secrets.RAZORPAY_KEY_ID }}"                       >> .env
+          printf 'RAZORPAY_KEY_SECRET=%s\n'     "${{ secrets.RAZORPAY_KEY_SECRET }}"                   >> .env
+          printf 'RAZORPAY_WEBHOOK_SECRET=%s\n' "${{ secrets.RAZORPAY_WEBHOOK_SECRET }}"               >> .env
+          printf 'SMTP_HOST=%s\n'               "${{ secrets.SMTP_HOST }}"                             >> .env
+          printf 'SMTP_PORT=%s\n'               "${{ secrets.SMTP_PORT || '587' }}"                    >> .env
+          printf 'SMTP_USER=%s\n'               "${{ secrets.SMTP_USER }}"                             >> .env
+          printf 'SMTP_PASSWORD=%s\n'           "${{ secrets.SMTP_PASSWORD }}"                         >> .env
+          printf 'SMTP_FROM=%s\n'               "${{ secrets.SMTP_FROM }}"                             >> .env
+          printf 'NEXT_PUBLIC_API_URL=/api\n'                                                           >> .env
+          printf 'NEXT_PUBLIC_STORAGE_URL=/storage\n'                                                   >> .env
+          printf 'NGINX_PORT=80\n'                                                                      >> .env
+          printf 'MAX_PHOTO_SIZE_MB=20\n'                                                               >> .env
+          printf 'PLACES365_MODEL_PATH=\n'                                                              >> .env
+          printf 'YOLO_MODEL_PATH=yolov8n.pt\n'                                                        >> .env
+          printf 'DEFAULT_EVENT_PIN=0000\n'                                                             >> .env
+          echo ".env written"
 
-          env_vars = {
-              "SECRET_KEY":               os.environ.get("SECRET_KEY", "gha-preview-secret-key"),
-              "ENV":                      "prod",
-              "STORAGE_BACKEND":          "minio",
-              "MINIO_ENDPOINT":           "http://minio:9000",
-              "MINIO_ACCESS_KEY":         "minioadmin",
-              "MINIO_SECRET_KEY":         "minioadmin",
-              "MINIO_BUCKET":             "snapfind",
-              "MINIO_PUBLIC_URL":         "/storage",
-              "MINIO_PRESIGN_ENDPOINT":   "",
-              "RAZORPAY_KEY_ID":          os.environ.get("RAZORPAY_KEY_ID", ""),
-              "RAZORPAY_KEY_SECRET":      os.environ.get("RAZORPAY_KEY_SECRET", ""),
-              "RAZORPAY_WEBHOOK_SECRET":  os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""),
-              "SMTP_HOST":                os.environ.get("SMTP_HOST", ""),
-              "SMTP_PORT":                os.environ.get("SMTP_PORT", "587"),
-              "SMTP_USER":                os.environ.get("SMTP_USER", ""),
-              "SMTP_PASSWORD":            os.environ.get("SMTP_PASSWORD", ""),
-              "SMTP_FROM":                os.environ.get("SMTP_FROM", ""),
-              "NEXT_PUBLIC_API_URL":      "/api",
-              "NEXT_PUBLIC_STORAGE_URL":  "/storage",
-              "NGINX_PORT":               "80",
-              "MAX_PHOTO_SIZE_MB":        "20",
-              "PLACES365_MODEL_PATH":     "",
-              "YOLO_MODEL_PATH":          "yolov8n.pt",
-              "DEFAULT_EVENT_PIN":        "0000",
-          }
-
-          with open(".env", "w") as f:
-              for k, v in env_vars.items():
-                  f.write(f"{k}={v}\n")
-
-          print(".env written")
-          PYEOF
-        env:
-          SECRET_KEY:              ${{ secrets.SECRET_KEY }}
-          RAZORPAY_KEY_ID:         ${{ secrets.RAZORPAY_KEY_ID }}
-          RAZORPAY_KEY_SECRET:     ${{ secrets.RAZORPAY_KEY_SECRET }}
-          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
-          SMTP_HOST:               ${{ secrets.SMTP_HOST }}
-          SMTP_PORT:               ${{ secrets.SMTP_PORT }}
-          SMTP_USER:               ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD:           ${{ secrets.SMTP_PASSWORD }}
-          SMTP_FROM:               ${{ secrets.SMTP_FROM }}
-
-      # ── 7 Build and start Docker stack ────────────────────────────────────────
+      # ── 8 Build and start Docker stack ────────────────────────────────────────
       - name: Start Docker containers
         env:
           DOCKER_BUILDKIT: "1"
@@ -207,7 +180,7 @@ jobs:
           docker compose up -d
           docker ps
 
-      # ── 8 Wait for services ───────────────────────────────────────────────────
+      # ── 9 Wait for services ───────────────────────────────────────────────────
       - name: Wait for services
         run: |
           wait_for() {
@@ -237,7 +210,7 @@ jobs:
           fi
           echo "All services ready"
 
-      # ── 9 Start pgweb if enabled ──────────────────────────────────────────────
+      # ── 10 Start pgweb if enabled ─────────────────────────────────────────────
       - name: Start pgweb (Postgres UI)
         if: ${{ github.event.inputs.enable_db_ui == 'true' }}
         run: |
@@ -271,21 +244,22 @@ jobs:
             sleep 2
           done
 
-      # ── 10 Seed default users ─────────────────────────────────────────────────
+      # ── 11 Seed default users ─────────────────────────────────────────────────
       - name: Seed default users
         run: |
           echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
 
-      # ── 11 Start all tunnels via rustunnel ────────────────────────────────────
+      # ── 12 Start all tunnels via rustunnel ────────────────────────────────────
+      # Actual rustunnel log format (from real run):
+      #   HTTP tunnels: │  __http://snapfind-app.edge.rustunnel.com__  │
+      #   TCP tunnels:  │   tcp://edge.rustunnel.com:20098  │
+      # Parsing strips box-drawing chars and __ markers, then greps plain URLs.
       - name: Start all tunnels via rustunnel
-        env:
-          RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
         run: |
           rustunnel start --config /tmp/rustunnel-config.yml \
             > /tmp/rustunnel.log 2>&1 &
           echo $! > /tmp/rustunnel.pid
 
-          # ── Wait up to 120s, print raw log every 15s ─────────────────────────
           echo "Waiting for rustunnel tunnels..."
           for i in $(seq 1 8); do
             sleep 15
@@ -295,11 +269,21 @@ jobs:
             cat /tmp/rustunnel.log
             echo "===== end log ====="
 
-            # Bulletproof parsing — extract ALL URLs and ports, then filter
-            ALL_URLS=$(grep -oP 'https://\S+\.edge\.rustunnel\.com' /tmp/rustunnel.log)
-            ALL_PORTS=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' /tmp/rustunnel.log)
+            # Strip box-drawing chars, pipes, underscores → clean text lines
+            CLEAN=$(cat /tmp/rustunnel.log \
+              | sed 's/[│╭╰╯╮─]//g' \
+              | sed 's/__//g' \
+              | tr -s ' ')
 
-            APP_URL=$(echo "$ALL_URLS"   | grep 'snapfind-app'   | head -1)
+            # Extract http:// URLs (rustunnel uses http not https)
+            ALL_URLS=$(echo "$CLEAN" | grep -oP 'http://\S+\.edge\.rustunnel\.com' | sort -u)
+            # Extract TCP ports
+            ALL_PORTS=$(echo "$CLEAN" | grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+')
+
+            echo "  All URLs:  $ALL_URLS"
+            echo "  All ports: $ALL_PORTS"
+
+            APP_URL=$(echo "$ALL_URLS"   | grep 'snapfind-app'   | grep -v 'minio' | grep -v 'pgweb' | grep -v 'console' | head -1)
             MINIO_URL=$(echo "$ALL_URLS" | grep 'snapfind-minio' | grep -v 'console' | head -1)
             REDIS_PORT=$(echo "$ALL_PORTS" | sed -n '1p')
             PG_PORT=$(echo "$ALL_PORTS"    | sed -n '2p')
@@ -312,19 +296,21 @@ jobs:
             fi
           done
 
-          # ── Final values ──────────────────────────────────────────────────────
-          ALL_URLS=$(grep -oP 'https://\S+\.edge\.rustunnel\.com' /tmp/rustunnel.log)
-          ALL_PORTS=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' /tmp/rustunnel.log)
+          # ── Final parse ───────────────────────────────────────────────────────
+          CLEAN=$(cat /tmp/rustunnel.log \
+            | sed 's/[│╭╰╯╮─]//g' \
+            | sed 's/__//g' \
+            | tr -s ' ')
 
-          APP_URL=$(echo "$ALL_URLS"          | grep 'snapfind-app'    | head -1)
+          ALL_URLS=$(echo "$CLEAN" | grep -oP 'http://\S+\.edge\.rustunnel\.com' | sort -u)
+          ALL_PORTS=$(echo "$CLEAN" | grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+')
+
+          APP_URL=$(echo "$ALL_URLS"          | grep 'snapfind-app'    | grep -v 'minio' | grep -v 'pgweb' | grep -v 'console' | head -1)
           MINIO_URL=$(echo "$ALL_URLS"         | grep 'snapfind-minio' | grep -v 'console' | head -1)
           PGWEB_URL=$(echo "$ALL_URLS"         | grep 'snapfind-pgweb' | head -1)
           MINIO_CONSOLE_URL=$(echo "$ALL_URLS" | grep 'minio-console'  | head -1)
           REDIS_PORT=$(echo "$ALL_PORTS"       | sed -n '1p')
           PG_PORT=$(echo "$ALL_PORTS"          | sed -n '2p')
-
-          echo "All HTTPS URLs: $ALL_URLS"
-          echo "All TCP ports:  $ALL_PORTS"
 
           if [ -z "$APP_URL" ] || [ -z "$REDIS_PORT" ] || [ -z "$PG_PORT" ]; then
             echo "ERROR: core tunnels failed — full log:"
@@ -361,7 +347,7 @@ jobs:
           echo "  DATABASE_URL      = \"$DB_URL\""
           echo "================================="
 
-      # ── 12 Inject MINIO_PRESIGN_ENDPOINT into backend ─────────────────────────
+      # ── 13 Inject MINIO_PRESIGN_ENDPOINT into backend ─────────────────────────
       - name: Inject MinIO presign endpoint
         run: |
           sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
@@ -383,7 +369,7 @@ jobs:
             exit 1
           fi
 
-      # ── 13 Keep-alive loop ────────────────────────────────────────────────────
+      # ── 14 Keep-alive loop ────────────────────────────────────────────────────
       - name: Keep preview alive
         if: always()
         env:
@@ -408,9 +394,9 @@ jobs:
             echo "  CELERY_BROKER_URL = \"$REDIS_URL\""
             echo "  DATABASE_URL      = \"$DB_URL\""
             echo "---------------------------------"
-            echo "  🔑 Test Accounts"
-            echo "  Admin → admin@admin.com / 123456"
-            echo "  User  → test@gmail.com  / 123456"
+            echo "  Test Accounts"
+            echo "  Admin: admin@admin.com / 123456"
+            echo "  User:  test@gmail.com  / 123456"
             echo "================================="
           }
 
@@ -502,14 +488,14 @@ jobs:
             fi
           done
 
-      # ── 14 Show logs on failure ───────────────────────────────────────────────
+      # ── 15 Show logs on failure ───────────────────────────────────────────────
       - name: Show logs on failure
         if: failure()
         run: |
           echo "===== RUSTUNNEL LOG ====="
           cat /tmp/rustunnel.log || true
-          echo "===== RUSTUNNEL CONFIG ====="
-          cat /tmp/rustunnel-config.yml | grep -v auth_token || true
+          echo "===== RUSTUNNEL CONFIG (token masked) ====="
+          sed 's/\(auth_token: \).*/\1***/' /tmp/rustunnel-config.yml || true
           echo "===== BACKEND ====="
           docker compose logs backend --tail=50
           echo "===== FRONTEND ====="
@@ -528,7 +514,7 @@ jobs:
           docker compose logs celery_beat --tail=30
           docker logs pgweb 2>/dev/null || true
 
-      # ── 15 Cleanup ────────────────────────────────────────────────────────────
+      # ── 16 Cleanup ────────────────────────────────────────────────────────────
       - name: Cleanup
         if: always()
         run: |
