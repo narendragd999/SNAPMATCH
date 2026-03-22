@@ -291,11 +291,11 @@ jobs:
         # ── Upstash Redis — verify it works from GHA ──
         echo "Verifying Upstash Redis..."
         python3 -c "
-import redis
-r = redis.from_url('${UPSTASH_REDIS_URL}')
-print('✅ Upstash Redis ping:', r.ping())
-print('   Photo queue depth:', r.llen('photo'))
-" || echo "⚠️ Upstash check failed — check UPSTASH_REDIS_URL secret"
+        import redis
+        r = redis.from_url('${UPSTASH_REDIS_URL}')
+        print('✅ Upstash Redis ping:', r.ping())
+        print('   Photo queue depth:', r.llen('photo'))
+        " || echo "⚠️ Upstash check failed — check UPSTASH_REDIS_URL secret"
 
         # ── ngrok Postgres TCP tunnel (1 tunnel = fits free plan) ──
         echo "Starting ngrok Postgres tunnel..."
@@ -309,12 +309,12 @@ print('   Photo queue depth:', r.llen('photo'))
           sleep 1
           DB_TUNNEL=$(curl -sf http://localhost:4040/api/tunnels 2>/dev/null \
             | python3 -c "
-import json,sys
-try:
-    t=json.load(sys.stdin)['tunnels']
-    if t: print(t[0]['public_url'].replace('tcp://',''))
-except: pass
-" 2>/dev/null || true)
+          import json,sys
+          try:
+              t=json.load(sys.stdin)['tunnels']
+              if t: print(t[0]['public_url'].replace('tcp://',''))
+          except: pass
+          " 2>/dev/null || true)
           if [ -n "$DB_TUNNEL" ]; then
             echo "ngrok tunnel ready at attempt $i"
             break
@@ -351,17 +351,17 @@ except: pass
       run: |
         echo "=== Testing Upstash Redis ==="
         python3 -c "
-import redis
-r = redis.from_url('${UPSTASH_REDIS_URL}')
-pong = r.ping()
-print('✅ Redis ping:', pong)
-queues = ['photo','celery','ai','finalize','default']
-for q in queues:
-    depth = r.llen(q)
-    if depth > 0:
-        print(f'   {q}: {depth} tasks')
-print('   All queues checked')
-"
+        import redis
+        r = redis.from_url('${UPSTASH_REDIS_URL}')
+        pong = r.ping()
+        print('✅ Redis ping:', pong)
+        queues = ['photo','celery','ai','finalize','default']
+        for q in queues:
+            depth = r.llen(q)
+            if depth > 0:
+                print(f'   {q}: {depth} tasks')
+        print('   All queues checked')
+        "
 
         echo ""
         echo "=== Testing Postgres via ngrok ==="
@@ -389,12 +389,12 @@ print('   All queues checked')
 
               NEW_TUNNEL=$(curl -sf http://localhost:4040/api/tunnels 2>/dev/null \
                 | python3 -c "
-import json,sys
-try:
-    t=json.load(sys.stdin)['tunnels']
-    if t: print(t[0]['public_url'].replace('tcp://',''))
-except: pass
-" 2>/dev/null || true)
+              import json,sys
+              try:
+                  t=json.load(sys.stdin)['tunnels']
+                  if t: print(t[0]['public_url'].replace('tcp://',''))
+              except: pass
+              " 2>/dev/null || true)
 
               if [ -n "$NEW_TUNNEL" ]; then
                 NEW_HOST=$(echo $NEW_TUNNEL | cut -d: -f1)
@@ -556,23 +556,23 @@ except: pass
 
         # Verify Upstash is receiving tasks from backend
         python3 -c "
-import redis, os
-r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
-print('Upstash Redis ping:', r.ping())
-for q in ['photo','celery','ai','finalize','default']:
-    d = r.llen(q)
-    if d: print(f'  queue {q}: {d} tasks')
-" 2>/dev/null || true
+        import redis, os
+        r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
+        print('Upstash Redis ping:', r.ping())
+        for q in ['photo','celery','ai','finalize','default']:
+            d = r.llen(q)
+            if d: print(f'  queue {q}: {d} tasks')
+        " 2>/dev/null || true
 
-        # Verify admin role
-        docker exec event_backend python3 -c "
-from app.database.db import SessionLocal
-from app.models.user import User
-db=SessionLocal()
-u=db.query(User).filter(User.email=='admin@admin.com').first()
-print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
-db.close()
-" 2>/dev/null || true
+                # Verify admin role
+                docker exec event_backend python3 -c "
+        from app.database.db import SessionLocal
+        from app.models.user import User
+        db=SessionLocal()
+        u=db.query(User).filter(User.email=='admin@admin.com').first()
+        print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
+        db.close()
+        " 2>/dev/null || true
 
         # ── Log tailing ──
         CELERY_LOG=/tmp/celery_all.log
@@ -627,12 +627,12 @@ db.close()
 
           # Queue depth check every minute
           python3 -c "
-import redis, os
-r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
-for q in ['photo','celery','ai','finalize']:
-    d = r.llen(q)
-    if d: print(f'  📋 queue {q}: {d} pending tasks')
-" 2>/dev/null || true
+          import redis, os
+          r = redis.from_url(os.environ['UPSTASH_REDIS_URL'])
+          for q in ['photo','celery','ai','finalize']:
+              d = r.llen(q)
+              if d: print(f'  📋 queue {q}: {d} pending tasks')
+          " 2>/dev/null || true
 
           if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
             TOTAL_LINES=$(wc -l < "$CELERY_LOG")
