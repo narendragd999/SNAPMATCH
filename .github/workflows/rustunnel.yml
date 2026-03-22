@@ -1,4 +1,4 @@
-name: SnapFind Preview
+name: SnapFind Preview Rust
 
 on:
   workflow_dispatch:
@@ -313,7 +313,7 @@ jobs:
         nc -zv edge.rustunnel.com $DB_PORT || exit 1
 
         echo "✅ TCP tunnels working"
-    
+
 
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
