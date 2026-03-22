@@ -47,21 +47,21 @@ jobs:
     - name: Create .env
       run: |
         cat <<EOF > .env
-ENV=prod
-SECRET_KEY=gha-preview-secret-key
+        ENV=prod
+        SECRET_KEY=gha-preview-secret-key
 
-STORAGE_BACKEND=minio
-MINIO_ENDPOINT=http://minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=snapfind
-MINIO_PUBLIC_URL=/storage
-MINIO_PRESIGN_ENDPOINT=
+        STORAGE_BACKEND=minio
+        MINIO_ENDPOINT=http://minio:9000
+        MINIO_ACCESS_KEY=minioadmin
+        MINIO_SECRET_KEY=minioadmin
+        MINIO_BUCKET=snapfind
+        MINIO_PUBLIC_URL=/storage
+        MINIO_PRESIGN_ENDPOINT=
 
-NEXT_PUBLIC_API_URL=/api
-NEXT_PUBLIC_STORAGE_URL=/storage
-NGINX_PORT=80
-EOF
+        NEXT_PUBLIC_API_URL=/api
+        NEXT_PUBLIC_STORAGE_URL=/storage
+        NGINX_PORT=80
+        EOF
 
 # ─────────────────────────────
 # 6. Start Docker
@@ -92,55 +92,63 @@ EOF
         TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
       run: |
         cat <<EOF > rt.yml
-server: edge.rustunnel.com:4040
-auth_token: $TOKEN
+        server: edge.rustunnel.com:4040
+        auth_token: $TOKEN
 
-tunnels:
-  app:
-    proto: http
-    local_port: 80
-    subdomain: snapfind-app
+        tunnels:
+          app:
+            proto: http
+            local_port: 80
+            subdomain: snapfind-app
 
-  pgweb:
-    proto: http
-    local_port: 8081
+          pgweb:
+            proto: http
+            local_port: 8081
 
-  minio_console:
-    proto: http
-    local_port: 9001
+          minio_console:
+            proto: http
+            local_port: 9001
 
-  redis:
-    proto: tcp
-    local_port: 6379
+          redis:
+            proto: tcp
+            local_port: 6379
 
-  postgres:
-    proto: tcp
-    local_port: 5432
-EOF
+          postgres:
+            proto: tcp
+            local_port: 5432
+        EOF
 
 # ─────────────────────────────
 # 9. Start rustunnel
 # ─────────────────────────────
-    - name: Start rustunnel
-      run: |
-        rustunnel start --config rt.yml > tunnel.log 2>&1 &
-        sleep 25
+      - name: Start rustunnel (FINAL FIX)
+        run: |
+          rustunnel start --config rt.yml > tunnel.log 2>&1 &
+          sleep 25
 
-        echo "==== TUNNEL LOG ===="
-        cat tunnel.log
+          echo "==== LOG ===="
+          cat tunnel.log
 
-        APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '1p')
-        PGWEB_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '2p')
-        MINIO_UI=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '3p')
+          # APP is fixed (subdomain)
+          APP_URL="http://snapfind-app.edge.rustunnel.com"
 
-        REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '1p')
-        DB_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '2p')
+          # Extract OTHER HTTP URLs
+          OTHERS=($(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | grep -v snapfind-app))
 
-        echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
-        echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
-        echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
-        echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
-        echo "DB_PORT=$DB_PORT" >> $GITHUB_ENV
+          PGWEB_URL=${OTHERS[0]}
+          MINIO_UI=${OTHERS[1]}
+
+          # TCP
+          TCP_PORTS=($(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log))
+
+          REDIS_PORT=${TCP_PORTS[0]}
+          DB_PORT=${TCP_PORTS[1]}
+
+          echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
+          echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
+          echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
+          echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
+          echo "DB_PORT=$DB_PORT" >> $GITHUB_ENV
 
 # ─────────────────────────────
 # 10. Fix HTTPS (NO mixed content)
