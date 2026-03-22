@@ -762,13 +762,13 @@ jobs:
 
         # Verify admin role
         docker exec event_backend python3 -c "
-from app.database.db import SessionLocal
-from app.models.user import User
-db=SessionLocal()
-u=db.query(User).filter(User.email=='admin@admin.com').first()
-print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
-db.close()
-" 2>/dev/null || true
+        from app.database.db import SessionLocal
+        from app.models.user import User
+        db=SessionLocal()
+        u=db.query(User).filter(User.email=='admin@admin.com').first()
+        print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
+        db.close()
+        " 2>/dev/null || true
 
         # ── Log tailing ──
         CELERY_LOG=/tmp/celery_all.log
