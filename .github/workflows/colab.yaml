@@ -351,6 +351,29 @@ jobs:
       run: |
         docker exec event_postgres pg_isready
 
+    - name: Verify tunnel port assignments
+      run: |
+        # Confirm which port is Redis by sending a PING
+        REDIS_HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
+        REDIS_PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
+        DB_PORT=$(echo $DB_TUNNEL | cut -d: -f2)
+
+        # Try PING on REDIS_PORT
+        REDIS_RESP=$(echo -e "*1\r\n\$4\r\nPING\r\n" | nc -w 2 $REDIS_HOST $REDIS_PORT 2>/dev/null || true)
+        if echo "$REDIS_RESP" | grep -q "PONG"; then
+          echo "✅ REDIS_TUNNEL port $REDIS_PORT confirmed Redis"
+        else
+          echo "⚠️  Ports appear swapped — fixing..."
+          ORIG_REDIS=$REDIS_TUNNEL
+          ORIG_DB=$DB_TUNNEL
+          # Swap them
+          sed -i "s|REDIS_TUNNEL=.*|REDIS_TUNNEL=$ORIG_DB|" $GITHUB_ENV
+          sed -i "s|DB_TUNNEL=.*|DB_TUNNEL=$ORIG_REDIS|" $GITHUB_ENV
+          echo "REDIS_TUNNEL=$ORIG_DB" >> $GITHUB_ENV
+          echo "DB_TUNNEL=$ORIG_REDIS" >> $GITHUB_ENV
+          echo "✅ Swapped: Redis=$ORIG_DB  DB=$ORIG_REDIS"
+        fi
+        
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
     #    watchdog. Cloudflare free tunnels silently expire — the watchdog

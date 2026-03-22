@@ -1,4 +1,4 @@
-name: SnapFind Preview Rust
+name: SnapFind Preview With Rustunnel
 
 on:
   workflow_dispatch:
@@ -334,6 +334,15 @@ jobs:
 
         echo "✅ TCP tunnels working"
 
+    - name: Test Redis internally
+      run: |
+        CONTAINER=$(docker ps --format '{{.Names}}' | grep redis | head -1)
+        echo "Redis container: $CONTAINER"
+        docker exec $CONTAINER redis-cli ping 
+
+    - name: Test Postgres internally
+      run: |
+        docker exec event_postgres pg_isready
 
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background

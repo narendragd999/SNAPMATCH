@@ -1,0 +1,173 @@
+## Full Flow Summary
+```
+1. Trigger GHA workflow with stop_celery_photo=true
+2. Copy Redis port + DB port + MinIO URL from GHA logs
+3. Open Colab → paste ports → run cells 1–7
+4. Go to your App URL → create event → upload photos
+5. Backend queues tasks to Redis photo queue
+6. Colab worker picks them up, processes with GPU
+7. Results written back to your Postgres + MinIO
+8. App shows processed photos ✅
+
+============================================================
+
+!pip install celery redis sqlalchemy psycopg2-binary \
+             Pillow numpy opencv-python-headless \
+             boto3 insightface onnxruntime-gpu \
+             torch torchvision ultralytics -q
+
+============================================================
+
+# ── Paste these from your GHA "Keep preview alive" output ──
+REDIS_HOST   = "edge.rustunnel.com"
+REDIS_PORT   = 20097          # ← from GHA logs: Redis TCP port
+DB_HOST      = "edge.rustunnel.com"
+DB_PORT      = 20096          # ← from GHA logs: Postgres TCP port
+MINIO_URL    = "https://eclipse-camps-hay-assured.trycloudflare.com"  # ← MinIO tunnel URL
+
+DB_NAME      = "event_ai"
+DB_USER      = "postgres"
+DB_PASS      = "admin123"
+
+REDIS_URL    = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+print("Redis:    ", REDIS_URL)
+print("Database: ", DATABASE_URL)
+
+============================================================
+
+import redis
+import psycopg2
+
+# Test Redis
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, socket_timeout=5)
+print("✅ Redis ping:", r.ping())
+print("   Pending photo tasks:", r.llen("photo"))
+
+# Test Postgres
+conn = psycopg2.connect(DATABASE_URL)
+cur  = conn.cursor()
+cur.execute("SELECT COUNT(*) FROM photos WHERE processed = false OR processed IS NULL;")
+pending = cur.fetchone()[0]
+print(f"✅ Postgres connected — {pending} unprocessed photos")
+cur.close(); conn.close()
+
+
+============================================================
+
+
+# Replace with your actual repo
+!git clone https://github.com/narendragd999/SNAPMATCH.git /app
+%cd /app
+
+# Install your backend requirements
+!pip install -r backend/requirements.txt -q  # adjust path
+
+============================================================
+
+import os
+
+os.environ["REDIS_URL"]          = REDIS_URL
+os.environ["DATABASE_URL"]       = DATABASE_URL
+os.environ["STORAGE_BACKEND"]    = "minio"
+os.environ["MINIO_ENDPOINT"]     = MINIO_URL          # your minio tunnel
+os.environ["MINIO_ACCESS_KEY"]   = "minioadmin"
+os.environ["MINIO_SECRET_KEY"]   = "minioadmin"
+os.environ["MINIO_BUCKET"]       = "snapfind"
+os.environ["MINIO_PRESIGN_ENDPOINT"] = MINIO_URL
+os.environ["ENV"]                = "prod"
+
+print("Environment set ✅")
+
+
+============================================================
+
+# Write a startup script
+worker_cmd = """
+cd /app/backend  # ← adjust to your backend folder
+
+celery -A app.celery_app worker \\
+  --queues=photo \\
+  --concurrency=2 \\
+  --hostname=colab_photo_worker@%h \\
+  --loglevel=INFO \\
+  --without-heartbeat \\
+  --without-gossip \\
+  --without-mingle
+"""
+
+# Run in background, pipe logs to file
+import subprocess, threading, time
+
+proc = subprocess.Popen(
+    ["bash", "-c", worker_cmd],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    cwd="/app/backend"  # adjust
+)
+
+# Stream logs in a thread
+def stream_logs():
+    for line in proc.stdout:
+        print(line, end="")
+
+log_thread = threading.Thread(target=stream_logs, daemon=True)
+log_thread.start()
+
+time.sleep(8)
+print("\n✅ Colab celery_photo worker started (PID:", proc.pid, ")")
+
+
+============================================================
+
+from celery import Celery
+
+celery_app = Celery(broker=REDIS_URL, backend=REDIS_URL)
+
+time.sleep(3)
+inspect = celery_app.control.inspect(timeout=5)
+
+workers = inspect.active_queues()
+print("Registered workers:")
+for worker, queues in (workers or {}).items():
+    print(f"  {worker}:")
+    for q in queues:
+        print(f"    → queue: {q['name']}")
+
+
+============================================================
+
+import time
+
+print("Monitoring photo queue... (Ctrl+C to stop)\n")
+try:
+    while True:
+        pending  = r.llen("photo")
+        inspect2 = celery_app.control.inspect(timeout=3)
+        active   = inspect2.active() or {}
+
+        active_tasks = []
+        for w, tasks in active.items():
+            for t in tasks:
+                active_tasks.append(t.get("name", "unknown"))
+
+        print(f"[{time.strftime('%H:%M:%S')}] Queued: {pending} | Active: {len(active_tasks)} {active_tasks}")
+        time.sleep(5)
+except KeyboardInterrupt:
+    print("Stopped monitoring")
+
+
+============================================================
+
+## Full Flow Summary
+```
+1. Trigger GHA workflow with stop_celery_photo=true
+2. Copy Redis port + DB port + MinIO URL from GHA logs
+3. Open Colab → paste ports → run cells 1–7
+4. Go to your App URL → create event → upload photos
+5. Backend queues tasks to Redis photo queue
+6. Colab worker picks them up, processes with GPU
+7. Results written back to your Postgres + MinIO
+8. App shows processed photos ✅
