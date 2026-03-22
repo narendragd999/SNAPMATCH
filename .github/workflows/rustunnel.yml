@@ -66,15 +66,15 @@ jobs:
           TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
         run: |
           cat <<EOF > rt.yml
-server: edge.rustunnel.com:4040
-auth_token: $TOKEN
+          server: edge.rustunnel.com:4040
+          auth_token: $TOKEN
 
-tunnels:
-  app:
-    proto: http
-    local_port: 80
-    subdomain: snapfind-app
-EOF
+          tunnels:
+            app:
+              proto: http
+              local_port: 80
+              subdomain: snapfind-app
+          EOF
 
 # ─────────────────────────────
 # 8. Create ENV
