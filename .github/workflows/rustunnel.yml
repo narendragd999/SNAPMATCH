@@ -8,28 +8,28 @@ on:
         required: false
         default: "2"
         type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "5"
+        options: ["1", "2", "3", "5"]
+
       force_clean:
-        description: "Force clean Docker build (prune cache + rebuild from scratch)"
+        description: "Force clean Docker build"
         required: false
         default: false
         type: boolean
+
       enable_db_ui:
-        description: "Expose Postgres via pgweb browser UI (at APP_URL/pgweb/)"
+        description: "Enable pgweb UI"
         required: false
         default: false
         type: boolean
+
       enable_minio_console:
-        description: "Expose MinIO Console (at APP_URL/minio-console/)"
+        description: "Enable MinIO Console"
         required: false
         default: false
         type: boolean
+
       show_celery_logs:
-        description: "Stream live Celery worker logs in the GHA output"
+        description: "Show Celery logs"
         required: false
         default: true
         type: boolean
@@ -40,641 +40,182 @@ jobs:
     timeout-minutes: 330
 
     steps:
-      # ── 1 Checkout ────────────────────────────────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      # ── 2 Free disk space ─────────────────────────────────────────────────────
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-          df -h
+# ─────────────────────────────────────────────
+# 1. Checkout
+# ─────────────────────────────────────────────
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Force clean Docker cache
-        if: ${{ github.event.inputs.force_clean == 'true' }}
-        run: |
-          docker system prune -af
-          docker builder prune -af
-          df -h
+# ─────────────────────────────────────────────
+# 2. Free disk
+# ─────────────────────────────────────────────
+    - name: Free disk
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        df -h
 
-      # ── 3 Docker Buildx ───────────────────────────────────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+    - name: Clean Docker cache
+      if: ${{ github.event.inputs.force_clean == 'true' }}
+      run: |
+        docker system prune -af
+        docker builder prune -af
 
-      # ── 4 Install rustunnel client ────────────────────────────────────────────
-      - name: Install rustunnel client
-        run: |
-          RT_VERSION=$(curl -sI https://github.com/joaoh82/rustunnel/releases/latest \
-            | grep -i '^location:' | grep -oP 'v[\d.]+' | head -1)
-          RT_VERSION=${RT_VERSION:-v0.2.3}
-          echo "Installing rustunnel $RT_VERSION"
-          wget -qO rustunnel.tar.gz \
-            "https://github.com/joaoh82/rustunnel/releases/download/${RT_VERSION}/rustunnel-${RT_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          tar -xzf rustunnel.tar.gz
-          sudo install -Dm755 rustunnel /usr/local/bin/rustunnel
-          rustunnel --version
+# ─────────────────────────────────────────────
+# 3. Docker Buildx
+# ─────────────────────────────────────────────
+    - name: Setup Buildx
+      uses: docker/setup-buildx-action@v3
 
-      # ── 5 Verify RUSTUNNEL_TOKEN secret ──────────────────────────────────────
-      - name: Verify RUSTUNNEL_TOKEN secret
-        env:
-          RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
-        run: |
-          if [ -z "$RUSTUNNEL_TOKEN" ]; then
-            echo "ERROR: RUSTUNNEL_TOKEN secret is not set!"
-            echo "Go to: Settings → Secrets → Actions → New repository secret"
-            echo "Name: RUSTUNNEL_TOKEN  Value: your rustunnel auth token"
-            exit 1
-          fi
-          echo "RUSTUNNEL_TOKEN is set (length=${#RUSTUNNEL_TOKEN})"
+# ─────────────────────────────────────────────
+# 4. Install rustunnel
+# ─────────────────────────────────────────────
+    - name: Install rustunnel
+      run: |
+        VERSION=$(curl -sI https://github.com/joaoh82/rustunnel/releases/latest \
+          | grep -i location | grep -oP 'v[\d.]+' | head -1)
 
-      # ── 6 Write rustunnel config ──────────────────────────────────────────────
-      # ARCHITECTURE: ONE HTTP tunnel + TWO TCP tunnels only.
-      #
-      # rustunnel hosted server does NOT support multiple concurrent HTTP
-      # tunnels — all HTTP traffic lands on one backend regardless of subdomain.
-      #
-      # Solution:
-      #   - Single HTTP tunnel → port 80 (nginx handles all routing internally)
-      #   - nginx already routes: /api/ → backend, /storage/ → minio
-      #   - Optional UIs (pgweb, minio-console) served at /pgweb/ /minio-console/
-      #     via nginx location blocks injected in step 10
-      #   - TCP tunnels for Colab GPU worker (Redis + Postgres)
-      #
-      # Result: APP_URL = the one tunnel URL for everything
-      - name: Write rustunnel config
-        env:
-          RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
-        run: |
-          python3 << 'PYEOF'
-          import os
+        VERSION=${VERSION:-v0.2.3}
 
-          token = os.environ["RUSTUNNEL_TOKEN"]
+        wget -qO rt.tar.gz \
+          "https://github.com/joaoh82/rustunnel/releases/download/${VERSION}/rustunnel-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 
-          lines = [
-              "server: edge.rustunnel.com:4040",
-              f"auth_token: {token}",
-              "",
-              "tunnels:",
-              "  app:",
-              "    proto: http",
-              "    local_port: 80",
-              "    subdomain: snapfind-app",
-              "",
-              "  redis:",
-              "    proto: tcp",
-              "    local_port: 6379",
-              "",
-              "  postgres:",
-              "    proto: tcp",
-              "    local_port: 5432",
-          ]
+        tar -xzf rt.tar.gz
+        sudo install -Dm755 rustunnel /usr/local/bin/rustunnel
 
-          with open("/tmp/rustunnel-config.yml", "w") as f:
-              f.write("\n".join(lines) + "\n")
+        rustunnel --version
 
-          print("--- rustunnel config written (token masked) ---")
-          for line in lines:
-              print("auth_token: ***" if "auth_token" in line else line)
-          PYEOF
+# ─────────────────────────────────────────────
+# 5. Verify token
+# ─────────────────────────────────────────────
+    - name: Check token
+      env:
+        TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
+      run: |
+        if [ -z "$TOKEN" ]; then
+          echo "❌ Missing RUSTUNNEL_TOKEN"
+          exit 1
+        fi
 
-          # Verify token was written
-          if ! grep -q "^auth_token: .\\{3,\\}" /tmp/rustunnel-config.yml; then
-            echo "ERROR: token was not written to config!"
-            exit 1
-          fi
-          echo "Token written: OK"
+# ─────────────────────────────────────────────
+# 6. Create rustunnel config
+# ─────────────────────────────────────────────
+    - name: Create config
+      env:
+        TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
+      run: |
+        cat <<EOF > /tmp/rt.yml
+server: edge.rustunnel.com:4040
+auth_token: $TOKEN
 
-      # ── 7 Write GHA .env ──────────────────────────────────────────────────────
-      # MINIO_PRESIGN_ENDPOINT is left blank here — injected after tunnels are up
-      # MINIO_PUBLIC_URL = /storage (nginx proxy, works before tunnel too)
-      - name: Write GHA .env
-        run: |
-          python3 << 'PYEOF'
-          import os
+tunnels:
+  app:
+    proto: http
+    local_port: 80
+    subdomain: snapfind-app
 
-          env_vars = {
-              "SECRET_KEY":               os.environ.get("SECRET_KEY", "gha-preview-secret-key"),
-              "ENV":                      "prod",
-              "STORAGE_BACKEND":          "minio",
-              "MINIO_ENDPOINT":           "http://minio:9000",
-              "MINIO_ACCESS_KEY":         "minioadmin",
-              "MINIO_SECRET_KEY":         "minioadmin",
-              "MINIO_BUCKET":             "snapfind",
-              # Relative path — nginx on :80 proxies /storage/ → minio:9000
-              # Works for thumbnails served to browser via the tunnel app URL
-              "MINIO_PUBLIC_URL":         "/storage",
-              # Blank until tunnel is up — injected in step 13
-              "MINIO_PRESIGN_ENDPOINT":   "",
-              "RAZORPAY_KEY_ID":          os.environ.get("RAZORPAY_KEY_ID", ""),
-              "RAZORPAY_KEY_SECRET":      os.environ.get("RAZORPAY_KEY_SECRET", ""),
-              "RAZORPAY_WEBHOOK_SECRET":  os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""),
-              "SMTP_HOST":                os.environ.get("SMTP_HOST", ""),
-              "SMTP_PORT":                os.environ.get("SMTP_PORT", "587"),
-              "SMTP_USER":                os.environ.get("SMTP_USER", ""),
-              "SMTP_PASSWORD":            os.environ.get("SMTP_PASSWORD", ""),
-              "SMTP_FROM":                os.environ.get("SMTP_FROM", ""),
-              "NEXT_PUBLIC_API_URL":      "/api",
-              "NEXT_PUBLIC_STORAGE_URL":  "/storage",
-              "NGINX_PORT":               "80",
-              "MAX_PHOTO_SIZE_MB":        "20",
-              "PLACES365_MODEL_PATH":     "",
-              "YOLO_MODEL_PATH":          "yolov8n.pt",
-              "DEFAULT_EVENT_PIN":        "0000",
-          }
+  redis:
+    proto: tcp
+    local_port: 6379
 
-          with open(".env", "w") as f:
-              for k, v in env_vars.items():
-                  f.write(f"{k}={v}\n")
-          print(".env written")
-          PYEOF
-        env:
-          SECRET_KEY:              ${{ secrets.SECRET_KEY }}
-          RAZORPAY_KEY_ID:         ${{ secrets.RAZORPAY_KEY_ID }}
-          RAZORPAY_KEY_SECRET:     ${{ secrets.RAZORPAY_KEY_SECRET }}
-          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
-          SMTP_HOST:               ${{ secrets.SMTP_HOST }}
-          SMTP_PORT:               ${{ secrets.SMTP_PORT }}
-          SMTP_USER:               ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD:           ${{ secrets.SMTP_PASSWORD }}
-          SMTP_FROM:               ${{ secrets.SMTP_FROM }}
+  postgres:
+    proto: tcp
+    local_port: 5432
+EOF
 
-      # ── 8 Build and start Docker stack ────────────────────────────────────────
-      - name: Start Docker containers
-        env:
-          DOCKER_BUILDKIT: "1"
-          COMPOSE_DOCKER_CLI_BUILD: "1"
-          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
-        run: |
-          docker compose build --parallel
-          docker compose up -d
-          docker ps
+# ─────────────────────────────────────────────
+# 7. Create .env
+# ─────────────────────────────────────────────
+    - name: Create env
+      run: |
+        cat <<EOF > .env
+ENV=prod
+SECRET_KEY=gha-secret
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=snapfind
+MINIO_PUBLIC_URL=/storage
+MINIO_PRESIGN_ENDPOINT=
+NEXT_PUBLIC_API_URL=/api
+NEXT_PUBLIC_STORAGE_URL=/storage
+NGINX_PORT=80
+EOF
 
-      # ── 9 Wait for services ───────────────────────────────────────────────────
-      - name: Wait for services
-        run: |
-          wait_for() {
-            local NAME="$1" URL="$2" MAX="$3" INTERVAL="$4"
-            for i in $(seq 1 "$MAX"); do
-              curl -sf "$URL" >/dev/null 2>&1 \
-                && echo "$NAME ready (attempt $i)" && return 0
-              sleep "$INTERVAL"
-            done
-            echo "$NAME failed to start"; return 1
-          }
+# ─────────────────────────────────────────────
+# 8. Start Docker
+# ─────────────────────────────────────────────
+    - name: Start containers
+      run: |
+        docker compose build --parallel
+        docker compose up -d
 
-          wait_for "Backend"  "http://localhost:8000/docs" 40 3 & PID_B=$!
-          wait_for "Frontend" "http://localhost:3000"      40 3 & PID_F=$!
-          wait_for "Nginx"    "http://localhost"           30 3 & PID_N=$!
-
-          FAIL=0
-          wait "$PID_B" || FAIL=1
-          wait "$PID_F" || FAIL=1
-          wait "$PID_N" || FAIL=1
-
-          if [ "$FAIL" -eq 1 ]; then
-            docker compose logs backend  --tail=30
-            docker compose logs frontend --tail=30
-            docker compose logs nginx    --tail=30
-            exit 1
-          fi
-          echo "All services ready"
-
-      # ── 10 Start pgweb and inject nginx routes for optional UIs ──────────────
-      # pgweb and minio-console are NOT separate HTTP tunnels (rustunnel hosted
-      # does not support multiple reliable HTTP tunnels). Instead they are served
-      # as sub-paths of the single app tunnel via nginx:
-      #   APP_URL/pgweb/          -> pgweb:8081
-      #   APP_URL/minio-console/  -> minio:9001
-      #
-      # FIX 1: Nginx container grep uses 'nginx|proxy' to match 'event_proxy'.
-      # FIX 2: Python heredoc written to /tmp/gen_nginx.py first, then executed.
-      #         Bash requires heredoc terminators to be at column 0 — they cannot
-      #         be indented inside if-blocks. Writing to a file sidesteps this.
-      - name: Start pgweb and inject nginx routes
-        env:
-          ENABLE_DB_UI: ${{ github.event.inputs.enable_db_ui }}
-          ENABLE_MINIO_CONSOLE: ${{ github.event.inputs.enable_minio_console }}
-        run: |
-          # FIX 1: match event_proxy / nginx / any proxy container name
-          NGINX_CONTAINER=$(docker ps --format '{{.Names}}' | grep -iE 'nginx|proxy' | head -1)
-          echo "Nginx container: ${NGINX_CONTAINER:-NOT FOUND}"
-
-          if [ -z "$NGINX_CONTAINER" ]; then
-            echo "ERROR: could not find nginx/proxy container. Running containers:"
-            docker ps --format '{{.Names}}'
-            exit 1
-          fi
-
-          # ── Start pgweb if requested ────────────────────────────────────────
-          if [ "$ENABLE_DB_UI" = "true" ]; then
-            echo "Starting pgweb..."
-            if docker inspect event_postgres >/dev/null 2>&1; then
-              PG_CONTAINER="event_postgres"
-            else
-              PG_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
-                | grep -i postgres | awk '{print $1}' | head -1)
-            fi
-            DB_USER=$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER    2>/dev/null || echo "postgres")
-            DB_PASS=$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "admin123")
-            DB_NAME=$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB       2>/dev/null || echo "event_ai")
-            PG_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-              "$PG_CONTAINER" | head -1)
-            COMPOSE_NET=$(docker network ls --filter "label=com.docker.compose.project" \
-              --format "{{.Name}}" | head -1)
-            docker rm -f pgweb 2>/dev/null || true
-            docker run -d --name pgweb --network "${COMPOSE_NET:-host}" -p 8081:8081 sosedoff/pgweb \
-              pgweb --bind=0.0.0.0 --listen=8081 \
-                --url="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
-            for i in {1..15}; do
-              curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
-              sleep 2
-            done
-          fi
-
-          # ── Inject nginx extras ─────────────────────────────────────────────
-          if [ "$ENABLE_DB_UI" = "true" ] || [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
-            MINIO_IP="minio"
-            if [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
-              MC=$(docker ps --format '{{.Names}}' | grep -i minio | head -1)
-              MINIO_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-                "$MC" 2>/dev/null | head -1)
-              MINIO_IP=${MINIO_IP:-minio}
-            fi
-
-            # FIX 2: Write Python to a file so the PYEOF terminator can sit at
-            # column 0 — bash heredoc terminators MUST NOT be indented.
-            cat > /tmp/gen_nginx.py << 'PYEOF'
-            import os
-            enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
-            enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
-            minio_ip     = os.environ.get("MINIO_IP", "minio")
-            lines = [
-                "# GHA preview extras",
-                "server {",
-                "    listen 80;",
-                "    server_name _;",
-            ]
-            if enable_db:
-                lines += [
-                    "    location /pgweb/ {",
-                    "        proxy_pass         http://127.0.0.1:8081/;",
-                    "        proxy_set_header   Host $host;",
-                    "        proxy_set_header   X-Real-IP $remote_addr;",
-                    "        proxy_http_version 1.1;",
-                    "        proxy_set_header   Upgrade $http_upgrade;",
-                    '        proxy_set_header   Connection "upgrade";',
-                    "    }",
-                ]
-            if enable_minio:
-                lines += [
-                    "    location /minio-console/ {",
-                    f"        proxy_pass         http://{minio_ip}:9001/;",
-                    "        proxy_set_header   Host $host;",
-                    "        proxy_set_header   X-Real-IP $remote_addr;",
-                    "        proxy_http_version 1.1;",
-                    "    }",
-                ]
-            lines.append("}")
-            txt = "\n".join(lines) + "\n"
-            with open("/tmp/gha-extras.conf", "w") as f:
-                f.write(txt)
-            print("nginx snippet written:")
-            print(txt)
-            PYEOF
-
-            MINIO_IP="$MINIO_IP" python3 /tmp/gen_nginx.py
-
-            docker cp /tmp/gha-extras.conf "${NGINX_CONTAINER}:/etc/nginx/conf.d/gha-extras.conf"
-            if docker exec "$NGINX_CONTAINER" nginx -t 2>&1; then
-              docker exec "$NGINX_CONTAINER" nginx -s reload && echo "nginx reloaded OK"
-            else
-              echo "WARN: nginx config test failed — removing extras snippet"
-              docker exec "$NGINX_CONTAINER" rm -f /etc/nginx/conf.d/gha-extras.conf
-            fi
-          else
-            echo "No optional UIs requested — skipping nginx extras"
-          fi
-
-      # ── 11 Seed default users ─────────────────────────────────────────────────
-      - name: Seed default users
-        run: |
-          echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsKCMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
-
-      # ── 12 Start all tunnels via rustunnel ────────────────────────────────────
-      # ONE HTTP tunnel → nginx on :80.  TWO TCP tunnels → Redis + Postgres.
-      #
-      # Confirmed log format from real runs:
-      #   HTTP: │  __http://snapfind-app.edge.rustunnel.com__  │
-      #   TCP:  │   tcp://edge.rustunnel.com:20098  │
-      #
-      # Regex uses [A-Za-z0-9.-] (no underscore) so trailing __ is not captured.
-      - name: Start all tunnels via rustunnel
-        env:
-          RUSTUNNEL_TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
-        run: |
-          rustunnel start --config /tmp/rustunnel-config.yml \
-            > /tmp/rustunnel.log 2>&1 &
-          echo $! > /tmp/rustunnel.pid
-
-          echo "Waiting for rustunnel tunnels (up to 120s)..."
-          for i in $(seq 1 8); do
-            sleep 15
-
-            echo ""
-            echo "===== rustunnel raw log (${i}×15s) ====="
-            cat /tmp/rustunnel.log
-            echo "===== end log ====="
-
-            # [A-Za-z0-9.-] excludes underscore — __ never captured
-            APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' \
-              /tmp/rustunnel.log | head -1)
-            REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-              /tmp/rustunnel.log | sed -n '1p')
-            PG_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-              /tmp/rustunnel.log | sed -n '2p')
-
-            echo "  Parsed → APP=$APP_URL  REDIS_PORT=$REDIS_PORT  PG_PORT=$PG_PORT"
-
-            if [ -n "$APP_URL" ] && [ -n "$REDIS_PORT" ] && [ -n "$PG_PORT" ]; then
-              echo "All core tunnels established!"
-              break
-            fi
+# ─────────────────────────────────────────────
+# 9. Health checks
+# ─────────────────────────────────────────────
+    - name: Wait services
+      run: |
+        check() {
+          for i in {1..40}; do
+            curl -sf "$1" && return 0
+            sleep 3
           done
+          return 1
+        }
 
-          # Final parse
-          APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' \
-            /tmp/rustunnel.log | head -1)
-          REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-            /tmp/rustunnel.log | sed -n '1p')
-          PG_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' \
-            /tmp/rustunnel.log | sed -n '2p')
+        check http://localhost || exit 1
+        check http://localhost:3000 || exit 1
+        check http://localhost:8000/docs || exit 1
 
-          if [ -z "$APP_URL" ] || [ -z "$REDIS_PORT" ] || [ -z "$PG_PORT" ]; then
-            echo "ERROR: core tunnels failed — full log:"
-            cat /tmp/rustunnel.log
-            exit 1
-          fi
+# ─────────────────────────────────────────────
+# 10. Start tunnel
+# ─────────────────────────────────────────────
+    - name: Start tunnel
+      run: |
+        rustunnel start --config /tmp/rt.yml > rt.log 2>&1 &
 
-          REDIS_URL="redis://edge.rustunnel.com:${REDIS_PORT}/0"
-          DB_URL="postgresql://postgres:admin123@edge.rustunnel.com:${PG_PORT}/event_ai"
+        sleep 20
 
-          # Optional UI paths (served via nginx sub-paths, not separate tunnels)
-          PGWEB_URL=""
-          MINIO_CONSOLE_URL=""
-          [ "${{ github.event.inputs.enable_db_ui }}"        = "true" ] && PGWEB_URL="${APP_URL}/pgweb/"
-          [ "${{ github.event.inputs.enable_minio_console }}" = "true" ] && MINIO_CONSOLE_URL="${APP_URL}/minio-console/"
+        APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' rt.log | head -1)
 
-          {
-            echo "PREVIEW_URL=$APP_URL"
-            echo "REDIS_PORT=$REDIS_PORT"
-            echo "PG_PORT=$PG_PORT"
-            echo "REDIS_URL=$REDIS_URL"
-            echo "DB_URL=$DB_URL"
-            echo "PGWEB_URL=$PGWEB_URL"
-            echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL"
-          } >> "$GITHUB_ENV"
+        if [ -z "$APP_URL" ]; then
+          echo "❌ Tunnel failed"
+          cat rt.log
+          exit 1
+        fi
 
-          echo "================================="
-          echo "  SnapFind Preview — TUNNELS LIVE"
-          echo "================================="
-          echo "  App:          $APP_URL"
-          echo "  API docs:     $APP_URL/api/docs"
-          echo "  Storage:      $APP_URL/storage/  (nginx → minio:9000)"
-          [ -n "$PGWEB_URL" ]         && echo "  pgweb DB UI:  $PGWEB_URL"
-          [ -n "$MINIO_CONSOLE_URL" ] && echo "  MinIO UI:     $MINIO_CONSOLE_URL"
-          echo "---------------------------------"
-          echo "  Redis:    edge.rustunnel.com:$REDIS_PORT"
-          echo "  Postgres: edge.rustunnel.com:$PG_PORT"
-          echo "---------------------------------"
-          echo "  Colab GPU worker:"
-          echo "  CELERY_BROKER_URL = \"$REDIS_URL\""
-          echo "  DATABASE_URL      = \"$DB_URL\""
-          echo "================================="
+        echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
 
-      # ── 13 Inject MINIO_PRESIGN_ENDPOINT into backend ─────────────────────────
-      # Presigned PUT URLs must be signed with the PUBLIC host so the browser's
-      # PUT request Host header matches the HMAC signature.
-      #
-      # With single-tunnel architecture:
-      #   MINIO_PRESIGN_ENDPOINT = APP_URL  (e.g. http://snapfind-app.edge.rustunnel.com)
-      #   Browser PUT:  APP_URL/storage/events/3/raw_xxx.jpg
-      #   nginx proxies: /storage/ → minio:9000
-      #   MinIO validates: signature host = APP_URL = Host header ✓
-      #
-      # MINIO_PUBLIC_URL = APP_URL/storage  (photo/thumbnail URLs in API responses)
-      - name: Inject MINIO_PRESIGN_ENDPOINT into backend
-        run: |
-          sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$PREVIEW_URL|"  .env
-          sed -i "s|MINIO_PUBLIC_URL=.*|MINIO_PUBLIC_URL=$PREVIEW_URL/storage|"       .env
+        echo "🚀 App URL: $APP_URL"
 
-          MINIO_PRESIGN_ENDPOINT="$PREVIEW_URL" \
-          MINIO_PUBLIC_URL="$PREVIEW_URL/storage" \
-            docker compose up -d --no-deps --force-recreate backend
+# ─────────────────────────────────────────────
+# 11. Inject MinIO public URL
+# ─────────────────────────────────────────────
+    - name: Inject URLs
+      run: |
+        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$PREVIEW_URL|" .env
+        sed -i "s|MINIO_PUBLIC_URL=.*|MINIO_PUBLIC_URL=$PREVIEW_URL/storage|" .env
 
-          echo "Waiting for backend to restart..."
-          for i in {1..30}; do
-            curl -sf http://localhost:8000/docs >/dev/null && echo "Backend ready (${i}×2s)" && break
-            sleep 2
-          done
+        docker compose up -d --force-recreate backend
 
-          BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -n1)
-          LIVE_PRESIGN=$(docker exec "$BACKEND" printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-          LIVE_PUBLIC=$(docker exec  "$BACKEND" printenv MINIO_PUBLIC_URL       2>/dev/null || true)
+# ─────────────────────────────────────────────
+# 12. Keep alive
+# ─────────────────────────────────────────────
+    - name: Keep alive
+      run: |
+        echo "Preview running at: $PREVIEW_URL"
 
-          echo "MINIO_PRESIGN_ENDPOINT: $LIVE_PRESIGN"
-          echo "MINIO_PUBLIC_URL:       $LIVE_PUBLIC"
+        for i in {1..120}; do
+          sleep 60
+          echo "⏳ Alive ($i min)"
+        done
 
-          if [ "$LIVE_PRESIGN" != "$PREVIEW_URL" ]; then
-            echo "ERROR: MINIO_PRESIGN_ENDPOINT mismatch!"
-            echo "  Expected: $PREVIEW_URL"
-            echo "  Got:      $LIVE_PRESIGN"
-            exit 1
-          fi
-          echo "Env injection confirmed OK"
-
-          # Debug dump — verify no stray port numbers baked into frontend
-          FRONTEND=$(docker ps --format '{{.Names}}' | grep -i frontend | head -n1)
-          echo "--- Frontend NEXT_PUBLIC vars ---"
-          docker exec "$FRONTEND" printenv 2>/dev/null \
-            | grep -E 'NEXT_PUBLIC|MINIO|API_URL|STORAGE' || echo "(none found)"
-          echo "--- Backend MINIO/STORAGE vars ---"
-          docker exec "$BACKEND"  printenv 2>/dev/null \
-            | grep -E 'MINIO|STORAGE|PRESIGN|BACKEND' || echo "(none found)"
-
-      # ── 14 Keep-alive loop ────────────────────────────────────────────────────
-      - name: Keep preview alive
-        if: always()
-        env:
-          PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
-          SHOW_CELERY_LOGS: ${{ github.event.inputs.show_celery_logs }}
-        run: |
-          print_urls() {
-            echo ""
-            echo "================================="
-            echo "  SnapFind Preview — LIVE URLS"
-            echo "================================="
-            echo "  App:          $PREVIEW_URL"
-            echo "  API docs:     $PREVIEW_URL/api/docs"
-            echo "  Storage:      $PREVIEW_URL/storage/"
-            [ -n "$PGWEB_URL" ]         && echo "  pgweb DB UI:  $PGWEB_URL"
-            [ -n "$MINIO_CONSOLE_URL" ] && echo "  MinIO UI:     $MINIO_CONSOLE_URL"
-            echo "---------------------------------"
-            echo "  Redis:    edge.rustunnel.com:$REDIS_PORT"
-            echo "  Postgres: edge.rustunnel.com:$PG_PORT"
-            echo "---------------------------------"
-            echo "  Colab GPU worker:"
-            echo "  CELERY_BROKER_URL = \"$REDIS_URL\""
-            echo "  DATABASE_URL      = \"$DB_URL\""
-            echo "---------------------------------"
-            echo "  Test Accounts"
-            echo "  Admin: admin@admin.com / 123456"
-            echo "  User:  test@gmail.com  / 123456"
-            echo "================================="
-          }
-
-          # Guard: if tunnels never came up, warn but continue the keep-alive
-          # so logs remain accessible for debugging (step runs with if: always())
-          if [ -z "$PREVIEW_URL" ]; then
-            echo "WARNING: PREVIEW_URL is empty — tunnels did not start correctly."
-            echo "Check Step 12 logs for rustunnel errors."
-          else
-            print_urls
-          fi
-
-          # Verify admin user seeded correctly
-          docker exec event_backend python3 -c "
-          from app.database.db import SessionLocal
-          from app.models.user import User
-          db = SessionLocal()
-          u = db.query(User).filter(User.email=='admin@admin.com').first()
-          print('admin@admin.com role=' + (u.role if u else 'NOT FOUND'))
-          db.close()
-          " 2>/dev/null || true
-
-          # Aggregate service logs
-          CELERY_LOG=/tmp/celery_all.log
-          > "$CELERY_LOG"
-          tail_worker() {
-            docker logs -f --timestamps "$1" 2>&1 \
-              | sed -u "s/^/[$2] /" >> "$CELERY_LOG" &
-          }
-          tail_worker event_celery_photo    "PHOTO   "
-          tail_worker event_celery_finalize "FINALIZE"
-          tail_worker event_celery_ai       "AI      "
-          tail_worker event_celery_default  "DEFAULT "
-          tail_worker event_celery_beat     "BEAT    "
-          tail_worker event_backend         "BACKEND "
-          tail_worker event_frontend        "FRONTEND"
-
-          # FIX 3: only tail rustunnel log if it exists
-          if [ -f /tmp/rustunnel.log ]; then
-            tail -f /tmp/rustunnel.log | sed -u 's/^/[RUSTUNNEL] /' >> "$CELERY_LOG" &
-          else
-            echo "WARNING: /tmp/rustunnel.log not found — rustunnel may not have started"
-          fi
-
-          LOG_OFFSET=0
-          SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
-          ITERATION=0
-
-          for (( i=0; i<SECONDS_LEFT; i+=60 )); do
-            sleep 60
-            ITERATION=$(( ITERATION + 1 ))
-            REM=$(( (SECONDS_LEFT - i) / 60 ))
-
-            echo ""
-            echo "──────────────────────────────────────────"
-            echo "[$REM min remaining] $(date '+%H:%M:%S')"
-            echo "──────────────────────────────────────────"
-
-            curl -sf http://localhost/api/docs >/dev/null \
-              && echo "  ✓ Backend healthy" \
-              || echo "  ⚠ WARNING: backend health check failed"
-
-            # FIX 4: safe rustunnel watchdog — guard against missing PID file
-            RT_PID=$(cat /tmp/rustunnel.pid 2>/dev/null)
-            if [ -z "$RT_PID" ]; then
-              echo "  ⚠ rustunnel PID file missing — attempting restart..."
-              rustunnel start --config /tmp/rustunnel-config.yml \
-                >> /tmp/rustunnel.log 2>&1 &
-              echo $! > /tmp/rustunnel.pid
-              sleep 15
-              echo "  rustunnel started (pid=$(cat /tmp/rustunnel.pid))"
-            elif ! kill -0 "$RT_PID" 2>/dev/null; then
-              echo "  ⚠ rustunnel died — restarting..."
-              rustunnel start --config /tmp/rustunnel-config.yml \
-                >> /tmp/rustunnel.log 2>&1 &
-              echo $! > /tmp/rustunnel.pid
-              sleep 15
-              echo "  rustunnel restarted (pid=$(cat /tmp/rustunnel.pid))"
-            else
-              echo "  ✓ rustunnel healthy (pid=$RT_PID)"
-            fi
-
-            if (( ITERATION % 5 == 0 )); then
-              print_urls
-            else
-              echo "  App:      ${PREVIEW_URL:-NOT SET}"
-              echo "  Redis:    edge.rustunnel.com:${REDIS_PORT:-NOT SET}"
-              echo "  Postgres: edge.rustunnel.com:${PG_PORT:-NOT SET}"
-            fi
-
-            if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
-              TOTAL_LINES=$(wc -l < "$CELERY_LOG")
-              NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
-              if [ "$NEW_LINES" -gt 0 ]; then
-                echo "--- Service logs ($NEW_LINES new lines) ---"
-                tail -n "$NEW_LINES" "$CELERY_LOG"
-                echo "--- end ---"
-              fi
-              LOG_OFFSET=$TOTAL_LINES
-            fi
-
-            if (( ITERATION % 5 == 0 )); then
-              echo "--- Container status ---"
-              for C in event_backend event_frontend event_celery_photo \
-                       event_celery_finalize event_celery_ai \
-                       event_celery_default event_celery_beat pgweb; do
-                STATUS=$(docker inspect --format='{{.State.Status}}' \
-                  "$C" 2>/dev/null || echo "not found")
-                echo "  $C → $STATUS"
-              done
-              echo "------------------------"
-            fi
-          done
-
-      # ── 15 Show logs on failure ───────────────────────────────────────────────
-      - name: Show logs on failure
-        if: failure()
-        run: |
-          echo "===== RUSTUNNEL LOG ====="
-          cat /tmp/rustunnel.log || true
-          echo "===== RUSTUNNEL CONFIG (token masked) ====="
-          sed 's/\(auth_token: \).*/\1***/' /tmp/rustunnel-config.yml || true
-          echo "===== NGINX EXTRAS SNIPPET ====="
-          cat /tmp/gha-extras.conf || true
-          echo "===== BACKEND ====="
-          docker compose logs backend --tail=50
-          echo "===== FRONTEND ====="
-          docker compose logs frontend --tail=50
-          echo "===== NGINX ====="
-          docker compose logs nginx --tail=30
-          echo "===== CELERY PHOTO ====="
-          docker compose logs celery_photo --tail=30
-          echo "===== CELERY FINALIZE ====="
-          docker compose logs celery_finalize --tail=30
-          echo "===== CELERY AI ====="
-          docker compose logs celery_ai --tail=30
-          echo "===== CELERY DEFAULT ====="
-          docker compose logs celery_default --tail=30
-          echo "===== CELERY BEAT ====="
-          docker compose logs celery_beat --tail=30
-          docker logs pgweb 2>/dev/null || true
-
-      # ── 16 Cleanup ────────────────────────────────────────────────────────────
-      - name: Cleanup
-        if: always()
-        run: |
-          kill "$(cat /tmp/rustunnel.pid 2>/dev/null)" 2>/dev/null || true
-          docker compose down -v
-          echo "Cleanup complete"
+# ─────────────────────────────────────────────
+# 13. Cleanup
+# ─────────────────────────────────────────────
+    - name: Cleanup
+      if: always()
+      run: |
+        docker compose down -v
+        echo "Done"
