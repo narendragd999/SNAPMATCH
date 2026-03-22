@@ -104,10 +104,12 @@ jobs:
           pgweb:
             proto: http
             local_port: 8081
+            subdomain: snapfind-pgweb
 
           minio_console:
             proto: http
             local_port: 9001
+            subdomain: snapfind-minio
 
           redis:
             proto: tcp
