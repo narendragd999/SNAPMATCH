@@ -261,7 +261,7 @@ jobs:
           ENABLE_DB_UI: ${{ github.event.inputs.enable_db_ui }}
           ENABLE_MINIO_CONSOLE: ${{ github.event.inputs.enable_minio_console }}
         run: |
-          NGINX_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i nginx | head -1)
+          NGINX_CONTAINER=$(docker ps --format '{{.Names}}' | grep -iE 'nginx|proxy' | head -1)
           echo "Nginx container: ${NGINX_CONTAINER:-NOT FOUND}"
 
           # ── Start pgweb if requested ──────────────────────────────────────────
@@ -290,7 +290,7 @@ jobs:
             done
           fi
 
-          # ── Inject nginx extras via Python (avoids unindented nginx content) ──
+          # ── Inject nginx extras ───────────────────────────────────────────────
           if [ "$ENABLE_DB_UI" = "true" ] || [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
             MINIO_IP="minio"
             if [ "$ENABLE_MINIO_CONSOLE" = "true" ]; then
@@ -300,7 +300,9 @@ jobs:
               MINIO_IP=${MINIO_IP:-minio}
             fi
 
-            python3 << 'PYEOF'
+            # Write Python script to a file first — heredoc delimiter MUST be
+            # at column 0 in bash, so we avoid inline heredoc inside if-blocks.
+            cat > /tmp/gen_nginx.py << 'PYEOF'
             import os
             enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
             enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
@@ -338,6 +340,8 @@ jobs:
             print("nginx snippet written:")
             print(txt)
             PYEOF
+
+            MINIO_IP="$MINIO_IP" python3 /tmp/gen_nginx.py
 
             docker cp /tmp/gha-extras.conf "${NGINX_CONTAINER}:/etc/nginx/conf.d/gha-extras.conf"
             if docker exec "$NGINX_CONTAINER" nginx -t 2>&1; then
