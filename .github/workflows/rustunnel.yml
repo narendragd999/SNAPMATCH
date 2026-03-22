@@ -340,6 +340,10 @@ jobs:
         echo "Redis container: $CONTAINER"
         docker exec $CONTAINER redis-cli ping 
 
+    - name: Test Postgres internally
+      run: |
+        docker exec event_postgres pg_isready
+
     # 14 pgweb (Postgres browser UI)
     # ── KEY FIX: pgweb tunnel auto-restarts every 50 min via a background
     #    watchdog. Cloudflare free tunnels silently expire — the watchdog

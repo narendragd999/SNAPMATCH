@@ -22,6 +22,7 @@ services:
       POSTGRES_DB:       event_ai    
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    command: postgres -c listen_addresses='*'
     ports:
       - "5432:5432"
     healthcheck:
