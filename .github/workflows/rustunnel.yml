@@ -1,17 +1,7 @@
-name: SnapFind Full Preview
+name: SnapFind Hybrid Preview
 
 on:
   workflow_dispatch:
-    inputs:
-      duration_hours:
-        description: "Preview duration"
-        default: "2"
-      enable_db_ui:
-        description: "Enable pgweb"
-        default: "false"
-      enable_minio_console:
-        description: "Enable MinIO Console"
-        default: "false"
 
 jobs:
   preview:
@@ -26,13 +16,14 @@ jobs:
       - uses: actions/checkout@v4
 
 # ─────────────────────────────
-# 2. Free space
+# 2. Free disk
 # ─────────────────────────────
-      - run: |
+      - name: Free disk
+        run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
 
 # ─────────────────────────────
-# 3. Docker setup
+# 3. Setup Docker
 # ─────────────────────────────
       - uses: docker/setup-buildx-action@v3
 
@@ -47,61 +38,76 @@ jobs:
           chmod +x /usr/local/bin/rustunnel
 
 # ─────────────────────────────
-# 5. Verify token
+# 5. Install cloudflared
 # ─────────────────────────────
-      - name: Check token
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+
+# ─────────────────────────────
+# 6. Verify token
+# ─────────────────────────────
+      - name: Check rustunnel token
         env:
           TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "Missing token"; exit 1;
+            echo "Missing RUSTUNNEL_TOKEN"
+            exit 1
           fi
 
 # ─────────────────────────────
-# 6. Create rustunnel config
+# 7. Create rustunnel config
 # ─────────────────────────────
       - name: Create tunnel config
         env:
           TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
         run: |
-          echo "server: edge.rustunnel.com:4040" > rt.yml
-          echo "auth_token: $TOKEN" >> rt.yml
-          echo "" >> rt.yml
-          echo "tunnels:" >> rt.yml
-          echo "  app:" >> rt.yml
-          echo "    proto: http" >> rt.yml
-          echo "    local_port: 80" >> rt.yml
-          echo "    subdomain: snapfind-app" >> rt.yml
-          echo "  redis:" >> rt.yml
-          echo "    proto: tcp" >> rt.yml
-          echo "    local_port: 6379" >> rt.yml
-          echo "  postgres:" >> rt.yml
-          echo "    proto: tcp" >> rt.yml
-          echo "    local_port: 5432" >> rt.yml
+          cat <<EOF > rt.yml
+server: edge.rustunnel.com:4040
+auth_token: $TOKEN
+
+tunnels:
+  app:
+    proto: http
+    local_port: 80
+    subdomain: snapfind-app
+EOF
 
 # ─────────────────────────────
-# 7. Create ENV
+# 8. Create ENV
 # ─────────────────────────────
       - name: Create .env
         run: |
-          echo "ENV=prod" > .env
-          echo "SECRET_KEY=preview-secret" >> .env
-          echo "MINIO_PUBLIC_URL=/storage" >> .env
-          echo "MINIO_PRESIGN_ENDPOINT=" >> .env
+          cat <<EOF > .env
+ENV=prod
+SECRET_KEY=preview-secret
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=snapfind
+MINIO_PUBLIC_URL=/storage
+MINIO_PRESIGN_ENDPOINT=
+NEXT_PUBLIC_API_URL=/api
+NEXT_PUBLIC_STORAGE_URL=/storage
+NGINX_PORT=80
+EOF
 
 # ─────────────────────────────
-# 8. Start Docker
+# 9. Start Docker
 # ─────────────────────────────
       - name: Start containers
         run: |
           docker compose build --parallel
           docker compose up -d
-          docker ps
 
 # ─────────────────────────────
-# 9. Wait for services
+# 10. Wait services
 # ─────────────────────────────
-      - name: Health check
+      - name: Wait for services
         run: |
           for i in {1..40}; do
             curl -sf http://localhost && exit 0
@@ -110,105 +116,80 @@ jobs:
           echo "App failed"; docker compose logs; exit 1
 
 # ─────────────────────────────
-# 10. Optional pgweb
+# 11. Start rustunnel (APP)
 # ─────────────────────────────
-      - name: Start pgweb
-        if: ${{ github.event.inputs.enable_db_ui == 'true' }}
+      - name: Start app tunnel
         run: |
-          docker run -d --name pgweb -p 8081:8081 \
-            sosedoff/pgweb \
-            --bind=0.0.0.0 --listen=8081 \
-            --url="postgres://postgres:admin123@localhost:5432/postgres?sslmode=disable"
+          rustunnel start --config rt.yml > rt.log 2>&1 &
+          sleep 20
 
-# ─────────────────────────────
-# 11. Start tunnel
-# ─────────────────────────────
-      - name: Start rustunnel
-        run: |
-          rustunnel start --config rt.yml > tunnel.log 2>&1 &
-          sleep 25
-
-          APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | head -1)
-          REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '1p')
-          PG_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '2p')
+          APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' rt.log | head -1)
 
           if [ -z "$APP_URL" ]; then
-            echo "Tunnel failed"; cat tunnel.log; exit 1
+            echo "Tunnel failed"; cat rt.log; exit 1
           fi
 
           echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
-          echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
-          echo "PG_PORT=$PG_PORT" >> $GITHUB_ENV
-
-          echo "🚀 App: $APP_URL"
+          echo "APP URL: $APP_URL"
 
 # ─────────────────────────────
-# 12. Inject MinIO URL
+# 12. Start MinIO tunnel (DIRECT)
 # ─────────────────────────────
-      - name: Fix MinIO URLs (Nginx compatible)
+      - name: Start MinIO tunnel
         run: |
-          echo "Setting MinIO endpoints for nginx routing..."
+          cloudflared tunnel --url http://localhost:9000 > /tmp/minio.log 2>&1 &
 
-          # IMPORTANT: use nginx upload route
-          sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$PREVIEW_URL/minio-upload|" .env
+          for i in {1..30}; do
+            sleep 1
+            MINIO_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' /tmp/minio.log | head -1)
+            [ -n "$MINIO_URL" ] && break
+          done
 
-          # public read path
+          if [ -z "$MINIO_URL" ]; then
+            echo "MinIO tunnel failed"; cat /tmp/minio.log; exit 1
+          fi
+
+          echo "MINIO_TUNNEL_URL=$MINIO_URL" >> $GITHUB_ENV
+          echo "MinIO URL: $MINIO_URL"
+
+# ─────────────────────────────
+# 13. Make bucket public
+# ─────────────────────────────
+      - name: Make MinIO bucket public
+        run: |
+          MC=$(docker ps --format '{{.Names}}' | grep -i minio | head -1)
+
+          docker exec $MC mc alias set local http://localhost:9000 minioadmin minioadmin || true
+          docker exec $MC mc anonymous set public local/snapfind || true
+
+# ─────────────────────────────
+# 14. Inject endpoints (HYBRID)
+# ─────────────────────────────
+      - name: Inject MinIO endpoints
+        run: |
+          sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
           sed -i "s|MINIO_PUBLIC_URL=.*|MINIO_PUBLIC_URL=$PREVIEW_URL/storage|" .env
 
-          echo "Restarting backend..."
           docker compose up -d --force-recreate backend
 
-          echo "Waiting for backend..."
           for i in {1..20}; do
             curl -sf http://localhost:8000/docs && break
             sleep 2
           done
 
-          echo "🔍 Verifying inside container..."
-          BACKEND=$(docker ps --format '{{.Names}}' | grep -i backend | head -1)
-
-          docker exec $BACKEND printenv | grep MINIO
-
-
-      - name: Debug presigned URL
-        run: |
-          echo "================ DEBUG PRESIGNED URL ================"
-
-          echo "Checking backend health..."
-          curl -s http://localhost:8000/docs > /dev/null && echo "✅ Backend OK" || echo "❌ Backend not reachable"
-
-          echo ""
-          echo "Trying to generate presigned URL..."
-
-          RESPONSE=$(curl -s http://localhost:8000/api/test-presign || true)
-
-          echo "Response:"
-          echo "$RESPONSE"
-
-          echo ""
-          echo "Checking if URL contains correct domain..."
-
-          echo "$RESPONSE" | grep -q "$PREVIEW_URL" \
-            && echo "✅ Uses correct PUBLIC URL" \
-            || echo "❌ STILL using localhost (PROBLEM)"
-
-          echo "====================================================="
-
 # ─────────────────────────────
-# 13. Show URLs
+# 15. Show URLs
 # ─────────────────────────────
       - name: Show URLs
         run: |
-          echo "========================="
+          echo "================================="
           echo "APP: $PREVIEW_URL"
-          echo "API: $PREVIEW_URL/api/docs"
-          echo "Storage: $PREVIEW_URL/storage/"
-          echo "Redis: edge.rustunnel.com:$REDIS_PORT"
-          echo "Postgres: edge.rustunnel.com:$PG_PORT"
-          echo "========================="
+          echo "UPLOAD: $MINIO_TUNNEL_URL"
+          echo "STORAGE: $PREVIEW_URL/storage/"
+          echo "================================="
 
 # ─────────────────────────────
-# 14. Keep alive
+# 16. Keep alive
 # ─────────────────────────────
       - name: Keep alive
         run: |
@@ -218,9 +199,10 @@ jobs:
           done
 
 # ─────────────────────────────
-# 15. Cleanup
+# 17. Cleanup
 # ─────────────────────────────
       - name: Cleanup
         if: always()
         run: |
+          pkill cloudflared || true
           docker compose down -v
