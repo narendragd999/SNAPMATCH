@@ -1,4 +1,4 @@
-name: SnapFind Preview
+name: SnapFind Preview TEST
 
 on:
   workflow_dispatch:
