@@ -43,31 +43,31 @@ jobs:
           TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
         run: |
           cat <<EOF > rt.yml
-server: edge.rustunnel.com:4040
-auth_token: $TOKEN
+          server: edge.rustunnel.com:4040
+          auth_token: $TOKEN
 
-tunnels:
-  app:
-    proto: http
-    local_port: 80
-    subdomain: snapfind-app
+          tunnels:
+            app:
+              proto: http
+              local_port: 80
+              subdomain: snapfind-app
 
-  pgweb:
-    proto: http
-    local_port: 8081
+            pgweb:
+              proto: http
+              local_port: 8081
 
-  minio_console:
-    proto: http
-    local_port: 9001
+            minio_console:
+              proto: http
+              local_port: 9001
 
-  redis:
-    proto: tcp
-    local_port: 6379
+            redis:
+              proto: tcp
+              local_port: 6379
 
-  postgres:
-    proto: tcp
-    local_port: 5432
-EOF
+            postgres:
+              proto: tcp
+              local_port: 5432
+          EOF
 
 # ─────────────────────────────
 # 6. Create ENV
