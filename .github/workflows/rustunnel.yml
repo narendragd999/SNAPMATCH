@@ -82,19 +82,19 @@ EOF
       - name: Create .env
         run: |
           cat <<EOF > .env
-ENV=prod
-SECRET_KEY=preview-secret
-STORAGE_BACKEND=minio
-MINIO_ENDPOINT=http://minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=snapfind
-MINIO_PUBLIC_URL=/storage
-MINIO_PRESIGN_ENDPOINT=
-NEXT_PUBLIC_API_URL=/api
-NEXT_PUBLIC_STORAGE_URL=/storage
-NGINX_PORT=80
-EOF
+          ENV=prod
+          SECRET_KEY=preview-secret
+          STORAGE_BACKEND=minio
+          MINIO_ENDPOINT=http://minio:9000
+          MINIO_ACCESS_KEY=minioadmin
+          MINIO_SECRET_KEY=minioadmin
+          MINIO_BUCKET=snapfind
+          MINIO_PUBLIC_URL=/storage
+          MINIO_PRESIGN_ENDPOINT=
+          NEXT_PUBLIC_API_URL=/api
+          NEXT_PUBLIC_STORAGE_URL=/storage
+          NGINX_PORT=80
+          EOF
 
 # ─────────────────────────────
 # 9. Start Docker
