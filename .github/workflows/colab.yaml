@@ -165,12 +165,12 @@ jobs:
         echo "All services ready"
 
     # ← ADD HERE (between step 8 and step 9)
-    - name: Stop celery_photo worker (Colab will handle photo tasks)
+    - name: Stop celery_photo worker (Colab will handle photo tasks) 
       run: |
         docker stop event_celery_photo
         echo "✅ celery_photo stopped — Colab GPU worker will consume photo queue"
         docker ps --format '{{.Names}}\t{{.Status}}' | grep celery
-        
+
     # 9 Seed default users
     - name: Seed default users
       run: |
