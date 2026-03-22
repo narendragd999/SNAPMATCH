@@ -1,4 +1,4 @@
-name: SnapFind Preview With Rustunnel
+name: SnapFind Preview Rust
 
 on:
   workflow_dispatch:
