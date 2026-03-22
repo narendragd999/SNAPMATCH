@@ -304,43 +304,43 @@ jobs:
             # FIX 2: Write Python to a file so the PYEOF terminator can sit at
             # column 0 — bash heredoc terminators MUST NOT be indented.
             cat > /tmp/gen_nginx.py << 'PYEOF'
-import os
-enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
-enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
-minio_ip     = os.environ.get("MINIO_IP", "minio")
-lines = [
-    "# GHA preview extras",
-    "server {",
-    "    listen 80;",
-    "    server_name _;",
-]
-if enable_db:
-    lines += [
-        "    location /pgweb/ {",
-        "        proxy_pass         http://127.0.0.1:8081/;",
-        "        proxy_set_header   Host $host;",
-        "        proxy_set_header   X-Real-IP $remote_addr;",
-        "        proxy_http_version 1.1;",
-        "        proxy_set_header   Upgrade $http_upgrade;",
-        '        proxy_set_header   Connection "upgrade";',
-        "    }",
-    ]
-if enable_minio:
-    lines += [
-        "    location /minio-console/ {",
-        f"        proxy_pass         http://{minio_ip}:9001/;",
-        "        proxy_set_header   Host $host;",
-        "        proxy_set_header   X-Real-IP $remote_addr;",
-        "        proxy_http_version 1.1;",
-        "    }",
-    ]
-lines.append("}")
-txt = "\n".join(lines) + "\n"
-with open("/tmp/gha-extras.conf", "w") as f:
-    f.write(txt)
-print("nginx snippet written:")
-print(txt)
-PYEOF
+            import os
+            enable_db    = os.environ.get("ENABLE_DB_UI",        "false") == "true"
+            enable_minio = os.environ.get("ENABLE_MINIO_CONSOLE","false") == "true"
+            minio_ip     = os.environ.get("MINIO_IP", "minio")
+            lines = [
+                "# GHA preview extras",
+                "server {",
+                "    listen 80;",
+                "    server_name _;",
+            ]
+            if enable_db:
+                lines += [
+                    "    location /pgweb/ {",
+                    "        proxy_pass         http://127.0.0.1:8081/;",
+                    "        proxy_set_header   Host $host;",
+                    "        proxy_set_header   X-Real-IP $remote_addr;",
+                    "        proxy_http_version 1.1;",
+                    "        proxy_set_header   Upgrade $http_upgrade;",
+                    '        proxy_set_header   Connection "upgrade";',
+                    "    }",
+                ]
+            if enable_minio:
+                lines += [
+                    "    location /minio-console/ {",
+                    f"        proxy_pass         http://{minio_ip}:9001/;",
+                    "        proxy_set_header   Host $host;",
+                    "        proxy_set_header   X-Real-IP $remote_addr;",
+                    "        proxy_http_version 1.1;",
+                    "    }",
+                ]
+            lines.append("}")
+            txt = "\n".join(lines) + "\n"
+            with open("/tmp/gha-extras.conf", "w") as f:
+                f.write(txt)
+            print("nginx snippet written:")
+            print(txt)
+            PYEOF
 
             MINIO_IP="$MINIO_IP" python3 /tmp/gen_nginx.py
 
