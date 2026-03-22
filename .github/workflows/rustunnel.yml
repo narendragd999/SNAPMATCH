@@ -1,4 +1,4 @@
-name: SnapFind Preview
+name: SnapFind Rustunnel Preview
 
 on:
   workflow_dispatch:
