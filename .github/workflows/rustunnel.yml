@@ -1,196 +1,216 @@
-name: SnapFind Final Preview
+name: SnapFind Preview (Rustunnel Final)
 
 on:
   workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: "Preview duration in hours"
+        default: "2"
 
 jobs:
   preview:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 330
 
     steps:
 
 # ─────────────────────────────
 # 1. Checkout
 # ─────────────────────────────
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
 # ─────────────────────────────
 # 2. Free disk
 # ─────────────────────────────
-      - run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+    - run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
 
 # ─────────────────────────────
 # 3. Setup Docker
 # ─────────────────────────────
-      - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v3
 
 # ─────────────────────────────
 # 4. Install rustunnel
 # ─────────────────────────────
-      - run: |
-          wget -qO rt.tar.gz https://github.com/joaoh82/rustunnel/releases/download/v0.2.3/rustunnel-v0.2.3-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf rt.tar.gz
-          sudo mv rustunnel /usr/local/bin/
-          chmod +x /usr/local/bin/rustunnel
+    - name: Install rustunnel
+      run: |
+        wget -qO rt.tar.gz https://github.com/joaoh82/rustunnel/releases/download/v0.2.3/rustunnel-v0.2.3-x86_64-unknown-linux-musl.tar.gz
+        tar -xzf rt.tar.gz
+        sudo mv rustunnel /usr/local/bin/
+        chmod +x /usr/local/bin/rustunnel
+        rustunnel --version
 
 # ─────────────────────────────
-# 5. Create tunnel config
+# 5. Create ENV
 # ─────────────────────────────
-      - name: Create config
-        env:
-          TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
-        run: |
-          cat <<EOF > rt.yml
-          server: edge.rustunnel.com:4040
-          auth_token: $TOKEN
+    - name: Create .env
+      run: |
+        cat <<EOF > .env
+ENV=prod
+SECRET_KEY=gha-preview-secret-key
 
-          tunnels:
-            app:
-              proto: http
-              local_port: 80
-              subdomain: snapfind-app
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=snapfind
+MINIO_PUBLIC_URL=/storage
+MINIO_PRESIGN_ENDPOINT=
 
-            pgweb:
-              proto: http
-              local_port: 8081
-
-            minio_console:
-              proto: http
-              local_port: 9001
-
-            redis:
-              proto: tcp
-              local_port: 6379
-
-            postgres:
-              proto: tcp
-              local_port: 5432
-          EOF
+NEXT_PUBLIC_API_URL=/api
+NEXT_PUBLIC_STORAGE_URL=/storage
+NGINX_PORT=80
+EOF
 
 # ─────────────────────────────
-# 6. Create ENV
+# 6. Start Docker
 # ─────────────────────────────
-      - run: |
-          cat <<EOF > .env
-          ENV=prod
-          SECRET_KEY=preview-secret
-
-          STORAGE_BACKEND=minio
-          MINIO_ENDPOINT=http://minio:9000
-          MINIO_ACCESS_KEY=minioadmin
-          MINIO_SECRET_KEY=minioadmin
-          MINIO_BUCKET=snapfind
-          MINIO_PUBLIC_URL=/storage
-          MINIO_PRESIGN_ENDPOINT=
-
-          NEXT_PUBLIC_API_URL=/api
-          NEXT_PUBLIC_STORAGE_URL=/storage
-          NGINX_PORT=80
-          EOF
+    - name: Start containers
+      run: |
+        docker compose build --parallel
+        docker compose up -d
+        docker ps
 
 # ─────────────────────────────
-# 7. Start Docker
+# 7. Wait for services
 # ─────────────────────────────
-      - run: |
-          docker compose build --parallel
-          docker compose up -d
+    - name: Wait services
+      run: |
+        for i in {1..40}; do
+          curl -sf http://localhost && echo "Ready" && exit 0
+          sleep 3
+        done
+        docker compose logs
+        exit 1
 
 # ─────────────────────────────
-# 8. Wait app
+# 8. Create rustunnel config
 # ─────────────────────────────
-      - run: |
-          for i in {1..40}; do
-            curl -sf http://localhost && exit 0
-            sleep 3
-          done
-          docker compose logs
-          exit 1
+    - name: Create rustunnel config
+      env:
+        TOKEN: ${{ secrets.RUSTUNNEL_TOKEN }}
+      run: |
+        cat <<EOF > rt.yml
+server: edge.rustunnel.com:4040
+auth_token: $TOKEN
+
+tunnels:
+  app:
+    proto: http
+    local_port: 80
+    subdomain: snapfind-app
+
+  pgweb:
+    proto: http
+    local_port: 8081
+
+  minio_console:
+    proto: http
+    local_port: 9001
+
+  redis:
+    proto: tcp
+    local_port: 6379
+
+  postgres:
+    proto: tcp
+    local_port: 5432
+EOF
 
 # ─────────────────────────────
 # 9. Start rustunnel
 # ─────────────────────────────
-      - name: Start tunnel
-        run: |
-          rustunnel start --config rt.yml > tunnel.log 2>&1 &
-          sleep 25
+    - name: Start rustunnel
+      run: |
+        rustunnel start --config rt.yml > tunnel.log 2>&1 &
+        sleep 25
 
-          echo "===== TUNNEL LOG ====="
-          cat tunnel.log
+        echo "==== TUNNEL LOG ===="
+        cat tunnel.log
 
-          APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '1p')
-          PGWEB_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '2p')
-          MINIO_UI=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '3p')
+        APP_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '1p')
+        PGWEB_URL=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '2p')
+        MINIO_UI=$(grep -oP 'http://[A-Za-z0-9.-]+\.edge\.rustunnel\.com' tunnel.log | sed -n '3p')
 
-          REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '1p')
-          PG_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '2p')
+        REDIS_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '1p')
+        DB_PORT=$(grep -oP 'tcp://edge\.rustunnel\.com:\K[0-9]+' tunnel.log | sed -n '2p')
 
-          echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
-          echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
-          echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
-          echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
-          echo "PG_PORT=$PG_PORT" >> $GITHUB_ENV
+        echo "PREVIEW_URL=$APP_URL" >> $GITHUB_ENV
+        echo "PGWEB_URL=$PGWEB_URL" >> $GITHUB_ENV
+        echo "MINIO_UI=$MINIO_UI" >> $GITHUB_ENV
+        echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
+        echo "DB_PORT=$DB_PORT" >> $GITHUB_ENV
 
 # ─────────────────────────────
-# 10. Fix HTTPS (CRITICAL)
+# 10. Fix HTTPS (NO mixed content)
 # ─────────────────────────────
-      - name: Fix URLs (NO MIXED CONTENT)
-        run: |
-          CLEAN=$(echo $PREVIEW_URL | sed 's|http://||')
+    - name: Fix MinIO URLs
+      run: |
+        CLEAN=$(echo $PREVIEW_URL | sed 's|http://||')
 
-          sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=https://$CLEAN|" .env
-          sed -i "s|MINIO_PUBLIC_URL=.*|MINIO_PUBLIC_URL=https://$CLEAN/storage|" .env
+        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=https://$CLEAN|" .env
+        sed -i "s|MINIO_PUBLIC_URL=.*|MINIO_PUBLIC_URL=https://$CLEAN/storage|" .env
 
-          docker compose up -d --force-recreate backend
+        docker compose up -d --force-recreate backend
 
 # ─────────────────────────────
 # 11. Make bucket public
 # ─────────────────────────────
-      - run: |
-          MC=$(docker ps --format '{{.Names}}' | grep -i minio | head -1)
+    - name: Make bucket public
+      run: |
+        MC=$(docker ps --format '{{.Names}}' | grep -i minio | head -1)
 
-          docker exec $MC mc alias set local http://localhost:9000 minioadmin minioadmin || true
-          docker exec $MC mc anonymous set public local/snapfind || true
+        docker exec $MC mc alias set local http://localhost:9000 minioadmin minioadmin || true
+        docker exec $MC mc anonymous set public local/snapfind || true
 
 # ─────────────────────────────
 # 12. Show URLs
 # ─────────────────────────────
-      - run: |
-          CLEAN=$(echo $PREVIEW_URL | sed 's|http://||')
+    - name: Show URLs
+      run: |
+        CLEAN=$(echo $PREVIEW_URL | sed 's|http://||')
 
-          echo "================================="
-          echo "APP:"
-          echo "https://$CLEAN"
-          echo ""
-          echo "UPLOAD/STORAGE:"
-          echo "https://$CLEAN/storage/"
-          echo ""
-          echo "PGWEB:"
-          echo "$PGWEB_URL"
-          echo ""
-          echo "MINIO CONSOLE:"
-          echo "$MINIO_UI"
-          echo ""
-          echo "REDIS:"
-          echo "edge.rustunnel.com:$REDIS_PORT"
-          echo ""
-          echo "POSTGRES:"
-          echo "edge.rustunnel.com:$PG_PORT"
-          echo "================================="
+        echo "================================="
+        echo "APP:"
+        echo "https://$CLEAN"
+        echo ""
+        echo "API:"
+        echo "https://$CLEAN/api/docs"
+        echo ""
+        echo "STORAGE:"
+        echo "https://$CLEAN/storage/"
+        echo ""
+        echo "PGWEB:"
+        echo "$PGWEB_URL"
+        echo ""
+        echo "MINIO CONSOLE:"
+        echo "$MINIO_UI"
+        echo ""
+        echo "REDIS:"
+        echo "edge.rustunnel.com:$REDIS_PORT"
+        echo ""
+        echo "POSTGRES:"
+        echo "edge.rustunnel.com:$DB_PORT"
+        echo "================================="
 
 # ─────────────────────────────
 # 13. Keep alive
 # ─────────────────────────────
-      - run: |
-          for i in {1..120}; do
-            sleep 60
-            echo "Running $i min"
-          done
+    - name: Keep alive
+      run: |
+        HOURS=${{ github.event.inputs.duration_hours }}
+        SECONDS=$((HOURS * 3600))
+
+        for ((i=0; i<$SECONDS; i+=60)); do
+          sleep 60
+          echo "Running $((i/60)) min"
+        done
 
 # ─────────────────────────────
 # 14. Cleanup
 # ─────────────────────────────
-      - if: always()
-        run: |
-          docker compose down -v
+    - name: Cleanup
+      if: always()
+      run: |
+        docker compose down -v
