@@ -223,7 +223,8 @@ services:
       - OPENBLAS_NUM_THREADS=4
       - MKL_NUM_THREADS=4
     mem_limit: 2g
-    restart: unless-stopped
+    #restart: unless-stopped
+    restart: "no" 
 
   # ── AI Enrichment Worker ─────────────────────────────────
   # Runs YOLO + Places365. Solo pool is correct (models loaded once in memory).
