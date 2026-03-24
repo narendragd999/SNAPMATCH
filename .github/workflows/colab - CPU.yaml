@@ -1,4 +1,4 @@
-name: SnapFind Preview With Colab
+name: SnapFind Preview With Colab with GHA CPU
 
 on:
   workflow_dispatch:
