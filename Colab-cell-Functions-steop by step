@@ -1,0 +1,275 @@
+"""
+================================================================================
+  SNAPFIND AI — COLAB GPU WORKER
+  Run each cell top-to-bottom. Restart runtime after Cell 1.
+================================================================================
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 1 — INSTALL (run this, then RESTART RUNTIME, then continue from Cell 2)
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+!pip uninstall onnxruntime onnxruntime-gpu -y -q
+!pip install \
+    celery==5.3.6 \
+    redis \
+    psycopg2-binary \
+    pillow \
+    requests \
+    numpy \
+    opencv-python-headless \
+    insightface \
+    faiss-cpu \
+    sqlalchemy \
+    python-dotenv \
+    onnxruntime-gpu \
+    -q
+
+# ── RESTART RUNTIME NOW ──
+# Runtime → Restart runtime (NOT "Restart and run all")
+# Then continue from Cell 2
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 2 — Install BOTO 3
+# ══════════════════════════════════════════════════════════════════════════════
+import subprocess
+subprocess.run(["pip", "install", "boto3", "-q"], check=True)
+print("✅ boto3 installed")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 2 — VERIFY GPU (must show CUDAExecutionProvider)
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+import onnxruntime as ort
+providers = ort.get_available_providers()
+print("Available providers:", providers)
+assert "CUDAExecutionProvider" in providers, "❌ GPU not available! Check runtime type."
+print("✅ GPU confirmed")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 3 — CONFIGURATION  ← EDIT THESE VALUES
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+import os
+
+# ── 1. Redis tunnel (from: pinggy tcp 6379) ──────────────────────────────────
+# Format: redis://tcp.eu.pinggy.io:12345/0
+REDIS_URL = "redis://vtmfm-52-159-243-177.a.free.pinggy.link:40443"
+
+# ── 2. Postgres tunnel (from: pinggy tcp 5432) ───────────────────────────────
+# Format: postgresql://postgres:admin123@tcp.eu.pinggy.io:PORT/event_ai
+DATABASE_URL = "postgresql://postgres:admin123@sgdep-52-159-243-177.a.free.pinggy.link:37333/event_ai"
+
+# ── 3. Your public app URL (Cloudflare tunnel or ngrok) ───────────────────────
+# This is used to download raw images from MinIO via your FastAPI backend
+API_BASE = "https://stack-wagner-hygiene-variation.trycloudflare.com/"
+
+# ── 4. MinIO internal endpoint (used only if you expose MinIO directly) ───────
+# Leave as empty string "" if you want to use API_BASE download instead
+MINIO_DIRECT = "https://impossible-endangered-paste-finals.trycloudflare.com"
+
+# ── 5. Storage path for temp files on Colab ───────────────────────────────────
+COLAB_STORAGE = "/tmp/snapfind"
+
+# ─────────────────────────────────────────────────────────────────────────────
+os.makedirs(COLAB_STORAGE, exist_ok=True)
+
+os.environ["CELERY_BROKER_URL"] = REDIS_URL
+os.environ["DATABASE_URL"]      = DATABASE_URL
+os.environ["STORAGE_BACKEND"]   = "minio"
+os.environ["STORAGE_PATH"]      = COLAB_STORAGE
+os.environ["INDEXES_PATH"]      = "/tmp/snapfind_indexes"
+os.makedirs("/tmp/snapfind_indexes", exist_ok=True)
+
+# These are needed so storage_service initialises without crashing
+os.environ["MINIO_ENDPOINT"]   = MINIO_DIRECT or "http://localhost:9000"
+os.environ["MINIO_ACCESS_KEY"] = "minioadmin"
+os.environ["MINIO_SECRET_KEY"] = "minioadmin"
+os.environ["MINIO_BUCKET"]     = "snapfind"
+os.environ["MINIO_PUBLIC_URL"] = f"{MINIO_DIRECT}/snapfind" if MINIO_DIRECT else f"{API_BASE}/storage"
+
+print("✅ Config set")
+print(f"   Redis:    {REDIS_URL[:40]}...")
+print(f"   Database: {DATABASE_URL[:40]}...")
+print(f"   API:      {API_BASE}")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 4 — CLONE REPO
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+import sys
+
+REPO_URL = "https://github.com/narendragd999/SNAPMATCH.git"   # ← PASTE YOUR REPO URL
+REPO_DIR = "/content/snapfind"
+
+import subprocess
+if not os.path.exists(REPO_DIR):
+    subprocess.run(["git", "clone", REPO_URL, REPO_DIR], check=True)
+else:
+    subprocess.run(["git", "-C", REPO_DIR, "pull"], check=True)
+
+sys.path.insert(0, REPO_DIR)
+os.chdir(REPO_DIR)
+print(f"✅ Repo ready at {REPO_DIR}")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 5 — PATCH storage_service TO DOWNLOAD VIA API (critical for Pinggy)
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+# This monkey-patches get_local_temp_path() so instead of trying to connect
+# to your local MinIO (unreachable from Colab), it downloads files via your
+# FastAPI backend's public URL — which IS reachable.
+
+import requests as _requests
+import sys as _sys
+
+# We need to patch BEFORE importing any app code that imports storage_service
+_API_BASE = API_BASE  # captured from Cell 3
+
+def _patched_get_local_temp_path(event_id: int, filename: str) -> str:
+    """Download file from FastAPI public endpoint → /tmp/snapfind/{event_id}/{filename}"""
+    import os, cv2, numpy as np
+
+    tmp_dir  = f"/tmp/snapfind/{event_id}"
+    tmp_path = os.path.join(tmp_dir, filename)
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    if os.path.exists(tmp_path):
+        return tmp_path   # already cached
+
+    # Try public event endpoint (works for optimized/processed files)
+    # Raw files are under /storage/events/{event_id}/{filename} (local backend path)
+    # We expose them via the owner image endpoint or direct storage mount.
+    #
+    # Strategy:  GET /storage/events/{event_id}/{filename}
+    # This works because FastAPI serves StaticFiles at /storage when STORAGE_BACKEND=local.
+    # For minio backend we hit the MinIO public URL directly.
+    urls_to_try = [
+        f"{_API_BASE}/storage/events/{event_id}/{filename}",   # StaticFiles fallback
+        f"{_API_BASE}/storage/{event_id}/{filename}",           # alternate path
+    ]
+
+    for url in urls_to_try:
+        try:
+            resp = _requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                with open(tmp_path, "wb") as f:
+                    f.write(resp.content)
+                print(f"⬇️  Downloaded {filename} ({len(resp.content)//1024}KB)")
+                return tmp_path
+        except Exception as e:
+            print(f"⚠️  URL {url} failed: {e}")
+            continue
+
+    raise FileNotFoundError(
+        f"Could not download {filename} for event {event_id}. "
+        f"Tried: {urls_to_try}. "
+        f"Check API_BASE and that MinIO/storage is accessible."
+    )
+
+def _patched_release_local_temp_path(event_id: int, filename: str) -> None:
+    """Keep temp files cached on Colab — disk is free and saves re-downloads."""
+    pass  # intentionally no-op on Colab
+
+# Apply patches BEFORE any app imports
+import importlib
+import app.services.storage_service as _ss
+_ss.get_local_temp_path     = _patched_get_local_temp_path
+_ss.release_local_temp_path = _patched_release_local_temp_path
+print("✅ storage_service patched for Colab download")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 6 — VERIFY DATABASE CONNECTION
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+from sqlalchemy import create_engine, text
+engine = create_engine(os.environ["DATABASE_URL"])
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT COUNT(*) FROM events")).scalar()
+    print(f"✅ Database connected — {result} events found")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 7 — VERIFY REDIS CONNECTION
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+import redis
+r = redis.Redis.from_url(os.environ["CELERY_BROKER_URL"], decode_responses=True)
+print(f"✅ Redis ping: {r.ping()}")
+print(f"   Queued tasks in photo_processing: {r.llen('photo_processing')}")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 8 — VERIFY INSIGHTFACE (loads model, shows GPU usage)
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+from insightface.app import FaceAnalysis
+import numpy as np
+
+face_app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection", "recognition"])
+face_app.prepare(ctx_id=0, det_size=(320, 320))   # ctx_id=0 = GPU
+
+# Quick smoke test
+dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+faces = face_app.get(dummy)
+print(f"✅ InsightFace loaded on GPU — test detection: {len(faces)} faces in blank image (expected 0)")
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 9 — START WORKER  (this cell runs forever — that's correct)
+# ══════════════════════════════════════════════════════════════════════════════
+"""
+# Option A: Run as subprocess (non-blocking, see logs below)
+import subprocess, threading
+
+def stream_logs(proc):
+    for line in iter(proc.stdout.readline, b''):
+        print(line.decode(), end='')
+
+proc = subprocess.Popen(
+    [
+        "celery", "-A", "app.workers.celery_worker", "worker",
+        "-Q", "photo_processing",
+        "--concurrency=1",
+        "--loglevel=info",
+        "--without-heartbeat",
+        "--without-gossip",
+        "--without-mingle",
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    cwd="/content/snapfind",
+)
+
+t = threading.Thread(target=stream_logs, args=(proc,), daemon=True)
+t.start()
+print("✅ Celery worker started (PID", proc.pid, ")")
+print("📋 Logs streaming below...")
+print("=" * 60)
+
+# Keep cell alive (shows logs)
+import time
+while True:
+    if proc.poll() is not None:
+        print("❌ Worker died! Exit code:", proc.returncode)
+        break
+    time.sleep(1)
+
+
+══════════════════════════════════════════════════════════════════════════════
+# CELL 9 — Finished
+# ══════════════════════════════════════════════════════════════════════════════
