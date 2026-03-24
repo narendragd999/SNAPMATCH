@@ -324,10 +324,6 @@ jobs:
             || echo "❌ Still not set. Got: '$LIVE'"
         fi
 
-        # Re-stop celery_photo after any backend restart
-        docker update --restart=no event_celery_photo 2>/dev/null || true
-        docker stop event_celery_photo 2>/dev/null || true
-        echo "✅ celery_photo re-stopped"
 
     # 14 Start Redis + Postgres TCP tunnels via Pinggy
     - name: Start Redis + Postgres TCP tunnels (Pinggy)
@@ -469,10 +465,7 @@ jobs:
           && echo "✅ Nginx routing healthy" \
           || echo "❌ Nginx routing failed"
 
-        echo "=== celery_photo status ==="
-        docker inspect \
-          --format='{{.State.Status}}' \
-          event_celery_photo 2>/dev/null || echo "not found"
+        
 
     # 16 Start Pinggy watchdog
     - name: Start Pinggy watchdog
@@ -536,15 +529,7 @@ jobs:
               fi
             fi
 
-            # ── Keep celery_photo stopped ──
-            PHOTO=$(docker inspect \
-              --format='{{.State.Status}}' \
-              event_celery_photo 2>/dev/null || echo "")
-            if [ "$PHOTO" = "running" ]; then
-              echo "[watchdog] celery_photo restarted — stopping again"
-              docker update --restart=no event_celery_photo 2>/dev/null || true
-              docker stop event_celery_photo 2>/dev/null || true
-            fi
+            
 
             # ── Auto-fix nginx if broken ──
             if ! curl -sf http://localhost/api/docs >/dev/null 2>&1; then
