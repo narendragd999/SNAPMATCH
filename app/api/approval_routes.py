@@ -90,7 +90,7 @@ def approve_photo(
     # photos are never touched again.
     #process_images.apply_async(args=[event_id], queue="face_processing")
     #process_event.apply_async(args=[event_id], queue="photo_processing")
-    process_event.apply_async(args=[event_id], queue="default")
+    process_event.apply_async(args=[event_id], queue="photo_processing")
 
     return {
         "message": "Photo approved and queued for processing",
@@ -220,7 +220,7 @@ def re_approve_photo(
     # ── FIX: Queue photo for processing ──────────────────────────────────────
     #process_images.apply_async(args=[event_id], queue="face_processing")
     #process_event.apply_async(args=[event_id], queue="photo_processing")
-    process_event.apply_async(args=[event_id], queue="default")
+    process_event.apply_async(args=[event_id], queue="photo_processing")
 
 
     return {

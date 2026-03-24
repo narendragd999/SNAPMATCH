@@ -217,7 +217,7 @@ def create_event_order(
         is_free_tier=False,
         payment_status="pending",
         amount_paid_paise=amount_paise,
-        guest_upload_enabled=False,
+        guest_upload_enabled=True,
         public_status="active",
     )
     db.add(event)

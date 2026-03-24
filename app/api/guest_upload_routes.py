@@ -179,7 +179,7 @@ def bulk_approve_guest_uploads(
     # Single process_images job covers all newly approved photos in one run
     #process_images.apply_async(args=[event_id], queue="face_processing")
     #process_event.apply_async(args=[event_id], queue="photo_processing")
-    process_event.apply_async(args=[event_id], queue="default")
+    process_event.apply_async(args=[event_id], queue="photo_processing")
 
 
     return {
@@ -326,7 +326,7 @@ def approve_guest_upload(
 
     #process_images.apply_async(args=[event_id], queue="face_processing")
     #process_event.apply_async(args=[event_id], queue="photo_processing")
-    process_event.apply_async(args=[event_id], queue="default")
+    process_event.apply_async(args=[event_id], queue="photo_processing")
 
 
     return {
@@ -447,7 +447,7 @@ def re_approve_guest_upload(
     # Note: image_count is NOT incremented again — it was counted at first approval
     #process_images.apply_async(args=[event_id], queue="face_processing")
     #process_event.apply_async(args=[event_id], queue="photo_processing")
-    process_event.apply_async(args=[event_id], queue="default")
+    process_event.apply_async(args=[event_id], queue="photo_processing")
 
 
     return {
