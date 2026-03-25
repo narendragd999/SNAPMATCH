@@ -3,18 +3,11 @@
 Revision ID: 0008
 Revises: 0007
 Create Date: 2026-02-22
-
-Notes:
-  - Adds guest-upload columns: guest_email, guest_message
-  - Adds face detection confidence column
-  - Adds scene/object detection columns (not duplicates; scene_label/confidence
-    and objects_detected are net-new at this point in the clean chain)
-  - Adds face_detected_at timestamp
-  - Adds rejection_reason (was dropped in 0003 restructure)
 """
 from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = '0008'
 down_revision: Union[str, Sequence[str], None] = '0007'
@@ -23,27 +16,25 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Guest information
-    op.add_column('photos', sa.Column('guest_email', sa.String(), nullable=True))
-    op.add_column('photos', sa.Column('guest_message', sa.Text(), nullable=True))
+    bind = op.get_bind()
+    cols = [c['name'] for c in inspect(bind).get_columns('photos')]
 
-    # Face detection
-    op.add_column('photos', sa.Column('face_detection_confidence', sa.String(), nullable=True))
-    op.add_column('photos', sa.Column('face_detected_at', sa.DateTime(), nullable=True))
-
-    # Scene / object detection
-    op.add_column('photos', sa.Column('scene_label', sa.String(), nullable=True))
-    op.add_column('photos', sa.Column('scene_confidence', sa.String(), nullable=True))
-
-    # Rejection reason (dropped in 0003 restructure, restored here)
-    op.add_column('photos', sa.Column('rejection_reason', sa.String(), nullable=True))
+    additions = [
+        ('guest_email',               sa.Column('guest_email', sa.String(), nullable=True)),
+        ('guest_message',             sa.Column('guest_message', sa.Text(), nullable=True)),
+        ('face_detection_confidence', sa.Column('face_detection_confidence', sa.String(), nullable=True)),
+        ('face_detected_at',          sa.Column('face_detected_at', sa.DateTime(), nullable=True)),
+        ('scene_label',               sa.Column('scene_label', sa.String(), nullable=True)),
+        ('scene_confidence',          sa.Column('scene_confidence', sa.String(), nullable=True)),
+        ('rejection_reason',          sa.Column('rejection_reason', sa.String(), nullable=True)),
+    ]
+    for col_name, col_def in additions:
+        if col_name not in cols:
+            op.add_column('photos', col_def)
 
 
 def downgrade() -> None:
-    op.drop_column('photos', 'rejection_reason')
-    op.drop_column('photos', 'scene_confidence')
-    op.drop_column('photos', 'scene_label')
-    op.drop_column('photos', 'face_detected_at')
-    op.drop_column('photos', 'face_detection_confidence')
-    op.drop_column('photos', 'guest_message')
-    op.drop_column('photos', 'guest_email')
+    for col in ('rejection_reason', 'scene_confidence', 'scene_label',
+                'face_detected_at', 'face_detection_confidence',
+                'guest_message', 'guest_email'):
+        op.drop_column('photos', col)

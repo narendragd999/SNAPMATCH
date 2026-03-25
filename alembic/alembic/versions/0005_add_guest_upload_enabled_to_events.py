@@ -3,14 +3,11 @@
 Revision ID: 0005
 Revises: 0004
 Create Date: 2026-02-21
-
-Notes:
-  - Adds guest_upload_enabled column with default FALSE
-    (previous intent was TRUE, changed to FALSE per business decision)
 """
 from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = '0005'
 down_revision: Union[str, Sequence[str], None] = '0004'
@@ -19,15 +16,27 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'events',
-        sa.Column(
+    bind = op.get_bind()
+    cols = [c['name'] for c in inspect(bind).get_columns('events')]
+    if 'guest_upload_enabled' not in cols:
+        op.add_column(
+            'events',
+            sa.Column(
+                'guest_upload_enabled',
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text('false'),
+            ),
+        )
+    else:
+        # Column exists from old migration with wrong default — fix it
+        op.alter_column(
+            'events',
             'guest_upload_enabled',
-            sa.Boolean(),
-            nullable=False,
+            existing_type=sa.Boolean(),
             server_default=sa.text('false'),
-        ),
-    )
+            existing_nullable=False,
+        )
 
 
 def downgrade() -> None:

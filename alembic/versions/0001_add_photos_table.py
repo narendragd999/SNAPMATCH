@@ -7,6 +7,7 @@ Create Date: 2026-02-21
 from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = '0001'
 down_revision: Union[str, Sequence[str], None] = None
@@ -14,25 +15,38 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _existing_tables(bind):
+    return inspect(bind).get_table_names()
+
+def _existing_indexes(bind, table):
+    return [i['name'] for i in inspect(bind).get_indexes(table)]
+
+
 def upgrade() -> None:
-    op.create_table(
-        'photos',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('event_id', sa.Integer(), nullable=True),
-        sa.Column('original_filename', sa.String(), nullable=True),
-        sa.Column('stored_filename', sa.String(), nullable=True),
-        sa.Column('optimized_filename', sa.String(), nullable=True),
-        sa.Column('file_size_bytes', sa.BigInteger(), nullable=True),
-        sa.Column('status', sa.String(), server_default='uploaded', nullable=True),
-        sa.Column('cluster_ids', sa.String(), nullable=True),
-        sa.Column('uploaded_at', sa.DateTime(), server_default=sa.text('now()'), nullable=True),
-        sa.Column('optimized_at', sa.DateTime(), nullable=True),
-        sa.Column('detected_at', sa.DateTime(), nullable=True),
-        sa.Column('enriched_at', sa.DateTime(), nullable=True),
-        sa.PrimaryKeyConstraint('id'),
-    )
-    op.create_index('idx_photo_event_status', 'photos', ['event_id', 'status'])
-    op.create_index('idx_photo_event_optimized', 'photos', ['event_id', 'optimized_filename'])
+    bind = op.get_bind()
+    if 'photos' not in _existing_tables(bind):
+        op.create_table(
+            'photos',
+            sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+            sa.Column('event_id', sa.Integer(), nullable=True),
+            sa.Column('original_filename', sa.String(), nullable=True),
+            sa.Column('stored_filename', sa.String(), nullable=True),
+            sa.Column('optimized_filename', sa.String(), nullable=True),
+            sa.Column('file_size_bytes', sa.BigInteger(), nullable=True),
+            sa.Column('status', sa.String(), server_default='uploaded', nullable=True),
+            sa.Column('cluster_ids', sa.String(), nullable=True),
+            sa.Column('uploaded_at', sa.DateTime(), server_default=sa.text('now()'), nullable=True),
+            sa.Column('optimized_at', sa.DateTime(), nullable=True),
+            sa.Column('detected_at', sa.DateTime(), nullable=True),
+            sa.Column('enriched_at', sa.DateTime(), nullable=True),
+            sa.PrimaryKeyConstraint('id'),
+        )
+
+    existing_idx = _existing_indexes(bind, 'photos')
+    if 'idx_photo_event_status' not in existing_idx:
+        op.create_index('idx_photo_event_status', 'photos', ['event_id', 'status'])
+    if 'idx_photo_event_optimized' not in existing_idx:
+        op.create_index('idx_photo_event_optimized', 'photos', ['event_id', 'optimized_filename'])
 
 
 def downgrade() -> None:
