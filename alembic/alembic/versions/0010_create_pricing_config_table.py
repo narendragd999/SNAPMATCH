@@ -61,7 +61,10 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint('id'),
         )
 
-        # Use bind.execute() with .bindparams() — compatible with SQLAlchemy 1.4 / Alembic on Python 3.10
+        # FIX: In SQLAlchemy 1.4, the :: PostgreSQL cast operator inside a text()
+        # construct breaks named bind parameter parsing (KeyError on the param name).
+        # Solution: drop the ::jsonb casts — the column is already typed as JSON/JSONB,
+        # so PostgreSQL coerces the plain JSON string automatically.
         bind.execute(
             text("""
                 INSERT INTO pricing_config (
@@ -76,9 +79,9 @@ def upgrade() -> None:
                     50, 10000,
                     0, 1000,
                     9900,
-                    :photo_tiers::jsonb,
-                    :guest_tiers::jsonb,
-                    :validity_options::jsonb,
+                    :photo_tiers,
+                    :guest_tiers,
+                    :validity_options,
                     true
                 )
             """).bindparams(
