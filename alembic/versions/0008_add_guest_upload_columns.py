@@ -1,11 +1,11 @@
-"""add guest upload and processing columns to photos
-
+"""Add missing columns to photos table for guest upload feature
 Revision ID: c4d5e6f7a8b9
 Revises: b3c4d5e6f7a8
 Create Date: 2026-02-22
 """
 from alembic import op
 import sqlalchemy as sa
+
 
 revision = 'c4d5e6f7a8b9'
 down_revision = 'b3c4d5e6f7a8'
@@ -14,17 +14,30 @@ depends_on = None
 
 
 def upgrade():
+    """Add missing guest upload and processing columns to photos table"""
+    
+    # Use raw SQL with IF NOT EXISTS to skip columns that already exist
+    # This prevents "DuplicateColumn" errors
+    
+    # Guest information columns
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS guest_email VARCHAR;")
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS guest_message TEXT;")
+    
+    # Face detection confidence
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS face_detection_confidence VARCHAR;")
+    
+    # Scene and object detection columns (Phase 3)
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS scene_label VARCHAR;")
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS scene_confidence VARCHAR;")
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS objects_detected TEXT;")
+    
+    # Processing timestamps
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS optimized_at TIMESTAMP;")
     op.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS face_detected_at TIMESTAMP;")
 
 
 def downgrade():
+    """Remove the added columns if rolling back"""
     op.drop_column('photos', 'face_detected_at')
     op.drop_column('photos', 'optimized_at')
     op.drop_column('photos', 'objects_detected')
