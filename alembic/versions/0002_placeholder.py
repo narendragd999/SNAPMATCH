@@ -14,6 +14,25 @@ depends_on = None
 
 
 def upgrade():
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
+    # Some environments initialize from this migration chain without a prior
+    # users-table revision. Create it here before events(owner_id) FK.
+    if "users" not in inspector.get_table_names():
+        op.create_table(
+            "users",
+            sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
+            sa.Column("email", sa.String(), nullable=False),
+            sa.Column("password_hash", sa.String(), nullable=False),
+            sa.Column("role", sa.String(), nullable=True),
+            sa.Column("plan_type", sa.String(), nullable=True),
+            sa.Column("created_at", sa.DateTime(), nullable=True),
+            sa.Column("free_event_used", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+            sa.UniqueConstraint("email", name="uq_users_email"),
+        )
+        op.create_index("ix_users_email", "users", ["email"], unique=True)
+
     op.create_table(
         "events",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -57,3 +76,5 @@ def upgrade():
 
 def downgrade():
     op.drop_table("events")
+    # Intentionally do not drop "users" here. It may pre-exist this revision
+    # in databases that had user management initialized outside Alembic.

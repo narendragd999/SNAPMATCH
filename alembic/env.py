@@ -1,10 +1,27 @@
 import os
 import sys
+from pathlib import Path
 from logging.config import fileConfig
 from sqlalchemy import create_engine, pool
 from alembic import context
 
-sys.path.insert(0, '/app')
+def _add_project_root_to_path() -> None:
+    """Ensure Alembic can import `app.*` both in Docker and local checkouts."""
+    current_file = Path(__file__).resolve()
+
+    for parent in [current_file.parent, *current_file.parents]:
+        if (parent / "app").is_dir():
+            parent_str = str(parent)
+            if parent_str not in sys.path:
+                sys.path.insert(0, parent_str)
+            return
+
+    # Docker fallback
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+
+
+_add_project_root_to_path()
 
 from app.database.db import Base
 from app.models.user           import User

@@ -30,6 +30,9 @@ SQLite database.
 event_ai.db
 
 
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1
+
+
 
 ==================
 fastapi
