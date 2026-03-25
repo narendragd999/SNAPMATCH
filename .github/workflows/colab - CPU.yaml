@@ -164,10 +164,7 @@ jobs:
 
         echo "Revision: $REV"
 
-        echo "$REV" | grep "(head)" || {
-          echo "❌ Migration not fully applied"
-          exit 1
-        }
+        echo "$REV" | grep "(head)" || { echo "❌ Migration not fully applied"; exit 1; }
           
     # 9 Wait for all services
     - name: Wait for services
