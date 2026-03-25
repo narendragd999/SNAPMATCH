@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column('optimized_at', sa.DateTime(), nullable=True),
         sa.Column('detected_at', sa.DateTime(), nullable=True),
         sa.Column('enriched_at', sa.DateTime(), nullable=True),
-        sa.ForeignKeyConstraint(['event_id'], ['events.id'], ondelete='CASCADE'),
+        #sa.ForeignKeyConstraint(['event_id'], ['events.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id')
     )
     op.create_index('idx_photo_event_status', 'photos', ['event_id', 'status'])

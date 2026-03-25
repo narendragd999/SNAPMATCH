@@ -3,7 +3,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = '0004'
-down_revision = '0003'
+down_revision = '0002_create_events'
 branch_labels = None
 depends_on = None
 
