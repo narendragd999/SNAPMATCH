@@ -248,6 +248,13 @@ def get_event(
         "watermark_config":     event.get_watermark_config(),
         # 🔒 PIN protection
         "pin_enabled":          event.pin_enabled,
+        "template_id":           event.brand_template_id or "classic",
+        "brand_logo_url":        event.brand_logo_url or "",
+        "brand_primary_color":   event.brand_primary_color or "#3b82f6",
+        "brand_accent_color":    event.brand_accent_color or "#60a5fa",
+        "brand_font":            event.brand_font or "system",
+        "brand_footer_text":     event.brand_footer_text or "",
+        "brand_show_powered_by": bool(event.brand_show_powered_by),
     }
 
 

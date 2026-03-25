@@ -20,6 +20,8 @@ import { QRCodeDisplay } from "@/components/snapmatch/QRCodeDisplay";
 import { WatermarkSettings } from "@/components/snapmatch/WatermarkSettings";
 import { WatermarkConfig, DEFAULT_WATERMARK_CONFIG } from "@/lib/snapmatch/watermark";
 import EventQuotaBar from "@/components/EventQuotaBar";
+import { BrandingSettings, BrandingConfig } from '@/components/snapmatch/BrandingSettings';
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,13 @@ interface EventDetail {
   payment_status?: "pending" | "paid" | "free" | "failed";
   is_free_tier?: boolean;
   validity_days?: number;
+  template_id?: string;
+  brand_logo_url?: string;
+  brand_primary_color?: string;
+  brand_accent_color?: string;
+  brand_font?: string;
+  brand_footer_text?: string;
+  brand_show_powered_by?: boolean;
 }
 
 interface ClusterItem {
@@ -102,7 +111,7 @@ interface SceneItem {
   count: number;
 }
 
-type ViewMode = "overview" | "clusters" | "search" | "guest_uploads";
+type ViewMode = 'overview' | 'clusters' | 'search' | 'guest_uploads' | 'branding';
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 //
@@ -231,6 +240,9 @@ function BulkUploadModal({
   const [speed,           setSpeed]           = useState(0);
   const [eta,             setEta]             = useState(0);
   const [currentBatch,    setCurrentBatch]    = useState(0);
+
+  const [brandingOpen, setBrandingOpen] = useState(false);
+
 
   // ── NEW: multi-folder tracking ────────────────────────────────────────────
   const [foldersAdded, setFoldersAdded] = useState(0);
@@ -2470,6 +2482,25 @@ export default function OwnerEventDetailPage() {
                 )}
               </motion.div>
             )}
+            
+            {/* ──────────── GUEST UPLOADS ──────────── */}
+            {view === "guest_uploads" && (
+              <BrandingSettings
+                isOpen={brandingOpen}
+                onClose={() => setBrandingOpen(false)}
+                onSave={(cfg) => setEvent(prev => prev ? { ...prev, ...cfg } : prev)}
+                eventId={eventId}
+                initialConfig={event ? {
+                  template_id: event.template_id as any,
+                  brand_logo_url: event.brand_logo_url,
+                  brand_primary_color: event.brand_primary_color,
+                  brand_accent_color: event.brand_accent_color,
+                  brand_font: event.brand_font,
+                  brand_footer_text: event.brand_footer_text,
+                  brand_show_powered_by: event.brand_show_powered_by,
+                } : null}
+              />
+            )}  
 
           </AnimatePresence>
         </div>
