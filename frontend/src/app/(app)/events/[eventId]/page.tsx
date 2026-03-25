@@ -241,8 +241,7 @@ function BulkUploadModal({
   const [eta,             setEta]             = useState(0);
   const [currentBatch,    setCurrentBatch]    = useState(0);
 
-  const [brandingOpen, setBrandingOpen] = useState(false);
-
+  
 
   // ── NEW: multi-folder tracking ────────────────────────────────────────────
   const [foldersAdded, setFoldersAdded] = useState(0);
@@ -1188,6 +1187,9 @@ export default function OwnerEventDetailPage() {
   const [rejectingId,         setRejectingId]         = useState<number | null>(null);
   const [bulkActioning,       setBulkActioning]       = useState(false);
   const [guestPreviewUrl,     setGuestPreviewUrl]     = useState<string | null>(null);
+
+  // ─── Branding state ─────────────────────────────────────────────────
+  const [brandingOpen, setBrandingOpen] = useState(false);
 
   // ─── Auto-reload event for progress ────────────────────────────────────
   useEffect(() => {
