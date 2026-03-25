@@ -133,14 +133,42 @@ jobs:
         docker compose up -d
         docker ps
 
-    - name: Run database migrations
+    - name: Wait for Postgres
+      run: |
+        echo "Waiting for Postgres..."
+        for i in {1..40}; do
+          docker exec event_postgres pg_isready && break
+          sleep 2
+        done
+
+    - name: Run database migrations (with retry)
       run: |
         echo "Running Alembic migrations..."
-        docker exec event_backend alembic -c /app/alembic.ini upgrade head
+
+        for i in 1 2 3; do
+          docker exec event_backend \
+            alembic -c /app/alembic.ini upgrade head && break
+
+          echo "Retry $i..."
+          sleep 5
+        done
 
         echo "Current revision:"
-        docker exec event_backend alembic -c /app/alembic.ini current
-        
+        docker exec event_backend \
+          alembic -c /app/alembic.ini current
+
+    - name: Verify migrations applied
+      run: |
+        REV=$(docker exec event_backend \
+          alembic -c /app/alembic.ini current)
+
+        echo "Revision: $REV"
+
+        echo "$REV" | grep "0013_add_photos_event_fk" || {
+          echo "❌ Migration not fully applied"
+          exit 1
+        }
+          
     # 9 Wait for all services
     - name: Wait for services
       run: |
