@@ -14,6 +14,14 @@ down_revision = "e6f7a8b9c0d1"
 branch_labels = None
 depends_on = None
 
+photo_tiers = json.dumps([
+    {"bucket": 500, "rate_paise": 20},
+    {"bucket": 500, "rate_paise": 15},
+    {"bucket": 2000, "rate_paise": 10},
+    {"bucket": None, "rate_paise": 7},
+])
+
+
 
 def upgrade():
     op.create_table(
@@ -36,35 +44,28 @@ def upgrade():
     )
 
     # Seed default row
-    op.execute(f"""
-        INSERT INTO pricing_config (
-            free_photo_quota, free_guest_quota, free_validity_days,
-            min_photo_quota, max_photo_quota, min_guest_quota, max_guest_quota,
-            base_event_fee_paise, photo_tiers, guest_tiers, validity_options, is_active
-        ) VALUES (
-            50, 10, 7,
-            50, 10000, 0, 1000,
-            9900,
-            '{json.dumps([
-                {{"bucket": 500,  "rate_paise": 20}},
-                {{"bucket": 500,  "rate_paise": 15}},
-                {{"bucket": 2000, "rate_paise": 10}},
-                {{"bucket": None, "rate_paise": 7}}
-            ])}',
-            '{json.dumps([
-                {{"bucket": 50,  "rate_paise": 10}},
-                {{"bucket": 150, "rate_paise": 8}},
-                {{"bucket": 300, "rate_paise": 6}},
-                {{"bucket": None,"rate_paise": 4}}
-            ])}',
-            '{json.dumps([
-                {{"days": 30,  "addon_paise": 0,     "included": True}},
-                {{"days": 90,  "addon_paise": 4900,  "included": False}},
-                {{"days": 365, "addon_paise": 14900, "included": False}}
-            ])}',
-            true
-        )
-    """)
+    op.execute(
+        sa.text("""
+            INSERT INTO pricing_config (
+                free_photo_quota, free_guest_quota, free_validity_days,
+                min_photo_quota, max_photo_quota, min_guest_quota, max_guest_quota,
+                base_event_fee_paise, photo_tiers, guest_tiers, validity_options, is_active
+            ) VALUES (
+                50, 10, 7,
+                50, 10000, 0, 1000,
+                9900,
+                :photo_tiers,
+                :guest_tiers,
+                :validity_options,
+                true
+            )
+        """),
+        {
+            "photo_tiers": photo_tiers,
+            "guest_tiers": json.dumps([...]),
+            "validity_options": json.dumps([...]),
+        }
+    )
 
 
 def downgrade():
