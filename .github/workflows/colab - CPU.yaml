@@ -133,6 +133,14 @@ jobs:
         docker compose up -d
         docker ps
 
+    - name: Run database migrations
+      run: |
+        echo "Running Alembic migrations..."
+        docker exec event_backend alembic upgrade head
+
+        echo "Current revision:"
+        docker exec event_backend alembic current
+        
     # 9 Wait for all services
     - name: Wait for services
       run: |
