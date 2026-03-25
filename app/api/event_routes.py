@@ -55,6 +55,21 @@ import secrets
 import os
 import json
 
+
+from pydantic import BaseModel, Field, validator
+import re
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🖌️  BRANDING SCHEMAS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VALID_TEMPLATES = {"classic", "minimal", "wedding", "corporate", "dark"}
+VALID_FONTS     = {"system", "playfair", "dm-serif", "cormorant",
+                   "syne", "outfit", "josefin", "mono"}
+_HEX_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
+
 router = APIRouter(prefix="/events", tags=["events"])
 
 
@@ -1359,55 +1374,8 @@ def remove_pin(
     }
 
 
-"""
-app/api/event_routes.py  —  BRANDING SECTION
-═══════════════════════════════════════════════════════════════════════════════
 
-APPEND this entire block to the bottom of your existing event_routes.py.
-Do NOT replace the file — just paste everything below the last existing route.
 
-New endpoints added:
-  GET    /events/{event_id}/branding            → get current branding config
-  PATCH  /events/{event_id}/branding            → save branding config
-  POST   /events/{event_id}/branding/logo-presign → presign R2 PUT for logo upload
-  DELETE /events/{event_id}/branding/logo        → remove logo from R2 + clear DB field
-
-Also update get_event() response dict to include branding fields — see
-the "ADD TO get_event()" comment block below.
-
-═══════════════════════════════════════════════════════════════════════════════
-ADD TO get_event() return dict (around line 290 in your original file,
-right after the existing "pin_enabled" key):
-
-    # 🖌️  Branding
-    "template_id":          event.brand_template_id or "classic",
-    "brand_logo_url":       event.brand_logo_url or "",
-    "brand_primary_color":  event.brand_primary_color or "#3b82f6",
-    "brand_accent_color":   event.brand_accent_color or "#60a5fa",
-    "brand_font":           event.brand_font or "system",
-    "brand_footer_text":    event.brand_footer_text or "",
-    "brand_show_powered_by": bool(event.brand_show_powered_by),
-
-Also update the public event route (public_routes.py / GET /public/events/{token})
-to include the same branding keys so the public selfie page receives them.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-# ─── Additional imports (add these to the top of event_routes.py if missing) ──
-# from pydantic import BaseModel, Field, validator
-# import re
-
-from pydantic import BaseModel, Field, validator
-import re
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 🖌️  BRANDING SCHEMAS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-VALID_TEMPLATES = {"classic", "minimal", "wedding", "corporate", "dark"}
-VALID_FONTS     = {"system", "playfair", "dm-serif", "cormorant",
-                   "syne", "outfit", "josefin", "mono"}
-_HEX_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 
 class BrandingUpdateRequest(BaseModel):
@@ -1649,3 +1617,43 @@ def delete_logo(
         db.commit()
 
     return {"message": "Logo removed"}
+
+
+
+"""
+app/api/event_routes.py  —  BRANDING SECTION
+═══════════════════════════════════════════════════════════════════════════════
+
+APPEND this entire block to the bottom of your existing event_routes.py.
+Do NOT replace the file — just paste everything below the last existing route.
+
+New endpoints added:
+  GET    /events/{event_id}/branding            → get current branding config
+  PATCH  /events/{event_id}/branding            → save branding config
+  POST   /events/{event_id}/branding/logo-presign → presign R2 PUT for logo upload
+  DELETE /events/{event_id}/branding/logo        → remove logo from R2 + clear DB field
+
+Also update get_event() response dict to include branding fields — see
+the "ADD TO get_event()" comment block below.
+
+═══════════════════════════════════════════════════════════════════════════════
+ADD TO get_event() return dict (around line 290 in your original file,
+right after the existing "pin_enabled" key):
+
+    # 🖌️  Branding
+    "template_id":          event.brand_template_id or "classic",
+    "brand_logo_url":       event.brand_logo_url or "",
+    "brand_primary_color":  event.brand_primary_color or "#3b82f6",
+    "brand_accent_color":   event.brand_accent_color or "#60a5fa",
+    "brand_font":           event.brand_font or "system",
+    "brand_footer_text":    event.brand_footer_text or "",
+    "brand_show_powered_by": bool(event.brand_show_powered_by),
+
+Also update the public event route (public_routes.py / GET /public/events/{token})
+to include the same branding keys so the public selfie page receives them.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+# ─── Additional imports (add these to the top of event_routes.py if missing) ──
+# from pydantic import BaseModel, Field, validator
+# import re
