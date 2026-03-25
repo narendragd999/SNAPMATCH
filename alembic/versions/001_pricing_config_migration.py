@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import JSON
 import json
 
 revision = "001_pricing_config"
-down_revision = "d5e6f7a8b9c0"
+down_revision = "e6f7a8b9c0d1"
 branch_labels = None
 depends_on = None
 
