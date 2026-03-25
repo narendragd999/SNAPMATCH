@@ -1917,7 +1917,7 @@ export default function OwnerEventDetailPage() {
               { id: "search",        label: "Face Search",   icon: <Search      size={13} />, guard: !isCompleted },
               { id: "guest_uploads", label: "Guest Uploads", icon: <CloudUpload size={13} />,
                 badge: guestUploads?.total_pending ?? (event as any)?.pending_guest_uploads ?? 0 },
-              { id: "branding",      label: "Branding",      icon: <CloudUpload size={13} /> },
+              { id: "branding", label: "Branding", icon: <Droplet size={13} /> },
             ] as { id: ViewMode; label: string; icon: React.ReactNode; guard?: boolean; badge?: number }[]).map(t => (
               <button key={t.id}
                 onClick={() => !t.guard && setView(t.id)}
@@ -2486,24 +2486,24 @@ export default function OwnerEventDetailPage() {
               </motion.div>
             )}
             
-            {/* ──────────── GUEST UPLOADS ──────────── */}
+            {/* ──────────── Branding Settings for Event ──────────── */}
             {view === "branding" && (
-              <BrandingSettings
-                isOpen={brandingOpen}
-                onClose={() => setBrandingOpen(false)}
-                onSave={(cfg) => setEvent(prev => prev ? { ...prev, ...cfg } : prev)}
-                eventId={eventId}
-                initialConfig={event ? {
-                  template_id: event.template_id as any,
-                  brand_logo_url: event.brand_logo_url,
-                  brand_primary_color: event.brand_primary_color,
-                  brand_accent_color: event.brand_accent_color,
-                  brand_font: event.brand_font,
-                  brand_footer_text: event.brand_footer_text,
-                  brand_show_powered_by: event.brand_show_powered_by,
-                } : null}
-              />
-            )}  
+              <motion.div key="branding" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                className="max-w-6xl mx-auto px-5 py-10 flex flex-col items-center gap-6">
+                <div className="text-center space-y-2">
+                  <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto">
+                    <Droplet size={20} className="text-blue-400" />
+                  </div>
+                  <h2 className="text-lg font-semibold text-zinc-100">Branding Settings</h2>
+                  <p className="text-sm text-zinc-500 max-w-sm">Customize your event's public page with your brand colors, logo, and layout template.</p>
+                </div>
+                <button
+                  onClick={() => setBrandingOpen(true)}
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors">
+                  Open Branding Editor
+                </button>
+              </motion.div>
+            )}
 
           </AnimatePresence>
         </div>
@@ -2707,6 +2707,24 @@ export default function OwnerEventDetailPage() {
         onClose={() => setShowWatermark(false)}
         onSave={handleSaveWatermark}
         previewImageUrl={event?.cover_image_url ?? undefined}
+      />
+
+
+      {/* ── BRANDING SETTINGS MODAL ── */}
+      <BrandingSettings
+        isOpen={brandingOpen}
+        onClose={() => setBrandingOpen(false)}
+        onSave={(cfg) => setEvent(prev => prev ? { ...prev, ...cfg } : prev)}
+        eventId={eventId}
+        initialConfig={event ? {
+          template_id: event.template_id as any,
+          brand_logo_url: event.brand_logo_url,
+          brand_primary_color: event.brand_primary_color,
+          brand_accent_color: event.brand_accent_color,
+          brand_font: event.brand_font,
+          brand_footer_text: event.brand_footer_text,
+          brand_show_powered_by: event.brand_show_powered_by,
+        } : null}
       />
 
     </div>
