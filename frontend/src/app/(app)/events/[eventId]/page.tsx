@@ -1914,8 +1914,8 @@ export default function OwnerEventDetailPage() {
               { id: "clusters",      label: "Clusters",      icon: <Grid3X3     size={13} />, guard: !isCompleted },
               { id: "search",        label: "Face Search",   icon: <Search      size={13} />, guard: !isCompleted },
               { id: "guest_uploads", label: "Guest Uploads", icon: <CloudUpload size={13} />,
-              { id: "branding",      label: "Branding",      icon: <CloudUpload size={13} />,
                 badge: guestUploads?.total_pending ?? (event as any)?.pending_guest_uploads ?? 0 },
+              { id: "branding",      label: "Branding",      icon: <CloudUpload size={13} /> },
             ] as { id: ViewMode; label: string; icon: React.ReactNode; guard?: boolean; badge?: number }[]).map(t => (
               <button key={t.id}
                 onClick={() => !t.guard && setView(t.id)}
