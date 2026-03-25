@@ -51,3 +51,29 @@ pip uninstall bcrypt -y
 pip install bcrypt==3.2.2
 
 pip install passlib[bcrypt]
+
+
+
+
+====================Backup Script=======================
+
+$source = "D:\Narendra\Application\SNAPMATCH"
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$destination = "D:\Narendra\Application\Backups\backup_$timestamp.zip"
+
+# Create temp folder
+$tempPath = "$env:TEMP\backup_temp_$timestamp"
+New-Item -ItemType Directory -Path $tempPath | Out-Null
+
+# Copy files excluding storage & node_modules
+robocopy $source $tempPath /E /XD storage node_modules
+
+# Zip the copied content
+Compress-Archive -Path "$tempPath\*" -DestinationPath $destination
+
+# Remove temp folder
+Remove-Item $tempPath -Recurse -Force
+
+Write-Host "Backup created at: $destination"
+
+====================Backup Script=======================
