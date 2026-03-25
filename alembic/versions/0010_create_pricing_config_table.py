@@ -61,7 +61,8 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint('id'),
         )
 
-        op.execute(
+        # Use bind.execute() with .bindparams() — compatible with SQLAlchemy 1.4 / Alembic on Python 3.10
+        bind.execute(
             text("""
                 INSERT INTO pricing_config (
                     free_photo_quota, free_guest_quota, free_validity_days,
@@ -80,12 +81,11 @@ def upgrade() -> None:
                     :validity_options::jsonb,
                     true
                 )
-            """),
-            {
-                "photo_tiers":      json.dumps(_photo_tiers),
-                "guest_tiers":      json.dumps(_guest_tiers),
-                "validity_options": json.dumps(_validity_options),
-            },
+            """).bindparams(
+                photo_tiers=json.dumps(_photo_tiers),
+                guest_tiers=json.dumps(_guest_tiers),
+                validity_options=json.dumps(_validity_options),
+            )
         )
 
 
