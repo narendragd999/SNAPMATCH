@@ -1422,7 +1422,7 @@ export default function PublicSelfiePage() {
                   <div id="results-section" className="max-w-6xl mx-auto px-5 py-6">
                     
                     {/* 🔐 Cached Results Banner */}
-                    {cacheAge && cacheAge > 0 && activeTab === 'my-photos' && (
+                    {cacheAge !== null && activeTab === 'my-photos' && (
                       <CachedResultsBanner
                         cacheAge={cacheAge}
                         totalResults={myTab.total}

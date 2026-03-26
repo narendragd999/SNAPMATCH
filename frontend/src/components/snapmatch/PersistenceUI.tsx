@@ -128,7 +128,7 @@ export const CachedResultsBanner: React.FC<CachedResultsBannerProps> = ({
   onRefresh,
   primaryColor = '#3b82f6',
 }) => {
-  if (!cacheAge) return null;
+  if (cacheAge === null) return null;
 
   const formatAge = (ms: number): string => {
     const minutes = Math.floor(ms / (60 * 1000));
