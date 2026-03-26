@@ -27,7 +27,8 @@ from app.models.co_occurrence import CoOccurrence
 
 # Minimum number of photos two people must appear in together
 # to be considered a "relationship" (couple, family, friends)
-MIN_CO_OCCURRENCE_THRESHOLD = 3
+# Set to 1 to show all group photos, can increase for stricter matching
+MIN_CO_OCCURRENCE_THRESHOLD = 1
 
 # Minimum co-occurrence count to be considered "strong" relationship
 # (e.g., a couple appearing in 20+ photos together)
@@ -165,6 +166,8 @@ def get_co_occurring_clusters(
     # Using OR to find relationships in either direction
     matched_set = set(matched_cluster_ids)
     
+    print(f"👥 [Co-occurrence] Querying: event={event_id}, matched_set={matched_set}, min_count={min_count}")
+    
     co_occurrences = db.query(CoOccurrence).filter(
         CoOccurrence.event_id == event_id,
         CoOccurrence.photo_count >= min_count,
@@ -173,6 +176,8 @@ def get_co_occurring_clusters(
             CoOccurrence.cluster_id_b.in_(matched_cluster_ids),
         )
     ).all()
+    
+    print(f"👥 [Co-occurrence] Found {len(co_occurrences)} raw co-occurrence records")
     
     # Build result map
     result: Dict[int, List[Dict]] = defaultdict(list)
@@ -300,12 +305,17 @@ def get_friends_photos(
         List of dicts with image_name and co_occurrence metadata
     """
     if not matched_cluster_ids:
+        print(f"👥 [Co-occurrence] No matched cluster IDs provided")
         return []
+    
+    print(f"👥 [Co-occurrence] Searching for friends: event={event_id}, clusters={matched_cluster_ids}, min_count={min_count}")
     
     # Get photos with co-occurring people
     image_names = get_photos_with_co_occurring_clusters(
         db, event_id, matched_cluster_ids, min_count, limit
     )
+    
+    print(f"👥 [Co-occurrence] Found {len(image_names)} group photos")
     
     if not image_names:
         return []

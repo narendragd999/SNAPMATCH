@@ -197,12 +197,13 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
     # ── Group/Family Detection: Find photos with co-occurring people ──────────
     friends_photos = []
     try:
-        from app.services.co_occurrence_service import get_friends_photos
+        from app.services.co_occurrence_service import get_friends_photos, MIN_CO_OCCURRENCE_THRESHOLD
         friends_photos = get_friends_photos(
             db, event_id, matched_cluster_ids,
-            min_count=3,  # At least 3 photos together to be considered
+            min_count=MIN_CO_OCCURRENCE_THRESHOLD,  # Uses default (1)
             limit=500
         )
+        print(f"👥 [Search] Found {len(friends_photos)} friends photos for clusters {matched_cluster_ids}")
     except Exception as e:
         # Non-fatal - log and continue without friends_photos
         print(f"⚠️ Co-occurrence lookup failed (non-fatal): {e}")
