@@ -690,37 +690,61 @@ export default function PublicSelfiePage() {
     loadAllPhotos(1, scene, true);
   }, [loadAllPhotos]);
 
-  // ── Infinite scroll observers ──
+  // ── Infinite scroll observers with refs to avoid stale closures ──
+  // Store latest callbacks in refs so observer always calls current version
+  const loadMoreMyRef = useRef(loadMoreMy);
+  const loadMoreAllRef = useRef(loadMoreAll);
+  const loadMoreFriendsRef = useRef(loadMoreFriends);
+  
+  useEffect(() => { loadMoreMyRef.current = loadMoreMy; }, [loadMoreMy]);
+  useEffect(() => { loadMoreAllRef.current = loadMoreAll; }, [loadMoreAll]);
+  useEffect(() => { loadMoreFriendsRef.current = loadMoreFriends; }, [loadMoreFriends]);
+
+  // My Photos observer - re-create when resultId changes
   useEffect(() => {
     myObserverRef.current?.disconnect();
     myObserverRef.current = new IntersectionObserver(
-      entries => { if (entries[0].isIntersecting) loadMoreMy(); },
+      entries => { if (entries[0].isIntersecting) loadMoreMyRef.current(); },
       { rootMargin: '400px' }
     );
-    if (mySentinelRef.current) myObserverRef.current.observe(mySentinelRef.current);
-    return () => myObserverRef.current?.disconnect();
-  }, [loadMoreMy]);
+    // Small delay to ensure sentinel is in DOM
+    const timer = setTimeout(() => {
+      if (mySentinelRef.current && myObserverRef.current) {
+        myObserverRef.current.observe(mySentinelRef.current);
+      }
+    }, 100);
+    return () => { clearTimeout(timer); myObserverRef.current?.disconnect(); };
+  }, [resultId]);
 
+  // All Photos observer - re-create when switching tabs
   useEffect(() => {
     allObserverRef.current?.disconnect();
     allObserverRef.current = new IntersectionObserver(
-      entries => { if (entries[0].isIntersecting) loadMoreAll(); },
+      entries => { if (entries[0].isIntersecting) loadMoreAllRef.current(); },
       { rootMargin: '400px' }
     );
-    if (allSentinelRef.current) allObserverRef.current.observe(allSentinelRef.current);
-    return () => allObserverRef.current?.disconnect();
-  }, [loadMoreAll]);
+    const timer = setTimeout(() => {
+      if (allSentinelRef.current && allObserverRef.current) {
+        allObserverRef.current.observe(allSentinelRef.current);
+      }
+    }, 100);
+    return () => { clearTimeout(timer); allObserverRef.current?.disconnect(); };
+  }, [activeTab]);
 
-  // 👥 Friends tab infinite scroll observer
+  // 👥 Friends tab infinite scroll observer - re-create when resultId or tab changes
   useEffect(() => {
     friendsObserverRef.current?.disconnect();
     friendsObserverRef.current = new IntersectionObserver(
-      entries => { if (entries[0].isIntersecting) loadMoreFriends(); },
+      entries => { if (entries[0].isIntersecting) loadMoreFriendsRef.current(); },
       { rootMargin: '400px' }
     );
-    if (friendsSentinelRef.current) friendsObserverRef.current.observe(friendsSentinelRef.current);
-    return () => friendsObserverRef.current?.disconnect();
-  }, [loadMoreFriends]);
+    const timer = setTimeout(() => {
+      if (friendsSentinelRef.current && friendsObserverRef.current) {
+        friendsObserverRef.current.observe(friendsSentinelRef.current);
+      }
+    }, 100);
+    return () => { clearTimeout(timer); friendsObserverRef.current?.disconnect(); };
+  }, [resultId, activeTab]);
 
   // ── Helper: Apply watermark to a blob and return watermarked blob ──
   const applyWatermarkToBlob = useCallback(async (blob: Blob): Promise<Blob> => {
