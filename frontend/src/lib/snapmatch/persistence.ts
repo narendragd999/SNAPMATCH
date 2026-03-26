@@ -43,6 +43,10 @@ export interface CachedSearchResult {
   items: PhotoItemForCache[];
   total: number;
   hasMore: boolean;
+  // 👥 Friends photos cache
+  friendsItems?: PhotoItemForCache[];
+  friendsTotal?: number;
+  friendsHasMore?: boolean;
   selfiePreview: string; // Base64 thumbnail
   cachedAt: number;
   expiresAt: number;
@@ -299,7 +303,11 @@ export const saveSearchCache = (
   total: number,
   hasMore: boolean,
   selfiePreview: string,
-  pinVersion?: string
+  pinVersion?: string,
+  // 👥 Friends photos
+  friendsItems?: PhotoItemForCache[],
+  friendsTotal?: number,
+  friendsHasMore?: boolean
 ): boolean => {
   const now = Date.now();
   const cacheEntry: CachedSearchResult = {
@@ -312,6 +320,10 @@ export const saveSearchCache = (
     cachedAt: now,
     expiresAt: now + DURATIONS.SEARCH_CACHE_MS,
     pinVersion,
+    // 👥 Friends photos
+    friendsItems,
+    friendsTotal,
+    friendsHasMore,
   };
   
   // Get existing cache and update

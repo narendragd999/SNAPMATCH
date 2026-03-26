@@ -256,8 +256,10 @@ export default function PublicSelfiePage() {
   // ── Refs ──
   const mySentinelRef  = useRef<HTMLDivElement>(null);
   const allSentinelRef = useRef<HTMLDivElement>(null);
+  const friendsSentinelRef = useRef<HTMLDivElement>(null); // 👥 Friends tab sentinel
   const myObserverRef  = useRef<IntersectionObserver | null>(null);
   const allObserverRef = useRef<IntersectionObserver | null>(null);
+  const friendsObserverRef = useRef<IntersectionObserver | null>(null); // 👥 Friends tab observer
   const fileInputRef   = useRef<HTMLInputElement>(null);
   const contribInputRef = useRef<HTMLInputElement>(null);
 
@@ -405,10 +407,38 @@ export default function PublicSelfiePage() {
         
         setResultId(data.result_id);
         setMyTab({ items: data.you.items, page: 1, total: data.you.total, has_more: data.you.has_more, loading: false, error: null });
+        
+        // 👥 Set friends tab data (Group/Family Detection)
+        if (data.friends && data.friends.total > 0) {
+          setFriendsTab({ 
+            items: data.friends.items.map((item: any) => ({ 
+              ...item, 
+              image_name: item.image_name 
+            })), 
+            page: 1, 
+            total: data.friends.total, 
+            has_more: data.friends.has_more, 
+            loading: false, 
+            error: null 
+          });
+        }
+        
         setActiveTab('my-photos');
         
-        // Cache the results
-        saveSearchCache(token, data.result_id, data.you.items, data.you.total, data.you.has_more, storedSelfie.thumbnailBase64, event.pin_version || undefined);
+        // Cache the results (including friends photos)
+        saveSearchCache(
+          token, 
+          data.result_id, 
+          data.you.items, 
+          data.you.total, 
+          data.you.has_more, 
+          storedSelfie.thumbnailBase64, 
+          event.pin_version || undefined,
+          // 👥 Friends photos cache
+          data.friends?.items || [],
+          data.friends?.total || 0,
+          data.friends?.has_more || false
+        );
         
         Analytics.selfieUploaded('auto');
       } catch (err) {
@@ -431,6 +461,19 @@ export default function PublicSelfiePage() {
     // Restore from cache
     setResultId(cachedResults.resultId);
     setMyTab({ items: cachedResults.items, page: 1, total: cachedResults.total, has_more: cachedResults.hasMore, loading: false, error: null });
+    
+    // 👥 Restore friends tab from cache
+    if (cachedResults.friendsItems && cachedResults.friendsTotal && cachedResults.friendsTotal > 0) {
+      setFriendsTab({ 
+        items: cachedResults.friendsItems, 
+        page: 1, 
+        total: cachedResults.friendsTotal, 
+        has_more: cachedResults.friendsHasMore || false, 
+        loading: false, 
+        error: null 
+      });
+    }
+    
     setActiveTab('my-photos');
     setCacheAge(Date.now() - cachedResults.cachedAt);
   }, [cachedResults, resultId, processing]);
@@ -548,9 +591,21 @@ export default function PublicSelfiePage() {
           const selfie = getStoredSelfie();
           setStoredSelfie(selfie);
           
-          // Cache the results with selfie preview
+          // Cache the results with selfie preview (including friends photos)
           if (selfie) {
-            saveSearchCache(token, data.result_id, data.you.items, data.you.total, data.you.has_more, selfie.thumbnailBase64, event?.pin_version || undefined);
+            saveSearchCache(
+              token, 
+              data.result_id, 
+              data.you.items, 
+              data.you.total, 
+              data.you.has_more, 
+              selfie.thumbnailBase64, 
+              event?.pin_version || undefined,
+              // 👥 Friends photos cache
+              data.friends?.items || [],
+              data.friends?.total || 0,
+              data.friends?.has_more || false
+            );
             setCacheAge(0);
           }
         }
@@ -574,6 +629,20 @@ export default function PublicSelfiePage() {
       setMyTab(prev => ({ items: [...prev.items, ...data.items], page: data.page, total: data.total, has_more: data.has_more, loading: false, error: null }));
     } catch { setMyTab(prev => ({ ...prev, loading: false, error: 'Failed to load more.' })); }
   }, [myTab, resultId, token, API]);
+
+  // 👥 ── Load more Friends Photos ──
+  const loadMoreFriends = useCallback(async () => {
+    if (!resultId || friendsTab.loading || !friendsTab.has_more) return;
+    const nextPage = friendsTab.page + 1;
+    setFriendsTab(prev => ({ ...prev, loading: true }));
+    try {
+      const res = await fetch(`${API}/public/events/${token}/search/${resultId}?kind=friends&page=${nextPage}`);
+      if (res.status === 404) { setFriendsTab(prev => ({ ...prev, loading: false, has_more: false, error: 'Session expired.' })); return; }
+      if (!res.ok) throw new Error();
+      const data: PageData = await res.json();
+      setFriendsTab(prev => ({ items: [...prev.items, ...data.items], page: data.page, total: data.total, has_more: data.has_more, loading: false, error: null }));
+    } catch { setFriendsTab(prev => ({ ...prev, loading: false, error: 'Failed to load more.' })); }
+  }, [friendsTab, resultId, token, API]);
 
   // ── Load All Photos (initial + more) ──
   const loadAllPhotos = useCallback(async (page = 1, scene = '', reset = false) => {
@@ -641,6 +710,17 @@ export default function PublicSelfiePage() {
     if (allSentinelRef.current) allObserverRef.current.observe(allSentinelRef.current);
     return () => allObserverRef.current?.disconnect();
   }, [loadMoreAll]);
+
+  // 👥 Friends tab infinite scroll observer
+  useEffect(() => {
+    friendsObserverRef.current?.disconnect();
+    friendsObserverRef.current = new IntersectionObserver(
+      entries => { if (entries[0].isIntersecting) loadMoreFriends(); },
+      { rootMargin: '400px' }
+    );
+    if (friendsSentinelRef.current) friendsObserverRef.current.observe(friendsSentinelRef.current);
+    return () => friendsObserverRef.current?.disconnect();
+  }, [loadMoreFriends]);
 
   // ── Helper: Apply watermark to a blob and return watermarked blob ──
   const applyWatermarkToBlob = useCallback(async (blob: Blob): Promise<Blob> => {
@@ -1652,7 +1732,7 @@ export default function PublicSelfiePage() {
                     {activeTab === 'my-photos' ? (
                       renderPhotoGrid(filteredMyItems, mySentinelRef, myTab, () => handleUpload(new File([], '')), 'No photos found', () => {}, 'Take Selfie')
                     ) : activeTab === 'with-friends' ? (
-                      renderPhotoGrid(friendsTab.items, mySentinelRef, friendsTab, () => setActiveTab('my-photos'), 'No group photos found', () => setActiveTab('my-photos'), 'View My Photos')
+                      renderPhotoGrid(friendsTab.items, friendsSentinelRef, friendsTab, () => setActiveTab('my-photos'), 'No group photos found', () => setActiveTab('my-photos'), 'View My Photos')
                     ) : (
                       <>
                         {/* Scene filter for All Photos */}
