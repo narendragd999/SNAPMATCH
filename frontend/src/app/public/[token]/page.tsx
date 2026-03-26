@@ -1485,7 +1485,7 @@ export default function PublicSelfiePage() {
                           </motion.button>
                         )}
 
-                        {/* Download All - All Photos tab */}
+                        {/* Download All - All Photos tab */} 
                         {activeTab === 'all-photos' && (allTab.total > 0 || (event?.processed_count || 0) > 0) && (
                           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                             onClick={handleDownloadAllTab} disabled={dlAllTabLoading}
