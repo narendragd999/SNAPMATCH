@@ -9,13 +9,13 @@ import {
   Loader2, X, Check, ArrowLeft,
   AlertCircle, CloudUpload,
   SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff,
-  Images,
+  Images, Package,
 } from 'lucide-react';
 import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf } from '@/lib/snapmatch/utils';
 import { useReducedMotion } from '@/hooks/snapmatch/useSnapmatch';
 import { sceneIcon } from '@/components/snapmatch/UIComponents';
 import { PhotoPreview } from '@/components/snapmatch/PhotoPreview';
-import { MultiSelectToolbar, SelectablePhotoCard, useMultiSelect } from '@/components/snapmatch/MultiSelect';
+import { MultiSelectToolbar, SelectablePhotoCard, useMultiSelect, PhotoItem as MultiSelectPhotoItem } from '@/components/snapmatch/MultiSelect';
 import { CameraWithEnhancements } from '@/components/snapmatch/CameraEnhancements';
 import {
   WatermarkConfig,
@@ -25,7 +25,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface PhotoItem {
+interface PhotoItem extends MultiSelectPhotoItem {
   image_name:   string;
   scene_label?: string;
   object_label?: string;
@@ -677,7 +677,7 @@ export default function PublicSelfiePage() {
   // ── Shared photo grid renderer ──────────────────────────────────────────────
   const renderPhotoGrid = (
     items:       PhotoItem[],
-    sentinelRef: React.RefObject<HTMLDivElement>,
+    sentinelRef: React.RefObject<HTMLDivElement | null>,
     tabState:    TabState,
     onRetry:     () => void,
     emptyMsg:    string,
@@ -1090,11 +1090,171 @@ export default function PublicSelfiePage() {
 
                   {/* Results grid */}
                   <div id="results-section" className="max-w-6xl mx-auto px-5 py-6">
+                    {/* ════════ ACTION BAR ════════ */}
+                    <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                      {/* Left side - Results count */}
+                      <div>
+                        <p className="text-sm font-medium" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
+                          {activeTab === 'my-photos' 
+                            ? `${myTab.total} photo${myTab.total !== 1 ? 's' : ''} found`
+                            : `${allTab.total || event?.processed_count || 0} event photos`}
+                        </p>
+                      </div>
+
+                      {/* Right side - Action buttons */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {/* Grid layout toggle */}
+                        <div className="flex items-center gap-1 p-1 rounded-lg border"
+                          style={{
+                            background: 'var(--brand-surface, #18181b)',
+                            borderColor: 'var(--brand-border, #27272a)',
+                          }}>
+                          {[
+                            { k: 'large' as GridLayout, icon: <Grid2X2 size={13} />, title: 'Large' },
+                            { k: 'comfortable' as GridLayout, icon: <LayoutGrid size={13} />, title: 'Comfortable' },
+                            { k: 'compact' as GridLayout, icon: <SlidersHorizontal size={13} />, title: 'Compact' },
+                          ].map(({ k, icon, title }) => (
+                            <button key={k} title={title} onClick={() => setGridLayout(k)}
+                              className={`w-7 h-7 flex items-center justify-center rounded-md transition-colors ${
+                                gridLayout === k ? '' : 'opacity-50 hover:opacity-75'
+                              }`}
+                              style={gridLayout === k ? {
+                                background: `${brandingConfig.brand_primary_color}20`,
+                                color: brandingConfig.brand_primary_color,
+                              } : { color: 'var(--brand-subtext, #71717a)' }}>
+                              {icon}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Download All - My Photos tab */}
+                        {activeTab === 'my-photos' && myTab.total > 0 && (
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                            onClick={handleDownloadAll} disabled={dlAllLoading}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50"
+                            style={{
+                              background: brandingConfig.brand_primary_color,
+                              color: '#fff',
+                            }}>
+                            {dlAllLoading ? (
+                              <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={14} /></motion.div> Preparing…</>
+                            ) : (
+                              <><PackageOpen size={14} /> Download All ({myTab.total})</>
+                            )}
+                          </motion.button>
+                        )}
+
+                        {/* Download All - All Photos tab */}
+                        {activeTab === 'all-photos' && (allTab.total > 0 || (event?.processed_count || 0) > 0) && (
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                            onClick={handleDownloadAllTab} disabled={dlAllTabLoading}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50"
+                            style={{
+                              background: brandingConfig.brand_primary_color,
+                              color: '#fff',
+                            }}>
+                            {dlAllTabLoading ? (
+                              <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={14} /></motion.div> Preparing…</>
+                            ) : (
+                              <><PackageOpen size={14} /> Download All ({allTab.total || event?.processed_count || 0})</>
+                            )}
+                          </motion.button>
+                        )}
+
+                        {/* New Search button */}
+                        {activeTab === 'my-photos' && (
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                            onClick={() => { setResultId(null); setMyTab(emptyTab()); setActiveScene('all'); setActiveObject('all'); }}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold border transition-colors"
+                            style={{
+                              background: 'var(--brand-surface, #18181b)',
+                              borderColor: 'var(--brand-border, #27272a)',
+                              color: 'var(--brand-text, #f4f4f5)',
+                            }}>
+                            <RefreshCw size={14} /> New Search
+                          </motion.button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ════════ SCENE/OBJECT FILTERS FOR MY PHOTOS ════════ */}
+                    {activeTab === 'my-photos' && (Object.keys(sceneCounts).length > 0 || Object.keys(objectCounts).length > 0) && (
+                      <div className="flex flex-col gap-2 mb-4 pb-4 border-b" style={{ borderColor: 'var(--brand-border, #27272a)' }}>
+                        {/* Scene filter */}
+                        {Object.keys(sceneCounts).length > 0 && (
+                          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                            <span className="text-[10px] font-bold tracking-wider uppercase flex-shrink-0" 
+                              style={{ color: 'var(--brand-subtext, #71717a)' }}>Scene:</span>
+                            <button onClick={() => setActiveScene('all')}
+                              className={pillBase + ' ' + (activeScene === 'all' ? pillActive : pillInactive)}
+                              style={activeScene === 'all' ? {
+                                background: `${brandingConfig.brand_primary_color}15`,
+                                borderColor: `${brandingConfig.brand_primary_color}35`,
+                                color: brandingConfig.brand_primary_color,
+                              } : {}}>
+                              All
+                            </button>
+                            {Object.entries(sceneCounts).map(([label, count]) => (
+                              <button key={label} onClick={() => setActiveScene(activeScene === label ? 'all' : label)}
+                                className={pillBase + ' ' + (activeScene === label ? pillActive : pillInactive)}
+                                style={activeScene === label ? {
+                                  background: `${brandingConfig.brand_primary_color}15`,
+                                  borderColor: `${brandingConfig.brand_primary_color}35`,
+                                  color: brandingConfig.brand_primary_color,
+                                } : {}}>
+                                {label} ({count})
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {/* Object filter */}
+                        {Object.keys(objectCounts).length > 0 && (
+                          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                            <span className="text-[10px] font-bold tracking-wider uppercase flex-shrink-0"
+                              style={{ color: 'var(--brand-subtext, #71717a)' }}>Content:</span>
+                            <button onClick={() => setActiveObject('all')}
+                              className={pillBase + ' ' + (activeObject === 'all' ? pillActive : pillInactive)}
+                              style={activeObject === 'all' ? {
+                                background: `${brandingConfig.brand_accent_color}15`,
+                                borderColor: `${brandingConfig.brand_accent_color}35`,
+                                color: brandingConfig.brand_accent_color,
+                              } : {}}>
+                              All
+                            </button>
+                            {Object.entries(objectCounts).slice(0, 10).map(([label, count]) => (
+                              <button key={label} onClick={() => setActiveObject(activeObject === label ? 'all' : label)}
+                                className={pillBase + ' ' + (activeObject === label ? pillActive : pillInactive)}
+                                style={activeObject === label ? {
+                                  background: `${brandingConfig.brand_accent_color}15`,
+                                  borderColor: `${brandingConfig.brand_accent_color}35`,
+                                  color: brandingConfig.brand_accent_color,
+                                } : {}}>
+                                {label} ({count})
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Multi-select toolbar */}
+                    <MultiSelectToolbar
+                      items={activeItems}
+                      selectedIds={multiSelect.selectedIds}
+                      onToggle={multiSelect.toggle}
+                      onSelectAll={multiSelect.selectAll}
+                      onClearSelection={multiSelect.clearSelection}
+                      onBatchDownload={handleBatchDownload}
+                      isActive={multiSelect.isSelectMode}
+                      onActivate={multiSelect.enterSelectMode}
+                      onDeactivate={multiSelect.exitSelectMode}
+                    />
+
                     {activeTab === 'my-photos' ? (
                       renderPhotoGrid(filteredMyItems, mySentinelRef, myTab, () => handleUpload(new File([], '')), 'No photos found', () => {}, 'Take Selfie')
                     ) : (
                       <>
-                        {/* Scene filter */}
+                        {/* Scene filter for All Photos */}
                         {allScenes.length > 0 && (
                           <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
                             <button onClick={() => handleAllSceneFilter('')}
