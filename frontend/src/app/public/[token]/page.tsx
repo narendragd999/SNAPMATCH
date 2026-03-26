@@ -700,8 +700,14 @@ export default function PublicSelfiePage() {
   useEffect(() => { loadMoreAllRef.current = loadMoreAll; }, [loadMoreAll]);
   useEffect(() => { loadMoreFriendsRef.current = loadMoreFriends; }, [loadMoreFriends]);
 
-  // My Photos observer - re-create when resultId changes
+  // My Photos observer - only active when on my-photos tab and has results
   useEffect(() => {
+    // Only set up observer when this tab is active and we have results
+    if (activeTab !== 'my-photos' || !resultId) {
+      myObserverRef.current?.disconnect();
+      return;
+    }
+    
     myObserverRef.current?.disconnect();
     myObserverRef.current = new IntersectionObserver(
       entries => { if (entries[0].isIntersecting) loadMoreMyRef.current(); },
@@ -714,10 +720,16 @@ export default function PublicSelfiePage() {
       }
     }, 100);
     return () => { clearTimeout(timer); myObserverRef.current?.disconnect(); };
-  }, [resultId]);
+  }, [resultId, activeTab]);
 
-  // All Photos observer - re-create when switching tabs
+  // All Photos observer - only active when on all-photos tab
   useEffect(() => {
+    // Only set up observer when this tab is active
+    if (activeTab !== 'all-photos') {
+      allObserverRef.current?.disconnect();
+      return;
+    }
+    
     allObserverRef.current?.disconnect();
     allObserverRef.current = new IntersectionObserver(
       entries => { if (entries[0].isIntersecting) loadMoreAllRef.current(); },
@@ -729,10 +741,16 @@ export default function PublicSelfiePage() {
       }
     }, 100);
     return () => { clearTimeout(timer); allObserverRef.current?.disconnect(); };
-  }, [activeTab]);
+  }, [activeTab, allTab.items.length]);
 
-  // 👥 Friends tab infinite scroll observer - re-create when resultId or tab changes
+  // 👥 Friends tab infinite scroll observer - only active when on with-friends tab
   useEffect(() => {
+    // Only set up observer when this tab is active and we have results
+    if (activeTab !== 'with-friends' || !resultId) {
+      friendsObserverRef.current?.disconnect();
+      return;
+    }
+    
     friendsObserverRef.current?.disconnect();
     friendsObserverRef.current = new IntersectionObserver(
       entries => { if (entries[0].isIntersecting) loadMoreFriendsRef.current(); },
@@ -744,7 +762,7 @@ export default function PublicSelfiePage() {
       }
     }, 100);
     return () => { clearTimeout(timer); friendsObserverRef.current?.disconnect(); };
-  }, [resultId, activeTab]);
+  }, [resultId, activeTab, friendsTab.items.length]);
 
   // ── Helper: Apply watermark to a blob and return watermarked blob ──
   const applyWatermarkToBlob = useCallback(async (blob: Blob): Promise<Blob> => {
@@ -1110,33 +1128,67 @@ export default function PublicSelfiePage() {
     emptyActionLabel: string,
   ) => (
     <>
-      {items.length > 0 ? (
-        <>
-          <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 8 }}>
-            {items.map((item, idx) => {
-              const imgName   = nameOf(item);
-              const scene     = sceneOf(item);
-              const isSelected = multiSelect.selectedIds.has(imgName);
-              return (
-                <SelectablePhotoCard
-                  key={`${imgName}-${idx}`}
-                  item={item}
-                  imageId={imgName}
-                  imageUrl={`${API}/public/events/${token}/image/${imgName}`}
-                  thumbnailUrl={`${API}/public/events/${token}/thumbnail/${imgName}`}
-                  isSelected={isSelected}
-                  selectionIndex={multiSelect.getSelectionIndex(imgName)}
-                  isSelectMode={multiSelect.isSelectMode}
-                  onToggle={() => multiSelect.toggle(imgName)}
-                  onClick={() => { setPreviewIndex(idx); setPreviewImage(imgName); }}
-                  scene={scene}
-                  confidence={0}
-                  showConfidence={false}
-                  watermarkConfig={watermarkConfig}
-                />
-              );
-            })}
+      {/* Loading state - show spinner while initially loading */}
+      {items.length === 0 && tabState.loading && (
+        <div className="flex flex-col items-center justify-center py-20 gap-3">
+          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}>
+            <Loader2 size={28} className="text-blue-400" />
+          </motion.div>
+          <p className="text-sm text-zinc-500">Loading photos…</p>
+        </div>
+      )}
+      
+      {/* Empty state - show when no items and not loading */}
+      {items.length === 0 && !tabState.loading && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+          className="flex flex-col items-center justify-center py-20 gap-4 text-center">
+          <div className="w-[72px] h-[72px] rounded-[22px] bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+            <ImageIcon size={28} className="text-zinc-600" />
           </div>
+          <div>
+            <p className="text-zinc-200 font-semibold text-base mb-2">{emptyMsg}</p>
+            <p className="text-zinc-500 text-sm max-w-[270px]">Try a clear front-facing selfie with good lighting.</p>
+          </div>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={emptyAction}
+            className="px-5 py-2.5 rounded-xl text-white text-sm font-semibold transition-colors"
+            style={{ background: 'var(--brand-primary, #3b82f6)' }}>
+            {emptyActionLabel}
+          </motion.button>
+        </motion.div>
+      )}
+      
+      {/* Grid with items - always render sentinel for infinite scroll */}
+      {items.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 8 }}>
+          {items.map((item, idx) => {
+            const imgName   = nameOf(item);
+            const scene     = sceneOf(item);
+            const isSelected = multiSelect.selectedIds.has(imgName);
+            return (
+              <SelectablePhotoCard
+                key={`${imgName}-${idx}`}
+                item={item}
+                imageId={imgName}
+                imageUrl={`${API}/public/events/${token}/image/${imgName}`}
+                thumbnailUrl={`${API}/public/events/${token}/thumbnail/${imgName}`}
+                isSelected={isSelected}
+                selectionIndex={multiSelect.getSelectionIndex(imgName)}
+                isSelectMode={multiSelect.isSelectMode}
+                onToggle={() => multiSelect.toggle(imgName)}
+                onClick={() => { setPreviewIndex(idx); setPreviewImage(imgName); }}
+                scene={scene}
+                confidence={0}
+                showConfidence={false}
+                watermarkConfig={watermarkConfig}
+              />
+            );
+          })}
+        </div>
+      )}
+      
+      {/* Sentinel for infinite scroll - always rendered when tab has items or is loading */}
+      {(items.length > 0 || tabState.loading) && (
+        <>
           <div ref={sentinelRef} className="h-1" />
           <div className="flex flex-col items-center gap-2 py-10">
             {tabState.loading && (
@@ -1157,29 +1209,6 @@ export default function PublicSelfiePage() {
             )}
           </div>
         </>
-      ) : tabState.loading ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-3">
-          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}>
-            <Loader2 size={28} className="text-blue-400" />
-          </motion.div>
-          <p className="text-sm text-zinc-500">Loading photos…</p>
-        </div>
-      ) : (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-          className="flex flex-col items-center justify-center py-20 gap-4 text-center">
-          <div className="w-[72px] h-[72px] rounded-[22px] bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-            <ImageIcon size={28} className="text-zinc-600" />
-          </div>
-          <div>
-            <p className="text-zinc-200 font-semibold text-base mb-2">{emptyMsg}</p>
-            <p className="text-zinc-500 text-sm max-w-[270px]">Try a clear front-facing selfie with good lighting.</p>
-          </div>
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={emptyAction}
-            className="px-5 py-2.5 rounded-xl text-white text-sm font-semibold transition-colors"
-            style={{ background: 'var(--brand-primary, #3b82f6)' }}>
-            {emptyActionLabel}
-          </motion.button>
-        </motion.div>
       )}
     </>
   );
