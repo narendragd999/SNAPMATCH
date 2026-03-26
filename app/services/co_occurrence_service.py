@@ -194,7 +194,10 @@ def get_co_occurring_clusters(
         # Skip if co-occurring cluster is also in matched set
         # (we want OTHER people, not the user themselves)
         if co_occurring_id in matched_set:
+            print(f"👥 [Co-occurrence] Skipping {co.cluster_id_a}-{co.cluster_id_b} (count={co.photo_count}): both in matched_set")
             continue
+        
+        print(f"👥 [Co-occurrence] Found relationship: matched={matched_id}, co_occurring={co_occurring_id}, count={co.photo_count}")
         
         strength = "strong" if co.photo_count >= STRONG_RELATIONSHIP_THRESHOLD else "moderate"
         
@@ -235,12 +238,17 @@ def get_photos_with_co_occurring_clusters(
     Returns:
         List of image_names containing the user + co-occurring people
     """
+    print(f"👥 [Co-occurrence] get_photos_with_co_occurring_clusters: event={event_id}, matched={matched_cluster_ids}")
+    
     # First, get clusters that co-occur with matched clusters
     co_occurring_map = get_co_occurring_clusters(
         db, event_id, matched_cluster_ids, min_count
     )
     
+    print(f"👥 [Co-occurrence] co_occurring_map result: {co_occurring_map}")
+    
     if not co_occurring_map:
+        print(f"👥 [Co-occurrence] No co_occurring_map returned")
         return []
     
     # Collect all co-occurring cluster IDs
@@ -249,11 +257,16 @@ def get_photos_with_co_occurring_clusters(
         for rel in relationships:
             co_occurring_ids.add(rel["cluster_id"])
     
+    print(f"👥 [Co-occurrence] Co-occurring cluster IDs: {co_occurring_ids}")
+    
     if not co_occurring_ids:
+        print(f"👥 [Co-occurrence] No co_occurring_ids found")
         return []
     
     # Find photos that have BOTH matched AND co-occurring clusters
     # Get all clusters for these images
+    print(f"👥 [Co-occurrence] Querying Cluster table for matched={matched_cluster_ids} + co_occurring={list(co_occurring_ids)}")
+    
     all_relevant_clusters = db.query(Cluster).filter(
         Cluster.event_id == event_id,
         or_(
@@ -262,10 +275,14 @@ def get_photos_with_co_occurring_clusters(
         )
     ).all()
     
+    print(f"👥 [Co-occurrence] Found {len(all_relevant_clusters)} cluster records from query")
+    
     # Group by image_name
     image_cluster_map: Dict[str, Set[int]] = defaultdict(set)
     for cluster in all_relevant_clusters:
         image_cluster_map[cluster.image_name].add(cluster.cluster_id)
+    
+    print(f"👥 [Co-occurrence] Grouped into {len(image_cluster_map)} unique images")
     
     # Filter images that have BOTH a matched cluster AND a co-occurring cluster
     matched_set = set(matched_cluster_ids)
@@ -277,6 +294,9 @@ def get_photos_with_co_occurring_clusters(
         
         if has_matched and has_co_occurring:
             result_images.append(image_name)
+            print(f"👥 [Co-occurrence] ✅ Photo {image_name} has both: matched={cluster_ids & matched_set}, co_occurring={cluster_ids & co_occurring_ids}")
+    
+    print(f"👥 [Co-occurrence] Found {len(result_images)} photos with both matched and co-occurring clusters")
     
     return result_images[:limit]
 
@@ -304,20 +324,23 @@ def get_friends_photos(
     Returns:
         List of dicts with image_name and co_occurrence metadata
     """
+    print(f"👥 [get_friends_photos] CALLED: event_id={event_id}, matched_cluster_ids={matched_cluster_ids}, min_count={min_count}")
+    
     if not matched_cluster_ids:
-        print(f"👥 [Co-occurrence] No matched cluster IDs provided")
+        print(f"👥 [get_friends_photos] No matched cluster IDs provided - returning empty list")
         return []
     
-    print(f"👥 [Co-occurrence] Searching for friends: event={event_id}, clusters={matched_cluster_ids}, min_count={min_count}")
+    print(f"👥 [get_friends_photos] Searching for friends photos...")
     
     # Get photos with co-occurring people
     image_names = get_photos_with_co_occurring_clusters(
         db, event_id, matched_cluster_ids, min_count, limit
     )
     
-    print(f"👥 [Co-occurrence] Found {len(image_names)} group photos")
+    print(f"👥 [get_friends_photos] get_photos_with_co_occurring_clusters returned {len(image_names)} images")
     
     if not image_names:
+        print(f"👥 [get_friends_photos] No image_names returned - returning empty list")
         return []
     
     # Get co-occurrence details for enrichment
@@ -347,7 +370,7 @@ def get_friends_photos(
         total_co_occurrence = 0
         strengths = []
         
-        for matched_id in matched_cluster_ids & cluster_ids_in_image:
+        for matched_id in matched_set & cluster_ids_in_image:
             if matched_id in co_occurring_map:
                 for rel in co_occurring_map[matched_id]:
                     if rel["cluster_id"] in cluster_ids_in_image:
