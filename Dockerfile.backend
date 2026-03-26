@@ -23,7 +23,8 @@ RUN mkdir -p /root/.cache/places365 && \
 # Pre-download YOLOv8 model (avoids download on first task)
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 # Copy backend code
-COPY app ./app
+COPY . .
+#COPY app ./app
 #COPY storage ./storage
 # Expose FastAPI port
 EXPOSE 8000
