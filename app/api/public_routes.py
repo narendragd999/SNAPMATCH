@@ -174,6 +174,8 @@ def get_public_event(
         Photo.optimized_filename.isnot(None),
     ).count()
 
+    branding = event.get_branding_config()
+
     return {
         "name":                  event.name,
         "description":           event.description,
@@ -189,6 +191,13 @@ def get_public_event(
         "expires_at":            event.expires_at.isoformat() if event.expires_at else None,
         "owner_id":              event.owner_id,
         "upload_photo_enabled":  _get_setting(db, "upload_photo_enabled") == "true",
+        "template_id": branding["template_id"],
+        "brand_logo_url": branding["brand_logo_url"],
+        "brand_primary_color": branding["brand_primary_color"],
+        "brand_accent_color": branding["brand_accent_color"],
+        "brand_font": branding["brand_font"],
+        "brand_footer_text": branding["brand_footer_text"],
+        "brand_show_powered_by": branding["brand_show_powered_by"],
     }
 
 
