@@ -9,7 +9,7 @@ import {
   Loader2, X, Check, ArrowLeft,
   AlertCircle, CloudUpload,
   SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff,
-  Images, Package, User,
+  Images, Package,
 } from 'lucide-react';
 import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf } from '@/lib/snapmatch/utils';
 import { useReducedMotion } from '@/hooks/snapmatch/useSnapmatch';
@@ -22,28 +22,6 @@ import {
   DEFAULT_WATERMARK_CONFIG,
   applyWatermarkToCanvas,
 } from '@/lib/snapmatch/watermark';
-// 🔐 Persistence imports
-import {
-  StoredSelfie,
-  CachedSearchResult,
-  getStoredSelfie,
-  saveSelfie,
-  clearStoredSelfie,
-  getSelfieDaysRemaining,
-  storedSelfieToFile,
-  getSearchCache,
-  saveSearchCache,
-  clearSearchCache,
-  getCachedEventTokens,
-  clearAllPersistenceData,
-} from '@/lib/snapmatch/persistence';
-import {
-  SavedSelfieBanner,
-  CachedResultsBanner,
-  RememberSelfieCheckbox,
-  AutoSearchIndicator,
-  DataManagementSection,
-} from '@/components/snapmatch/PersistenceUI';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -224,13 +202,6 @@ export default function PublicSelfiePage() {
   // 🎨 Branding state
   const [brandingConfig, setBrandingConfig] = useState<BrandingConfig>(DEFAULT_BRANDING_CONFIG);
 
-  // 🔐 Persistence state
-  const [storedSelfie, setStoredSelfie] = useState<StoredSelfie | null>(null);
-  const [cachedResults, setCachedResults] = useState<CachedSearchResult | null>(null);
-  const [autoSearching, setAutoSearching] = useState(false);
-  const [rememberSelfie, setRememberSelfie] = useState(true);
-  const [cacheAge, setCacheAge] = useState<number | null>(null);
-
   // ── Filter state (My Photos tab) ──
   const [activeScene,  setActiveScene]  = useState('all');
   const [activeObject, setActiveObject] = useState('all');
@@ -366,72 +337,6 @@ export default function PublicSelfiePage() {
     }
   }, [brandingConfig.brand_font]);
 
-  // 🔐 Persistence: Check for stored selfie and cached results on mount
-  useEffect(() => {
-    if (!token) return;
-    
-    // Check for stored selfie
-    const selfie = getStoredSelfie();
-    setStoredSelfie(selfie);
-    
-    // Check for cached results for this event
-    const cached = getSearchCache(token, event?.pin_version);
-    if (cached) {
-      setCachedResults(cached);
-      setCacheAge(Date.now() - cached.cachedAt);
-    }
-  }, [token, event?.pin_version]);
-
-  // 🔐 Persistence: Auto-search with stored selfie if no cache exists
-  useEffect(() => {
-    // Only run if: PIN verified, event loaded, no results yet, stored selfie exists, no cache, not already searching
-    if (!pinVerified || !token || !event || resultId || processing || autoSearching) return;
-    if (!storedSelfie) return;
-    if (cachedResults) return; // Cache exists, don't auto-search
-    
-    const performAutoSearch = async () => {
-      setAutoSearching(true);
-      try {
-        const file = await storedSelfieToFile(storedSelfie);
-        let f = file;
-        if (file.size > 1024 * 1024) f = await compressImage(file, { maxWidth: 1920, quality: 0.85 });
-        const form = new FormData(); form.append('file', f);
-        const res = await fetch(`${API}/public/events/${token}/search`, { method: 'POST', body: form });
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        
-        setResultId(data.result_id);
-        setMyTab({ items: data.you.items, page: 1, total: data.you.total, has_more: data.you.has_more, loading: false, error: null });
-        setActiveTab('my-photos');
-        
-        // Cache the results
-        saveSearchCache(token, data.result_id, data.you.items, data.you.total, data.you.has_more, storedSelfie.thumbnailBase64, event.pin_version || undefined);
-        
-        Analytics.selfieUploaded('auto');
-      } catch (err) {
-        console.error('[Persistence] Auto-search failed:', err);
-        // Don't show error to user, just fall back to normal flow
-      } finally {
-        setAutoSearching(false);
-      }
-    };
-    
-    // Small delay to let the UI render first
-    const timer = setTimeout(performAutoSearch, 500);
-    return () => clearTimeout(timer);
-  }, [pinVerified, token, event, storedSelfie, cachedResults, resultId, processing, autoSearching, API]);
-
-  // 🔐 Persistence: Load cached results if available
-  useEffect(() => {
-    if (!cachedResults || resultId || processing) return;
-    
-    // Restore from cache
-    setResultId(cachedResults.resultId);
-    setMyTab({ items: cachedResults.items, page: 1, total: cachedResults.total, has_more: cachedResults.hasMore, loading: false, error: null });
-    setActiveTab('my-photos');
-    setCacheAge(Date.now() - cachedResults.cachedAt);
-  }, [cachedResults, resultId, processing]);
-
   // ── Load scene list for All Photos filter ──
   useEffect(() => {
     if (!token) return;
@@ -506,9 +411,8 @@ export default function PublicSelfiePage() {
   }, [myTab.items, activeScene, activeObject]);
 
   // ── Face search ──
-  const handleUpload = useCallback(async (file: File, saveSelfieFlag?: boolean) => {
+  const handleUpload = useCallback(async (file: File) => {
     setProcessing(true); setResultId(null); setMyTab(emptyTab()); resetFilters();
-    setCachedResults(null); // Clear cache when doing new search
     Analytics.selfieUploaded('upload');
     try {
       let f = file;
@@ -520,27 +424,10 @@ export default function PublicSelfiePage() {
       setResultId(data.result_id);
       setMyTab({ items: data.you.items, page: 1, total: data.you.total, has_more: data.you.has_more, loading: false, error: null });
       setActiveTab('my-photos');
-      
-      // 🔐 Persistence: Save selfie if requested
-      const shouldSaveSelfie = saveSelfieFlag ?? rememberSelfie;
-      if (shouldSaveSelfie) {
-        const saved = await saveSelfie(file);
-        if (saved) {
-          const selfie = getStoredSelfie();
-          setStoredSelfie(selfie);
-          
-          // Cache the results with selfie preview
-          if (selfie) {
-            saveSearchCache(token, data.result_id, data.you.items, data.you.total, data.you.has_more, selfie.thumbnailBase64, event?.pin_version || undefined);
-            setCacheAge(0);
-          }
-        }
-      }
-      
       setTimeout(() => document.getElementById('results-section')?.scrollIntoView({ behavior: 'smooth' }), 300);
     } catch (err) { console.error(err); }
     finally { setProcessing(false); }
-  }, [token, API, resetFilters, rememberSelfie, event?.pin_version]);
+  }, [token, API, resetFilters]);
 
   // ── Load more My Photos ──
   const loadMoreMy = useCallback(async () => {
@@ -767,52 +654,6 @@ export default function PublicSelfiePage() {
   }, [contribFiles, contribName, contribMsg, token, API]);
 
   const resetContrib = useCallback(() => { setUploadStep('drop'); setContribFiles([]); setContribName(''); setContribMsg(''); setContribError(null); }, []);
-
-  // 🔐 Persistence helper functions
-  const handleUseDifferentSelfie = useCallback(() => {
-    clearStoredSelfie();
-    setStoredSelfie(null);
-    clearSearchCache(token);
-    setCachedResults(null);
-    setResultId(null);
-    setMyTab(emptyTab());
-    setCacheAge(null);
-  }, [token]);
-
-  const handleRefreshResults = useCallback(async () => {
-    if (!storedSelfie) return;
-    setCachedResults(null);
-    setResultId(null);
-    setMyTab(emptyTab());
-    setProcessing(true);
-    
-    try {
-      const file = await storedSelfieToFile(storedSelfie);
-      await handleUpload(file, false);
-    } catch (err) {
-      console.error('[Persistence] Refresh failed:', err);
-    } finally {
-      setProcessing(false);
-    }
-  }, [storedSelfie, handleUpload]);
-
-  const handleClearSelfie = useCallback(() => {
-    clearStoredSelfie();
-    setStoredSelfie(null);
-  }, []);
-
-  const handleClearCache = useCallback(() => {
-    clearSearchCache(token);
-    setCachedResults(null);
-    setCacheAge(null);
-  }, [token]);
-
-  const handleClearAllData = useCallback(() => {
-    clearAllPersistenceData();
-    setStoredSelfie(null);
-    setCachedResults(null);
-    setCacheAge(null);
-  }, []);
 
   // ── Grid CSS ──
   const gridCols = useMemo(() => ({
@@ -1115,22 +956,9 @@ export default function PublicSelfiePage() {
             <motion.div key="search" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, x: -20 }}>
 
               {/* ─── Hero (no result yet) ─── */}
-              {!resultId && !processing && !autoSearching && (
+              {!resultId && !processing && (
                 <motion.section variants={stagger} initial="hidden" animate="visible"
                   className="max-w-xl mx-auto px-5 pt-16 pb-10 text-center">
-                  
-                  {/* 🔐 Saved Selfie Banner */}
-                  {storedSelfie && (
-                    <motion.div variants={fadeUp} className="mb-6">
-                      <SavedSelfieBanner
-                        selfie={storedSelfie}
-                        onUseDifferent={handleUseDifferentSelfie}
-                        onClear={handleClearSelfie}
-                        primaryColor={brandingConfig.brand_primary_color}
-                      />
-                    </motion.div>
-                  )}
-                  
                   <motion.div variants={fadeUp} className="inline-flex mb-7 relative">
                     <div className="w-[92px] h-[92px] rounded-[28px] flex items-center justify-center"
                       style={{
@@ -1181,17 +1009,6 @@ export default function PublicSelfiePage() {
                       onChange={e => { if (e.target.files?.[0]) handleUpload(e.target.files[0]); e.target.value = ''; }} />
                   </motion.div>
 
-                  {/* 🔐 Remember Selfie Checkbox */}
-                  <motion.div variants={fadeUp} className="max-w-[430px] mx-auto mb-4">
-                    <div className="p-3 rounded-xl border" style={{ background: 'var(--brand-surface, #18181b)', borderColor: 'var(--brand-border, #27272a)' }}>
-                      <RememberSelfieCheckbox
-                        checked={rememberSelfie}
-                        onChange={setRememberSelfie}
-                        primaryColor={brandingConfig.brand_primary_color}
-                      />
-                    </div>
-                  </motion.div>
-
                   {/* Drag zone */}
                   <motion.div variants={fadeUp}>
                     <div
@@ -1208,12 +1025,8 @@ export default function PublicSelfiePage() {
                     </div>
                   </motion.div>
 
+                  {/* ─── Processing ─── */}
                 </motion.section>
-              )}
-
-              {/* 🔐 Auto-Search Indicator */}
-              {autoSearching && (
-                <AutoSearchIndicator primaryColor={brandingConfig.brand_primary_color} />
               )}
 
               {/* ─── Processing state ─── */}
@@ -1277,17 +1090,6 @@ export default function PublicSelfiePage() {
 
                   {/* Results grid */}
                   <div id="results-section" className="max-w-6xl mx-auto px-5 py-6">
-                    
-                    {/* 🔐 Cached Results Banner */}
-                    {cacheAge && cacheAge > 0 && activeTab === 'my-photos' && (
-                      <CachedResultsBanner
-                        cacheAge={cacheAge}
-                        totalResults={myTab.total}
-                        onRefresh={handleRefreshResults}
-                        primaryColor={brandingConfig.brand_primary_color}
-                      />
-                    )}
-                    
                     {/* ════════ ACTION BAR ════════ */}
                     <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
                       {/* Left side - Results count */}
@@ -1734,19 +1536,6 @@ export default function PublicSelfiePage() {
                   </li>
                 ))}
               </ul>
-              
-              {/* 🔐 Data Management Section */}
-              <div className="mt-6 pt-6 border-t" style={{ borderColor: 'var(--brand-border, #27272a)' }}>
-                <DataManagementSection
-                  onClearSelfie={handleClearSelfie}
-                  onClearCache={handleClearCache}
-                  onClearAll={handleClearAllData}
-                  hasSelfie={!!storedSelfie}
-                  cachedEventsCount={getCachedEventTokens().length}
-                  primaryColor={brandingConfig.brand_primary_color}
-                />
-              </div>
-              
               <button onClick={() => setShowInfo(false)}
                 className="w-full mt-7 py-2.5 rounded-xl text-white text-sm font-semibold transition-colors"
                 style={{ background: 'var(--brand-primary, #3b82f6)' }}>
