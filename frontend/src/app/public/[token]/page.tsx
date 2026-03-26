@@ -9,7 +9,7 @@ import {
   Loader2, X, Check, ArrowLeft,
   AlertCircle, CloudUpload,
   SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff,
-  Images, Package, User,
+  Images, Package, User, Users,
 } from 'lucide-react';
 import { compressImage, hapticFeedback, Analytics, nameOf, sceneOf, objectOf } from '@/lib/snapmatch/utils';
 import { useReducedMotion } from '@/hooks/snapmatch/useSnapmatch';
@@ -107,7 +107,7 @@ interface BrandingConfig {
   brand_show_powered_by: boolean;
 }
 
-type ActiveTab    = 'my-photos' | 'all-photos';
+type ActiveTab    = 'my-photos' | 'all-photos' | 'with-friends';
 type Mode         = 'search' | 'contribute';
 type UploadStep   = 'drop' | 'preview' | 'submitting' | 'success';
 type GridLayout   = 'comfortable' | 'compact' | 'large';
@@ -207,6 +207,7 @@ export default function PublicSelfiePage() {
   const [resultId,     setResultId]    = useState<string | null>(null);
   const [myTab,        setMyTab]       = useState<TabState>(emptyTab());
   const [allTab,       setAllTab]      = useState<TabState>(emptyTab());
+  const [friendsTab,   setFriendsTab]  = useState<TabState>(emptyTab()); // 👥 With Friends tab
   const [allSceneFilter, setAllSceneFilter] = useState('');
   const [allScenes,    setAllScenes]   = useState<{ scene_label: string; count: number }[]>([]);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -261,7 +262,9 @@ export default function PublicSelfiePage() {
   const contribInputRef = useRef<HTMLInputElement>(null);
 
   // ── Multi-select (shares whichever tab is active) ──
-  const activeItems   = activeTab === 'my-photos' ? myTab.items : allTab.items;
+  const activeItems   = activeTab === 'my-photos' ? myTab.items 
+                      : activeTab === 'with-friends' ? friendsTab.items 
+                      : allTab.items;
   const multiSelect   = useMultiSelect(activeItems);
 
   // ── PIN helpers ──
@@ -507,7 +510,7 @@ export default function PublicSelfiePage() {
 
   // ── Face search ──
   const handleUpload = useCallback(async (file: File, saveSelfieFlag?: boolean) => {
-    setProcessing(true); setResultId(null); setMyTab(emptyTab()); resetFilters();
+    setProcessing(true); setResultId(null); setMyTab(emptyTab()); setFriendsTab(emptyTab()); resetFilters();
     setCachedResults(null); // Clear cache when doing new search
     Analytics.selfieUploaded('upload');
     try {
@@ -519,6 +522,22 @@ export default function PublicSelfiePage() {
       const data = await res.json();
       setResultId(data.result_id);
       setMyTab({ items: data.you.items, page: 1, total: data.you.total, has_more: data.you.has_more, loading: false, error: null });
+      
+      // 👥 Set friends tab data (Group/Family Detection)
+      if (data.friends && data.friends.total > 0) {
+        setFriendsTab({ 
+          items: data.friends.items.map((item: any) => ({ 
+            ...item, 
+            image_name: item.image_name 
+          })), 
+          page: 1, 
+          total: data.friends.total, 
+          has_more: data.friends.has_more, 
+          loading: false, 
+          error: null 
+        });
+      }
+      
       setActiveTab('my-photos');
       
       // 🔐 Persistence: Save selfie if requested
@@ -1404,6 +1423,19 @@ export default function PublicSelfiePage() {
                           }}>
                           <Scan size={14} /> My Photos ({myTab.total})
                         </button>
+                        {/* 👥 With Friends tab - only show if there are friends photos */}
+                        {friendsTab.total > 0 && (
+                          <button onClick={() => handleTabSwitch('with-friends')}
+                            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                              activeTab === 'with-friends' ? '' : 'border-transparent'
+                            }`}
+                            style={{
+                              color: activeTab === 'with-friends' ? 'var(--brand-primary, #3b82f6)' : 'var(--brand-subtext, #71717a)',
+                              borderColor: activeTab === 'with-friends' ? 'var(--brand-primary, #3b82f6)' : 'transparent',
+                            }}>
+                            <Users size={14} /> With Friends ({friendsTab.total})
+                          </button>
+                        )}
                         <button onClick={() => handleTabSwitch('all-photos')}
                           className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                             activeTab === 'all-photos' ? '' : 'border-transparent'
@@ -1431,6 +1463,30 @@ export default function PublicSelfiePage() {
                       />
                     )}
                     
+                    {/* 👥 Friends photos info banner */}
+                    {activeTab === 'with-friends' && friendsTab.total > 0 && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center gap-3 px-4 py-3 rounded-xl border mb-4"
+                        style={{
+                          background: `${brandingConfig.brand_primary_color}08`,
+                          borderColor: `${brandingConfig.brand_primary_color}20`,
+                        }}
+                      >
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                          style={{ background: `${brandingConfig.brand_primary_color}15` }}>
+                          <Users size={16} style={{ color: brandingConfig.brand_primary_color }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
+                            <span className="font-medium">{friendsTab.total} group photo{friendsTab.total !== 1 ? 's' : ''}</span>
+                            <span style={{ color: 'var(--brand-subtext, #71717a)' }}> where you appear with people you frequently appear with</span>
+                          </p>
+                        </div>
+                      </motion.div>
+                    )}
+                    
                     {/* ════════ ACTION BAR ════════ */}
                     <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
                       {/* Left side - Results count */}
@@ -1438,6 +1494,8 @@ export default function PublicSelfiePage() {
                         <p className="text-sm font-medium" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
                           {activeTab === 'my-photos' 
                             ? `${myTab.total} photo${myTab.total !== 1 ? 's' : ''} found`
+                            : activeTab === 'with-friends'
+                            ? `${friendsTab.total} group photo${friendsTab.total !== 1 ? 's' : ''}`
                             : `${allTab.total || event?.processed_count || 0} event photos`}
                         </p>
                       </div>
@@ -1485,7 +1543,7 @@ export default function PublicSelfiePage() {
                           </motion.button>
                         )}
 
-                        {/* Download All - All Photos tab */} 
+                        {/* Download All - All Photos tab */}
                         {activeTab === 'all-photos' && (allTab.total > 0 || (event?.processed_count || 0) > 0) && (
                           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
                             onClick={handleDownloadAllTab} disabled={dlAllTabLoading}
@@ -1593,6 +1651,8 @@ export default function PublicSelfiePage() {
 
                     {activeTab === 'my-photos' ? (
                       renderPhotoGrid(filteredMyItems, mySentinelRef, myTab, () => handleUpload(new File([], '')), 'No photos found', () => {}, 'Take Selfie')
+                    ) : activeTab === 'with-friends' ? (
+                      renderPhotoGrid(friendsTab.items, mySentinelRef, friendsTab, () => setActiveTab('my-photos'), 'No group photos found', () => setActiveTab('my-photos'), 'View My Photos')
                     ) : (
                       <>
                         {/* Scene filter for All Photos */}

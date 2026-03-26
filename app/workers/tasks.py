@@ -385,6 +385,19 @@ def finalize_event(self, batch_results: list, event_id: int):
 
         total_faces = sum(len(res.get("faces") or []) for res in photo_results)
 
+        # ── Phase: building co-occurrence index ─────────────────────────────────
+        # Group/Family Detection - identify people who appear together
+        r.set(f"event:{event_id}:phase", "co_occurrence", ex=86400)
+        _db_update_event(db, event_id, processing_progress=94)
+        
+        try:
+            from app.services.co_occurrence_service import build_co_occurrence_index
+            co_occurrence_count = build_co_occurrence_index(db, event_id)
+            print(f"👥 Co-occurrence: {co_occurrence_count} relationships indexed")
+        except Exception as co_err:
+            # Non-fatal - log but continue
+            print(f"⚠️ Co-occurrence indexing failed (non-fatal): {co_err}")
+
         # ── Phase: enriching ──────────────────────────────────────────────────
         r.set(f"event:{event_id}:phase", "enriching", ex=86400)
         _finalize_complete(db, event_id, total_new, total_clusters, total_faces, event_start)

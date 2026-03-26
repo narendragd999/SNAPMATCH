@@ -182,6 +182,9 @@ def perform_search(
 async def public_search_face(event_id: int, file, db: Session) -> dict:
     """
     Search endpoint for guests (no auth). Returns matched photos and cluster IDs.
+    
+    Now includes friends_photos - photos where the user appears with people
+    they frequently appear with (family, friends, partners).
     """
     contents   = await file.read()
     embeddings = extract_all_embeddings(contents)
@@ -191,9 +194,23 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
 
     matched_photos, matched_cluster_ids = perform_search(event_id, embeddings, db)
 
+    # ── Group/Family Detection: Find photos with co-occurring people ──────────
+    friends_photos = []
+    try:
+        from app.services.co_occurrence_service import get_friends_photos
+        friends_photos = get_friends_photos(
+            db, event_id, matched_cluster_ids,
+            min_count=3,  # At least 3 photos together to be considered
+            limit=500
+        )
+    except Exception as e:
+        # Non-fatal - log and continue without friends_photos
+        print(f"⚠️ Co-occurrence lookup failed (non-fatal): {e}")
+
     return {
         "matched_photos":      matched_photos,
         "matched_cluster_ids": matched_cluster_ids,
+        "friends_photos":      friends_photos,
     }
 
 
