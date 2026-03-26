@@ -7,43 +7,22 @@ on:
         description: "Preview duration in hours"
         required: false
         default: "2"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "5"
-      # NEW INPUT: Selective Build
-      build_target:
-        description: "Which Docker services to build?"
+      branch:
+        description: "Branch to watch for changes"
         required: true
-        default: "all"
+        default: "main"
+      service_to_watch:
+        description: "Service to rebuild on changes"
+        required: true
+        default: "frontend"
         type: choice
         options:
-          - "all"           # Rebuild everything (default safe behavior)
-          - "frontend"      # Only build frontend (npm run build / next build)
-          - "backend"       # Only build backend (python changes)
-          - "nginx"         # Only build nginx proxy
-          - "none"          # Skip build entirely (use existing images)
+          - "frontend"
+          - "backend"
       force_clean:
-        description: "Force clean Docker build (prune cache + rebuild from scratch)"
+        description: "Force clean Docker build (prune cache)"
         required: false
         default: false
-        type: boolean
-      enable_db_ui:
-        description: "Expose Postgres via pgweb browser UI (adds ~30s startup)"
-        required: false
-        default: false
-        type: boolean
-      enable_minio_console:
-        description: "Expose MinIO Console web UI on a public tunnel URL"
-        required: false
-        default: false
-        type: boolean
-      show_celery_logs:
-        description: "Stream live Celery worker logs in the GHA output"
-        required: false
-        default: true
         type: boolean
 
 jobs:
@@ -52,10 +31,12 @@ jobs:
     timeout-minutes: 330
 
     steps:
-
-    # 1 Checkout
+    # 1 Checkout (Fetch depth 0 is required for git polling)
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event.inputs.branch }}
 
     # 2 Free disk space
     - name: Free disk space
@@ -63,810 +44,110 @@ jobs:
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
         df -h
 
-    - name: Force clean Docker cache (only when requested)
+    - name: Force clean Docker cache
       if: ${{ github.event.inputs.force_clean == 'true' }}
       run: |
-        echo "force_clean=true — pruning all Docker layers and build cache"
         docker system prune -af
         docker builder prune -af
-        df -h
-        echo "Clean done — this run will rebuild all images from scratch"
 
     # 3 Set up Docker Buildx
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 4 Cache pip packages
-    - name: Cache pip packages
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-flask-redis-psycopg2
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    # 5 Install Python proxy dependencies early
-    - name: Install proxy dependencies
-      run: pip install flask redis psycopg2-binary -q
-
-    # 7 Write GHA .env
-    - name: Write GHA .env
+    # 4 Setup Environment & .env
+    - name: Write .env
       run: |
         cat > .env << 'EOF'
         SECRET_KEY=${{ secrets.SECRET_KEY || 'gha-preview-secret-key' }}
         ENV=prod
-
-        # Storage
         STORAGE_BACKEND=minio
         MINIO_ENDPOINT=http://minio:9000
         MINIO_ACCESS_KEY=minioadmin
         MINIO_SECRET_KEY=minioadmin
         MINIO_BUCKET=snapfind
         MINIO_PUBLIC_URL=/storage
-        MINIO_PRESIGN_ENDPOINT=
-
-        # Payments
-        RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}
-        RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}
-        RAZORPAY_WEBHOOK_SECRET=${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
-
-        # SMTP
-        SMTP_HOST=${{ secrets.SMTP_HOST || '' }}
-        SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
-        SMTP_USER=${{ secrets.SMTP_USER || '' }}
-        SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD || '' }}
-        SMTP_FROM=${{ secrets.SMTP_FROM || '' }}
-
-        # Frontend
         NEXT_PUBLIC_API_URL=/api
         NEXT_PUBLIC_STORAGE_URL=/storage
         NGINX_PORT=80
-
-        # AI models
-        MAX_PHOTO_SIZE_MB=20
-        PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
-        YOLO_MODEL_PATH=yolov8n.pt
-        DEFAULT_EVENT_PIN=0000
         EOF
-        sed -i 's/^[[:space:]]*//' .env
-        echo "--- .env written ---"
-        cat .env | grep -v SECRET | grep -v PASSWORD | grep -v KEY
 
-    # 8 Build and start Docker stack (UPDATED)
-    - name: Build and start Docker stack
-      env:
-        DOCKER_BUILDKIT: "1"
-        COMPOSE_DOCKER_CLI_BUILD: "1"
-        BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+    # 5 Initial Build & Start
+    - name: Build and Start Stack
       run: |
-        TARGET="${{ github.event.inputs.build_target }}"
-        
-        if [ "$TARGET" = "all" ]; then
-          echo "🛠 Building all services..."
-          docker compose build --parallel
-        elif [ "$TARGET" = "none" ]; then
-          echo "⏩ Skipping build (using cached images)..."
-        else
-          echo "🛠 Building specific service: $TARGET"
-          # This runs the command you requested: e.g., docker compose build frontend
-          docker compose build "$TARGET"
-        fi
-        
+        # Initial build of all services
+        docker compose build --parallel
         docker compose up -d
+        
+        # Wait for services
+        sleep 10
         docker ps
 
-    - name: Wait for Postgres
-      run: |
-        echo "Waiting for Postgres..."
-        for i in {1..40}; do
-          docker exec event_postgres pg_isready && break
-          sleep 2
-        done
-
-    - name: Run database migrations (with retry)
-      run: |
-        echo "Running Alembic migrations..."
-
-        for i in 1 2 3; do
-          docker exec event_backend \
-            alembic -c /app/alembic.ini upgrade head && break
-
-          echo "Retry $i..."
-          sleep 5
-        done
-
-        echo "Current revision:"
-        docker exec event_backend \
-          alembic -c /app/alembic.ini current
-
-    - name: Verify migrations applied
-      run: |
-        REV=$(docker exec event_backend \
-          alembic -c /app/alembic.ini current)
-
-        echo "Revision: $REV"
-
-        echo "$REV" | grep "(head)" || { echo "❌ Migration not fully applied"; exit 1; }
-          
-    # 9 Wait for all services
-    - name: Wait for services
-      run: |
-        wait_for() {
-          local NAME="$1" URL="$2" MAX="$3" INTERVAL="$4"
-          for i in $(seq 1 "$MAX"); do
-            if curl -sf "$URL" >/dev/null 2>&1; then
-              echo "$NAME ready (attempt $i)"
-              return 0
-            fi
-            sleep "$INTERVAL"
-          done
-          echo "$NAME failed to start"
-          return 1
-        }
-
-        wait_for "Backend"  "http://localhost:8000/docs" 40 3 & PID_BACKEND=$!
-        wait_for "Frontend" "http://localhost:3000"      40 3 & PID_FRONTEND=$!
-        wait_for "Nginx"    "http://localhost"           30 3 & PID_NGINX=$!
-
-        FAIL=0
-        wait "$PID_BACKEND"  || FAIL=1
-        wait "$PID_FRONTEND" || FAIL=1
-        wait "$PID_NGINX"    || FAIL=1
-
-        if [ "$FAIL" -eq 1 ]; then
-          docker compose logs backend  --tail=30
-          docker compose logs frontend --tail=30
-          docker compose logs nginx    --tail=30
-          exit 1
-        fi
-        echo "All services ready"
-
-    # 10 Seed default users
-    - name: Seed default users
-      run: |
-        echo 'ZnJvbSBhcHAuY29yZS5zZWN1cml0eSBpbXBvcnQgaGFzaF9wYXNzd29yZApmcm9tIGFwcC5kYXRhYmFzZS5kYiBpbXBvcnQgU2Vzc2lvbkxvY2FsCiMgSW1wb3J0IGFsbCBtb2RlbHMgc28gU1FMQWxjaGVteSBjYW4gcmVzb2x2ZSByZWxhdGlvbnNoaXBzCmZyb20gYXBwLm1vZGVscy51c2VyIGltcG9ydCBVc2VyCmZyb20gYXBwLm1vZGVscy5ldmVudCBpbXBvcnQgRXZlbnQKZnJvbSBhcHAubW9kZWxzLnBob3RvIGltcG9ydCBQaG90bwpmcm9tIGFwcC5tb2RlbHMuY2x1c3RlciBpbXBvcnQgQ2x1c3Rlcgpmcm9tIGFwcC5tb2RlbHMuZXZlbnRfb3JkZXIgaW1wb3J0IEV2ZW50T3JkZXIKZnJvbSBhcHAubW9kZWxzLmd1ZXN0X3VwbG9hZCBpbXBvcnQgR3Vlc3RVcGxvYWQKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmRiID0gU2Vzc2lvbkxvY2FsKCkKdXNlcnMgPSBbCiAgICB7ImVtYWlsIjogImFkbWluQGFkbWluLmNvbSIsICJwYXNzd29yZCI6ICIxMjM0NTYiLCAicm9sZSI6ICJhZG1pbiIsICAicGxhbl90eXBlIjogInBybyJ9LAogICAgeyJlbWFpbCI6ICJ0ZXN0QGdtYWlsLmNvbSIsICAicGFzc3dvcmQiOiAiMTIzNDU2IiwgInJvbGUiOiAib3duZXIiLCAgInBsYW5fdHlwZSI6ICJwcm8ifSwKXQp0cnk6CiAgICBmb3IgdSBpbiB1c2VyczoKICAgICAgICBleGlzdGluZyA9IGRiLnF1ZXJ5KFVzZXIpLmZpbHRlcihVc2VyLmVtYWlsID09IHVbImVtYWlsIl0pLmZpcnN0KCkKICAgICAgICBpZiBleGlzdGluZzoKICAgICAgICAgICAgZXhpc3RpbmcucGFzc3dvcmRfaGFzaCA9IGhhc2hfcGFzc3dvcmQodVsicGFzc3dvcmQiXSkKICAgICAgICAgICAgZXhpc3Rpbmcucm9sZSAgICAgICAgICA9IHVbInJvbGUiXQogICAgICAgICAgICBleGlzdGluZy5wbGFuX3R5cGUgICAgID0gdVsicGxhbl90eXBlIl0KICAgICAgICAgICAgZGIuY29tbWl0KCkKICAgICAgICAgICAgcHJpbnQoIlVwZGF0ZWQ6IiwgdVsiZW1haWwiXSwgInJvbGU9IiArIHVbInJvbGUiXSkKICAgICAgICBlbHNlOgogICAgICAgICAgICB1c2VyID0gVXNlcigKICAgICAgICAgICAgICAgIGVtYWlsICAgICAgICAgICA9IHVbImVtYWlsIl0sCiAgICAgICAgICAgICAgICBwYXNzd29yZF9oYXNoICAgPSBoYXNoX3Bhc3N3b3JkKHVbInBhc3N3b3JkIl0pLAogICAgICAgICAgICAgICAgcm9sZSAgICAgICAgICAgID0gdVsicm9sZSJdLAogICAgICAgICAgICAgICAgcGxhbl90eXBlICAgICAgID0gdVsicGxhbl90eXBlIl0sCiAgICAgICAgICAgICAgICBmcmVlX2V2ZW50X3VzZWQgPSBGYWxzZSwKICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgICAgICA9IGRhdGV0aW1lLnV0Y25vdygpLAogICAgICAgICAgICApCiAgICAgICAgICAgIGRiLmFkZCh1c2VyKQogICAgICAgICAgICBkYi5jb21taXQoKQogICAgICAgICAgICBwcmludCgiQ3JlYXRlZDoiLCB1WyJlbWFpbCJdLCAicm9sZT0iICsgdVsicm9sZSJdKQpmaW5hbGx5OgogICAgZGIuY2xvc2UoKQpwcmludCgiQWRtaW4gIGFkbWluQGFkbWluLmNvbSAvIDEyMzQ1NiAgcm9sZT1hZG1pbiIpCnByaW50KCJPd25lciAgdGVzdEBnbWFpbC5jb20gIC8gMTIzNDU2ICByb2xlPW93bmVyIikK' | base64 -d | docker exec -i event_backend python3
-
-    # 11 Install cloudflared
-    - name: Install Cloudflare tunnel
+    # 6 Tunnels (Cloudflared)
+    - name: Install Cloudflared
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-        cloudflared --version
 
-    # 12 Start Cloudflare Tunnels (app + minio)
-    - name: Start Cloudflare Tunnels
+    - name: Start Tunnels
       run: |
-        start_tunnel() {
-          local NAME="$1" TARGET="$2" LOGFILE="$3"
-          for attempt in 1 2 3 4 5; do
-            pkill -f "cloudflared tunnel.*$TARGET" 2>/dev/null || true
-            sleep 2
-            rm -f "$LOGFILE"
-            cloudflared tunnel --url "$TARGET" > "$LOGFILE" 2>&1 &
-            local TPID=$!
-            local FOUND=""
-            for i in $(seq 1 40); do
-              sleep 1
-              if ! kill -0 "$TPID" 2>/dev/null; then
-                echo "  $NAME attempt $attempt: process died"
-                break
-              fi
-              FOUND=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
-                "$LOGFILE" | head -n 1)
-              [ -n "$FOUND" ] && break
-            done
-            if [ -n "$FOUND" ] && kill -0 "$TPID" 2>/dev/null; then
-              sleep 2
-              if kill -0 "$TPID" 2>/dev/null; then
-                echo "$NAME=$FOUND" >> /tmp/tunnel_urls
-                echo "$NAME tunnel ready: $FOUND"
-                return 0
-              fi
-            fi
-            echo "  $NAME attempt $attempt failed, retrying..."
-            sleep 5
-          done
-          echo "ERROR: $NAME tunnel failed"
-          cat "$LOGFILE"
-          return 1
-        }
-
-        start_tunnel "PREVIEW_URL"      "http://localhost:80"   "tunnel-app.log"   & PID_APP=$!
-        start_tunnel "MINIO_TUNNEL_URL" "http://localhost:9000" "tunnel-minio.log" & PID_MINIO=$!
-
-        FAIL=0
-        wait "$PID_APP"   || FAIL=1
-        wait "$PID_MINIO" || FAIL=1
-        [ "$FAIL" -eq 1 ] && exit 1
-
-        PREVIEW_URL=$(grep '^PREVIEW_URL=' /tmp/tunnel_urls | cut -d= -f2-)
-        MINIO_TUNNEL_URL=$(grep '^MINIO_TUNNEL_URL=' /tmp/tunnel_urls | cut -d= -f2-)
-        echo "PREVIEW_URL=$PREVIEW_URL"           >> "$GITHUB_ENV"
-        echo "MINIO_TUNNEL_URL=$MINIO_TUNNEL_URL" >> "$GITHUB_ENV"
-
+        # Start App Tunnel
+        cloudflared tunnel --url http://localhost:80 > tunnel.log 2>&1 &
+        
+        # Wait for URL
+        sleep 10
+        TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' tunnel.log | head -n 1)
+        
+        echo "PREVIEW_URL=$TUNNEL_URL" >> $GITHUB_ENV
         echo "================================="
-        echo " App URL:      $PREVIEW_URL"
-        echo " MinIO tunnel: $MINIO_TUNNEL_URL"
+        echo " LIVE URL: $TUNNEL_URL"
         echo "================================="
 
-    # 13 Inject MINIO_PRESIGN_ENDPOINT
-    - name: Inject MinIO presign endpoint into backend
-      run: |
-        echo "Injecting MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL"
-
-        # Update .env file
-        sed -i "s|MINIO_PRESIGN_ENDPOINT=.*|MINIO_PRESIGN_ENDPOINT=$MINIO_TUNNEL_URL|" .env
-
-        # ── Stop backend + nginx together ──
-        docker stop event_backend event_proxy 2>/dev/null || true
-        sleep 2
-
-        # ── Restart backend with updated env from .env ──
-        # Use docker start — keeps same container, same IP, no nginx disruption
-        docker start event_backend
-        echo "Backend starting..."
-
-        # Wait up to 3 minutes for backend
-        READY=false
-        for i in $(seq 1 90); do
-          if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
-            echo "✅ Backend ready at attempt $i ($((i*2))s)"
-            READY=true
-            break
-          fi
-          if (( i % 15 == 0 )); then
-            echo "--- Backend logs at $((i*2))s ---"
-            docker logs event_backend --tail=10 2>&1
-          fi
-          sleep 2
-        done
-
-        if [ "$READY" = "false" ]; then
-          echo "❌ Backend failed to start"
-          docker logs event_backend --tail=60 2>&1
-          exit 1
-        fi
-
-        # ── Start nginx AFTER backend ready — gets fresh DNS ──
-        docker start event_proxy
-        sleep 3
-
-        # Verify nginx routing
-        for i in $(seq 1 15); do
-          if curl -sf http://localhost/api/docs >/dev/null 2>&1; then
-            echo "✅ nginx routing healthy at attempt $i"
-            break
-          fi
-          sleep 2
-        done
-
-        # Verify env was picked up
-        LIVE=$(docker exec event_backend \
-          printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-        if [ "$LIVE" = "$MINIO_TUNNEL_URL" ]; then
-          echo "✅ MINIO_PRESIGN_ENDPOINT confirmed: $LIVE"
-        else
-          echo "⚠️ Env not picked up via stop/start"
-          echo "   Got: '$LIVE'"
-          echo "   Trying force-recreate as fallback..."
-
-          MINIO_PRESIGN_ENDPOINT="$MINIO_TUNNEL_URL" \
-            docker compose up -d --no-deps --force-recreate backend
-
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/docs >/dev/null \
-              && echo "Backend ready" && break
-            sleep 2
-          done
-
-          # Restart nginx after force-recreate
-          docker restart event_proxy
-          sleep 3
-
-          for i in $(seq 1 10); do
-            curl -sf http://localhost/api/docs >/dev/null \
-              && echo "✅ nginx routing restored" && break
-            sleep 2
-          done
-
-          LIVE=$(docker exec event_backend \
-            printenv MINIO_PRESIGN_ENDPOINT 2>/dev/null || true)
-          [ "$LIVE" = "$MINIO_TUNNEL_URL" ] \
-            && echo "✅ MINIO_PRESIGN_ENDPOINT confirmed: $LIVE" \
-            || echo "❌ Still not set. Got: '$LIVE'"
-        fi
-
-
-    # 14 Start Redis + Postgres TCP tunnels via Pinggy
-    - name: Start Redis + Postgres TCP tunnels (Pinggy)
-      run: |
-        echo "Starting Pinggy TCP tunnels..."
-
-        # ── Redis tunnel ──
-        ssh -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            -o ExitOnForwardFailure=yes \
-            -o LogLevel=VERBOSE \
-            -R 0:localhost:6379 \
-            -p 443 \
-            tcp@a.pinggy.io \
-            > /tmp/pinggy-redis.log 2>&1 &
-        REDIS_PID=$!
-
-        # Small delay so Pinggy assigns different ports
-        sleep 4
-
-        # ── Postgres tunnel ──
-        ssh -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            -o ExitOnForwardFailure=yes \
-            -o LogLevel=VERBOSE \
-            -R 0:localhost:5432 \
-            -p 443 \
-            tcp@a.pinggy.io \
-            > /tmp/pinggy-db.log 2>&1 &
-        DB_PID=$!
-
-        # Wait up to 40s for both
-        for i in $(seq 1 40); do
-          sleep 1
-          REDIS_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
-            /tmp/pinggy-redis.log | head -1 | sed 's|tcp://||')
-          DB_TUNNEL=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
-            /tmp/pinggy-db.log | head -1 | sed 's|tcp://||')
-          if [ -n "$REDIS_TUNNEL" ] && [ -n "$DB_TUNNEL" ]; then
-            echo "✅ Both tunnels ready at attempt $i"
-            break
-          fi
-          ! kill -0 "$REDIS_PID" 2>/dev/null \
-            && echo "❌ Redis Pinggy died" && cat /tmp/pinggy-redis.log && exit 1
-          ! kill -0 "$DB_PID" 2>/dev/null \
-            && echo "❌ DB Pinggy died" && cat /tmp/pinggy-db.log && exit 1
-        done
-
-        if [ -z "$REDIS_TUNNEL" ] || [ -z "$DB_TUNNEL" ]; then
-          echo "❌ Tunnels failed"
-          cat /tmp/pinggy-redis.log
-          cat /tmp/pinggy-db.log
-          exit 1
-        fi
-
-        REDIS_HOST=$(echo $REDIS_TUNNEL | cut -d: -f1)
-        REDIS_PORT=$(echo $REDIS_TUNNEL | cut -d: -f2)
-        DB_HOST=$(echo $DB_TUNNEL    | cut -d: -f1)
-        DB_PORT=$(echo $DB_TUNNEL    | cut -d: -f2)
-
-        echo "REDIS_TUNNEL=$REDIS_TUNNEL" >> $GITHUB_ENV
-        echo "REDIS_HOST=$REDIS_HOST"     >> $GITHUB_ENV
-        echo "REDIS_PORT=$REDIS_PORT"     >> $GITHUB_ENV
-        echo "DB_TUNNEL=$DB_TUNNEL"       >> $GITHUB_ENV
-        echo "DB_HOST=$DB_HOST"           >> $GITHUB_ENV
-        echo "DB_PORT=$DB_PORT"           >> $GITHUB_ENV
-
-        echo "================================="
-        echo " Redis TCP:    $REDIS_TUNNEL"
-        echo " Postgres TCP: $DB_TUNNEL"
-        echo "================================="
-
-    # 15 Verify tunnels + auto-fix swap
-    - name: Verify tunnels + auto-fix port swap
-      run: |
-        echo "=== Verifying Redis ==="
-        REDIS_RESP=$(docker exec event_redis \
-          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
-          PING 2>/dev/null || true)
-        echo "Redis response: '$REDIS_RESP'"
-
-        echo "=== Verifying Postgres ==="
-        for i in $(seq 1 5); do
-          PGPASSWORD=admin123 psql \
-            -h "$DB_HOST" -p "$DB_PORT" \
-            -U postgres -d event_ai \
-            -c "SELECT 1;" >/dev/null 2>&1 \
-            && echo "✅ Postgres working" && break
-          sleep 3
-        done
-
-        # Auto-fix swap
-        if echo "$REDIS_RESP" | grep -q "PONG"; then
-          echo "✅ Redis confirmed on $REDIS_TUNNEL"
-        else
-          SWAP=$(docker exec event_redis \
-            redis-cli -h "$DB_HOST" -p "$DB_PORT" \
-            PING 2>/dev/null || true)
-          if echo "$SWAP" | grep -q "PONG"; then
-            echo "🔄 Swapping ports..."
-            OR=$REDIS_TUNNEL; OD=$DB_TUNNEL
-            ORH=$REDIS_HOST;  ORP=$REDIS_PORT
-            ODH=$DB_HOST;     ODP=$DB_PORT
-            echo "REDIS_TUNNEL=$OD"  >> $GITHUB_ENV
-            echo "REDIS_HOST=$ODH"   >> $GITHUB_ENV
-            echo "REDIS_PORT=$ODP"   >> $GITHUB_ENV
-            echo "DB_TUNNEL=$OR"     >> $GITHUB_ENV
-            echo "DB_HOST=$ORH"      >> $GITHUB_ENV
-            echo "DB_PORT=$ORP"      >> $GITHUB_ENV
-            echo "✅ Swapped: Redis=$OD  Postgres=$OR"
-          else
-            echo "⚠️ Could not confirm Redis port"
-          fi
-        fi
-
-        echo "================================="
-        echo " Redis:    $REDIS_TUNNEL"
-        echo " Postgres: $DB_TUNNEL"
-        echo "================================="
-
-    # 15.5 Internal health checks
-    - name: Internal health checks
-      run: |
-        echo "=== Redis internal ==="
-        docker exec event_redis redis-cli ping
-
-        echo "=== Postgres internal ==="
-        docker exec event_postgres pg_isready
-
-        echo "=== Backend direct ==="
-        curl -sf http://localhost:8000/docs \
-          && echo "✅ Backend healthy" \
-          || echo "❌ Backend not ready"
-
-        echo "=== Nginx routing ==="
-        curl -sf http://localhost/api/docs \
-          && echo "✅ Nginx routing healthy" \
-          || echo "❌ Nginx routing failed"
-
-    # 16 Start Pinggy watchdog
-    - name: Start Pinggy watchdog
-      run: |
-        (
-          while true; do
-            sleep 30
-
-            # ── Redis tunnel check ──
-            REDIS_OK=$(docker exec event_redis \
-              redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
-              PING 2>/dev/null || echo "FAIL")
-            if ! echo "$REDIS_OK" | grep -q "PONG"; then
-              echo "[watchdog] Redis tunnel dead — restarting at $(date)"
-              pkill -f "ssh.*6379" 2>/dev/null || true
-              sleep 3
-              ssh -o StrictHostKeyChecking=no \
-                  -o ServerAliveInterval=30 \
-                  -o ExitOnForwardFailure=yes \
-                  -R 0:localhost:6379 -p 443 \
-                  tcp@a.pinggy.io \
-                  >> /tmp/pinggy-redis.log 2>&1 &
-              sleep 12
-              NEW=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
-                /tmp/pinggy-redis.log | tail -1 | sed 's|tcp://||')
-              if [ -n "$NEW" ]; then
-                REDIS_HOST=$(echo $NEW | cut -d: -f1)
-                REDIS_PORT=$(echo $NEW | cut -d: -f2)
-                echo "REDIS_TUNNEL=$NEW"      >> $GITHUB_ENV
-                echo "REDIS_HOST=$REDIS_HOST" >> $GITHUB_ENV
-                echo "REDIS_PORT=$REDIS_PORT" >> $GITHUB_ENV
-                echo "[watchdog] ✅ New Redis: $NEW"
-              fi
-            fi
-
-            # ── Postgres tunnel check ──
-            PG_OK=$(PGPASSWORD=admin123 psql \
-              -h "$DB_HOST" -p "$DB_PORT" \
-              -U postgres -d event_ai \
-              -c "SELECT 1;" 2>/dev/null && echo "OK" || echo "FAIL")
-            if ! echo "$PG_OK" | grep -q "OK"; then
-              echo "[watchdog] DB tunnel dead — restarting at $(date)"
-              pkill -f "ssh.*5432" 2>/dev/null || true
-              sleep 3
-              ssh -o StrictHostKeyChecking=no \
-                  -o ServerAliveInterval=30 \
-                  -o ExitOnForwardFailure=yes \
-                  -R 0:localhost:5432 -p 443 \
-                  tcp@a.pinggy.io \
-                  >> /tmp/pinggy-db.log 2>&1 &
-              sleep 12
-              NEW=$(grep -oP 'tcp://[a-zA-Z0-9\.\-]+:[0-9]+' \
-                /tmp/pinggy-db.log | tail -1 | sed 's|tcp://||')
-              if [ -n "$NEW" ]; then
-                DB_HOST=$(echo $NEW | cut -d: -f1)
-                DB_PORT=$(echo $NEW | cut -d: -f2)
-                echo "DB_TUNNEL=$NEW"    >> $GITHUB_ENV
-                echo "DB_HOST=$DB_HOST"  >> $GITHUB_ENV
-                echo "DB_PORT=$DB_PORT"  >> $GITHUB_ENV
-                echo "[watchdog] ✅ New DB: $NEW"
-              fi
-            fi
-
-            # ── Auto-fix nginx if broken ──
-            if ! curl -sf http://localhost/api/docs >/dev/null 2>&1; then
-              if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
-                echo "[watchdog] nginx broken — restarting"
-                docker restart event_proxy 2>/dev/null || true
-                sleep 3
-              fi
-            fi
-
-          done
-        ) > /tmp/pinggy-watchdog.log 2>&1 &
-        disown $!
-        echo "✅ Pinggy watchdog started (PID=$!)"
-
-    # 17 pgweb (Postgres browser UI)
-    - name: Start pgweb (Postgres UI)
-      if: ${{ github.event.inputs.enable_db_ui == 'true' }}
-      run: |
-        if docker inspect event_postgres >/dev/null 2>&1; then
-          PG_CONTAINER="event_postgres"
-        else
-          PG_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
-            | grep -i postgres | awk '{print $1}' | head -1)
-        fi
-
-        DB_USER=$(docker exec "$PG_CONTAINER" \
-          printenv POSTGRES_USER     2>/dev/null || echo "postgres")
-        DB_PASS=$(docker exec "$PG_CONTAINER" \
-          printenv POSTGRES_PASSWORD 2>/dev/null || echo "admin123")
-        DB_NAME=$(docker exec "$PG_CONTAINER" \
-          printenv POSTGRES_DB       2>/dev/null || echo "event_ai")
-        PG_IP=$(docker inspect \
-          -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-          "$PG_CONTAINER" | head -1)
-
-        COMPOSE_NETWORK=$(docker network ls \
-          --filter "label=com.docker.compose.project" \
-          --format "{{.Name}}" | head -1)
-
-        DB_URL="postgres://${DB_USER}:${DB_PASS}@${PG_IP}:5432/${DB_NAME}?sslmode=disable"
-
-        docker rm -f pgweb 2>/dev/null || true
-        docker run -d \
-          --name pgweb \
-          --network "${COMPOSE_NETWORK:-host}" \
-          -p 8081:8081 \
-          sosedoff/pgweb \
-          pgweb --bind=0.0.0.0 --listen=8081 --url="$DB_URL"
-
-        for i in {1..15}; do
-          curl -sf http://localhost:8081 >/dev/null && echo "pgweb ready" && break
-          sleep 2
-        done
-
-        start_pgweb_tunnel() {
-          for attempt in $(seq 1 5); do
-            pkill -f "cloudflared tunnel.*8081" 2>/dev/null || true
-            sleep 2
-            rm -f /tmp/pgweb-tunnel.log
-            cloudflared tunnel --url http://localhost:8081 \
-              > /tmp/pgweb-tunnel.log 2>&1 &
-            local TPID=$!
-            local URL=""
-            for i in $(seq 1 40); do
-              sleep 1
-              kill -0 "$TPID" 2>/dev/null || break
-              URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
-                /tmp/pgweb-tunnel.log | head -1)
-              [ -n "$URL" ] && break
-            done
-            if [ -n "$URL" ] && kill -0 "$TPID" 2>/dev/null; then
-              sleep 2
-              if kill -0 "$TPID" 2>/dev/null; then
-                echo "$URL" > /tmp/pgweb_url
-                echo "pgweb tunnel ready: $URL"
-                return 0
-              fi
-            fi
-            echo "  pgweb attempt $attempt failed"
-            sleep 5
-          done
-        }
-
-        start_pgweb_tunnel
-        PGWEB_URL=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
-        echo "PGWEB_URL=$PGWEB_URL" >> "$GITHUB_ENV"
-        echo "pgweb DB UI: $PGWEB_URL"
-
-        # pgweb watchdog
-        (
-          PGWEB_DB_URL="$DB_URL"
-          PGWEB_NET="${COMPOSE_NETWORK:-host}"
-          while true; do
-            sleep 60
-            if ! curl -sf --max-time 5 http://localhost:8081 >/dev/null 2>&1; then
-              docker rm -f pgweb 2>/dev/null || true
-              sleep 1
-              docker run -d --name pgweb --network "$PGWEB_NET" \
-                -p 8081:8081 sosedoff/pgweb \
-                pgweb --bind=0.0.0.0 --listen=8081 --url="$PGWEB_DB_URL"
-            fi
-            if ! pgrep -f "cloudflared tunnel.*8081" >/dev/null 2>&1; then
-              cloudflared tunnel --url http://localhost:8081 \
-                > /tmp/pgweb-tunnel.log 2>&1 &
-              sleep 15
-              NEW_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
-                /tmp/pgweb-tunnel.log | head -1)
-              [ -n "$NEW_URL" ] && echo "$NEW_URL" > /tmp/pgweb_url \
-                && echo "[pgweb watchdog] New URL: $NEW_URL"
-            fi
-          done
-        ) > /tmp/pgweb-watchdog.log 2>&1 &
-        disown $!
-
-    # 18 MinIO Console tunnel
-    - name: Start MinIO Console tunnel
-      if: ${{ github.event.inputs.enable_minio_console == 'true' }}
-      run: |
-        cloudflared tunnel --url http://localhost:9001 \
-          > /tmp/minio-console-tunnel.log 2>&1 &
-        for i in $(seq 1 30); do
-          sleep 1
-          MINIO_CONSOLE_URL=$(grep -oP \
-            'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' \
-            /tmp/minio-console-tunnel.log | head -1)
-          [ -n "$MINIO_CONSOLE_URL" ] && break
-        done
-        echo "MINIO_CONSOLE_URL=$MINIO_CONSOLE_URL" >> "$GITHUB_ENV"
-        echo "MinIO Console: $MINIO_CONSOLE_URL"
-        echo " User: minioadmin / minioadmin"
-
-    # 19 Keep-alive loop
-    - name: Keep preview alive
-      if: always()
+    # 7 THE AUTO-UPDATE LOOP (Option A Implementation)
+    - name: Keep Alive & Watch for Changes
       env:
-        PREVIEW_DURATION: ${{ github.event.inputs.duration_hours || '2' }}
-        SHOW_CELERY_LOGS: ${{ github.event.inputs.show_celery_logs }}
+        WATCH_BRANCH: ${{ github.event.inputs.branch }}
+        WATCH_SERVICE: ${{ github.event.inputs.service_to_watch }}
+        DURATION: ${{ github.event.inputs.duration_hours }}
       run: |
-        print_urls() {
-          local PGWEB_LIVE
-          PGWEB_LIVE=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
-          echo ""
-          echo "================================="
-          echo " SnapFind Preview — LIVE URLS"
-          echo "================================="
-          echo " App:          $PREVIEW_URL"
-          echo " API docs:     $PREVIEW_URL/api/docs"
-          echo " MinIO:        $MINIO_TUNNEL_URL"
-          echo "---------------------------------"
-          echo " 🔌 Colab Connections"
-          echo " Redis TCP:    $REDIS_TUNNEL"
-          echo " Postgres TCP: $DB_TUNNEL"
-          [ -n "$PGWEB_LIVE" ]        && echo " pgweb DB UI:  $PGWEB_LIVE"
-          [ -n "$MINIO_CONSOLE_URL" ] && echo " MinIO UI:     $MINIO_CONSOLE_URL"
-          echo "---------------------------------"
-          echo " 🔑 Test Accounts"
-          echo " Admin → admin@admin.com / 123456  (role: admin)"
-          echo " User  → test@gmail.com  / 123456  (role: owner)"
-          echo "================================="
-        }
+        git config user.email "action@github.com"
+        git config user.name "GitHub Action"
+        
+        # Store current commit
+        LAST_HASH=$(git rev-parse HEAD)
+        SECONDS_LEFT=$(( DURATION * 3600 ))
 
-        print_urls
-
-        # Verify admin role
-        docker exec event_backend python3 -c "
-        from app.database.db import SessionLocal
-        from app.models.user import User
-        db=SessionLocal()
-        u=db.query(User).filter(User.email=='admin@admin.com').first()
-        print('admin@admin.com role='+(u.role if u else 'NOT FOUND'))
-        db.close()
-        " 2>/dev/null || true
-
-        # ── Log tailing ──
-        CELERY_LOG=/tmp/celery_all.log
-        > "$CELERY_LOG"
-
-        tail_worker() {
-          local CONTAINER="$1" LABEL="$2"
-          docker logs -f --timestamps "$CONTAINER" 2>&1 \
-            | sed -u "s/^/[$LABEL] /" >> "$CELERY_LOG" &
-        }
-
-        # NOTE: event_celery_photo stopped — Colab handles it
-        tail_worker event_celery_finalize "FINALIZE"
-        tail_worker event_celery_ai       "AI      "
-        tail_worker event_celery_default  "DEFAULT "
-        tail_worker event_celery_beat     "BEAT    "
-        tail_worker event_backend         "BACKEND "
-        tail_worker event_frontend        "FRONTEND"
-
-        [ -f /tmp/pgweb-watchdog.log ] && \
-          tail -f /tmp/pgweb-watchdog.log \
-          | sed -u 's/^/[PGWEB-WD] /' >> "$CELERY_LOG" &
-
-        tail -f /tmp/pinggy-watchdog.log 2>/dev/null \
-          | sed -u 's/^/[PINGGY-WD] /' >> "$CELERY_LOG" &
-
-        LOG_OFFSET=0
-        SECONDS_LEFT=$(( PREVIEW_DURATION * 3600 ))
-        ITERATION=0
+        echo "👀 Watching branch '$WATCH_BRANCH' for changes to service '$WATCH_SERVICE'..."
+        echo "Current Commit: $LAST_HASH"
 
         for ((i=0; i<SECONDS_LEFT; i+=60)); do
           sleep 60
-          ITERATION=$(( ITERATION + 1 ))
-          REM=$(( (SECONDS_LEFT - i) / 60 ))
+          REMAINING=$(( (SECONDS_LEFT - i) / 60 ))
+          echo "[$REMAINING min left] Checking for updates..."
 
-          echo ""
-          echo "──────────────────────────────────────────"
-          echo "[$REM min remaining]  $(date '+%H:%M:%S')"
-          echo "──────────────────────────────────────────"
+          # 1. Fetch latest changes
+          git fetch origin "$WATCH_BRANCH"
+          REMOTE_HASH=$(git rev-parse "origin/$WATCH_BRANCH")
 
-          # Health check on backend directly + nginx
-          curl -sf http://localhost:8000/docs >/dev/null \
-            && echo "  ✓ Backend healthy" \
-            || echo "  ⚠ Backend health check failed"
+          # 2. Check if changes detected
+          if [ "$LAST_HASH" != "$REMOTE_HASH" ]; then
+            echo "🚀🚀🚀 NEW CHANGES DETECTED! 🚀🚀🚀"
+            echo "Updating $LAST_HASH -> $REMOTE_HASH"
 
-          curl -sf http://localhost/api/docs >/dev/null \
-            && echo "  ✓ Nginx routing healthy" \
-            || echo "  ⚠ Nginx routing failed"
+            # 3. Pull Code
+            git reset --hard "origin/$WATCH_BRANCH"
+            LAST_HASH=$REMOTE_HASH
 
-          if (( ITERATION % 5 == 0 )); then
-            print_urls
+            # 4. Rebuild ONLY the specific service
+            echo "Rebuilding service: $WATCH_SERVICE"
+            docker compose build "$WATCH_SERVICE"
+            
+            # 5. Restart container with zero downtime
+            docker compose up -d "$WATCH_SERVICE"
+
+            echo "✅ Hot Reload Complete!"
           else
-            PGWEB_LIVE=$(cat /tmp/pgweb_url 2>/dev/null || echo "")
-            echo " App:      $PREVIEW_URL"
-            echo " Redis:    $REDIS_TUNNEL"
-            echo " Postgres: $DB_TUNNEL"
-            [ -n "$PGWEB_LIVE" ] && echo " pgweb:    $PGWEB_LIVE"
-          fi
-
-          if [ "${SHOW_CELERY_LOGS}" != "false" ]; then
-            TOTAL_LINES=$(wc -l < "$CELERY_LOG")
-            NEW_LINES=$(( TOTAL_LINES - LOG_OFFSET ))
-            if [ "$NEW_LINES" -gt 0 ]; then
-              echo "--- Service logs (${NEW_LINES} new lines) ---"
-              tail -n "$NEW_LINES" "$CELERY_LOG"
-              echo "--- end ---"
-            fi
-            LOG_OFFSET=$TOTAL_LINES
-          fi
-
-          if (( ITERATION % 5 == 0 )); then
-            echo "--- Container status ---"
-            for C in event_backend event_frontend \
-                     event_celery_photo \
-                     event_celery_finalize event_celery_ai \
-                     event_celery_default event_celery_beat pgweb; do
-              STATUS=$(docker inspect \
-                --format='{{.State.Status}}' "$C" 2>/dev/null || echo "not found")
-              echo "  $C → $STATUS"
-            done
-            echo "------------------------"
+            # Health Check
+            curl -sf http://localhost:8000/docs >/dev/null && echo "Backend OK" || echo "Backend Fail"
           fi
         done
-
-    # 20 Show logs on failure
-    - name: Show logs on failure
-      if: failure()
-      run: |
-        echo "===== BACKEND ====="
-        docker compose logs backend         --tail=50
-        echo "===== FRONTEND ====="
-        docker compose logs frontend        --tail=50
-        echo "===== NGINX ====="
-        docker compose logs nginx           --tail=50
-        echo "===== CELERY FINALIZE ====="
-        docker compose logs celery_finalize --tail=50
-        echo "===== CELERY AI ====="
-        docker compose logs celery_ai       --tail=50
-        echo "===== CELERY DEFAULT ====="
-        docker compose logs celery_default  --tail=50
-        echo "===== CELERY BEAT ====="
-        docker compose logs celery_beat     --tail=50
-        cat tunnel-app.log                  || true
-        cat tunnel-minio.log                || true
-        cat /tmp/pinggy-redis.log           || true
-        cat /tmp/pinggy-db.log              || true
-        cat /tmp/pinggy-watchdog.log        || true
-        cat /tmp/pgweb-tunnel.log           || true
-        docker logs pgweb 2>/dev/null       || true
-
-    # 21 Cleanup
-    - name: Cleanup
-      if: always()
-      run: |
-        pkill cloudflared      || true
-        pkill -f "ssh.*pinggy" || true
-        docker compose down -v
-        echo "Cleanup complete"
