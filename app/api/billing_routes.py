@@ -360,7 +360,7 @@ def create_free_event(
         is_free_tier=True,
         payment_status="free",
         amount_paid_paise=0,
-        guest_upload_enabled=False,
+        guest_upload_enabled=True,
         public_status="active",
     )
     db.add(event)
