@@ -24,13 +24,13 @@ def get_face_app() -> FaceAnalysis:
                 ctx_id   = 0 if USE_GPU else -1
                 det_size = (640, 640) if USE_GPU else (240, 240)
                 app = FaceAnalysis(
-                    name="buffalo_m",
+                    name="buffalo_l",
                     allowed_modules=["detection", "recognition"],
                 )
                 app.prepare(ctx_id=ctx_id, det_size=det_size)
                 _face_app = app
                 mode = "GPU 🚀" if USE_GPU else "CPU"
-                print(f"✅ InsightFace buffalo_m ({mode}, det_size={det_size})")
+                print(f"✅ InsightFace buffalo_l ({mode}, det_size={det_size})")
     return _face_app
 
 face_app = get_face_app()
