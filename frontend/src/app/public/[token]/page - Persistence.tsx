@@ -623,205 +623,69 @@ export default function PublicSelfiePage() {
     return () => allObserverRef.current?.disconnect();
   }, [loadMoreAll]);
 
-  // ── Helper: Apply watermark to a blob and return watermarked blob ──
-  const applyWatermarkToBlob = useCallback(async (blob: Blob): Promise<Blob> => {
-    if (!watermarkConfig.enabled) return blob;
-    
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      const url = URL.createObjectURL(blob);
-      
-      img.onload = async () => {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth;
-          canvas.height = img.naturalHeight;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            URL.revokeObjectURL(url);
-            resolve(blob);
-            return;
-          }
-          ctx.drawImage(img, 0, 0);
-          await applyWatermarkToCanvas(canvas, watermarkConfig);
-          canvas.toBlob(
-            (watermarkedBlob) => {
-              URL.revokeObjectURL(url);
-              if (watermarkedBlob) {
-                resolve(watermarkedBlob);
-              } else {
-                resolve(blob);
-              }
-            },
-            'image/jpeg',
-            0.95
-          );
-        } catch (err) {
-          URL.revokeObjectURL(url);
-          resolve(blob);
-        }
-      };
-      
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        resolve(blob);
-      };
-      
-      img.src = url;
-    });
-  }, [watermarkConfig]);
-
   // ── Download single with watermark ──
   const downloadSinglePhoto = useCallback(async (imageName: string) => {
     try {
       const res = await fetch(`${API}/public/events/${token}/photo/${imageName}`);
       if (!res.ok) throw new Error();
-      let blob = await res.blob();
-      
-      // Apply watermark if enabled
-      blob = await applyWatermarkToBlob(blob);
-      
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objUrl;
-      a.download = imageName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(objUrl);
+      const blob = await res.blob();
+      if (watermarkConfig.enabled) {
+        const img = new Image(); img.crossOrigin = 'anonymous';
+        const url = URL.createObjectURL(blob);
+        await new Promise<void>((resolve, reject) => { img.onload = () => resolve(); img.onerror = reject; img.src = url; });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          await applyWatermarkToCanvas(canvas, watermarkConfig);
+          const wblob = await new Promise<Blob>((res, rej) => canvas.toBlob(b => b ? res(b) : rej(), 'image/jpeg', 0.95));
+          const wurl = URL.createObjectURL(wblob);
+          const a = document.createElement('a'); a.href = wurl; a.download = imageName;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          URL.revokeObjectURL(wurl); URL.revokeObjectURL(url);
+        }
+      } else {
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = objUrl; a.download = imageName;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(objUrl);
+      }
       hapticFeedback('success');
     } catch { hapticFeedback('error'); }
-  }, [token, API, applyWatermarkToBlob]);
+  }, [token, API, watermarkConfig]);
 
-  // ── Download all matched as ZIP (with watermark) ──
+  // ── Download all matched as ZIP ──
   const handleDownloadAll = useCallback(async () => {
     if (!resultId || dlAllLoading) return;
     setDlAllLoading(true); hapticFeedback('medium');
     try {
-      // Fetch all matched photos with pagination
-      const allPhotos: { name: string; blob: Blob }[] = [];
-      let page = 1;
-      let hasMore = true;
-      
-      while (hasMore) {
-        const res = await fetch(`${API}/public/events/${token}/search/${resultId}?kind=you&page=${page}&page_size=50`);
-        if (res.status === 404) break;
-        if (!res.ok) throw new Error();
-        const data = await res.json();
-        
-        if (data.items && data.items.length > 0) {
-          // Fetch each photo and apply watermark
-          const photoPromises = data.items.map(async (item: PhotoItem) => {
-            const imgName = nameOf(item);
-            try {
-              const photoRes = await fetch(`${API}/public/events/${token}/photo/${imgName}`);
-              if (!photoRes.ok) return null;
-              let blob = await photoRes.blob();
-              blob = await applyWatermarkToBlob(blob);
-              return { name: imgName, blob };
-            } catch {
-              return null;
-            }
-          });
-          
-          const results = await Promise.allSettled(photoPromises);
-          for (const result of results) {
-            if (result.status === 'fulfilled' && result.value && result.value.blob.size > 0) {
-              allPhotos.push(result.value);
-            }
-          }
-        }
-        
-        hasMore = data.has_more;
-        page++;
-      }
-      
-      if (allPhotos.length === 0) throw new Error('No photos found');
-      
-      // Create ZIP
-      const JSZip = (await import('jszip')).default;
-      const zip = new JSZip();
-      for (const { name, blob } of allPhotos) {
-        zip.file(name, blob);
-      }
-      
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
-      const url = URL.createObjectURL(zipBlob);
+      const res = await fetch(`${API}/public/events/${token}/download/${resultId}?kind=matched`);
+      if (!res.ok) throw new Error();
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
       const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-photos.zip` });
-      a.click();
-      URL.revokeObjectURL(url);
-      hapticFeedback('success');
+      a.click(); URL.revokeObjectURL(url); hapticFeedback('success');
     } catch { hapticFeedback('error'); }
     finally { setDlAllLoading(false); }
-  }, [resultId, dlAllLoading, token, API, event, applyWatermarkToBlob]);
+  }, [resultId, dlAllLoading, token, API, event]);
 
-  // ── Download all event photos as ZIP (All Photos tab) with watermark ──
+  // ── Download all event photos as ZIP (All Photos tab) ──
   const handleDownloadAllTab = useCallback(async () => {
     if (dlAllTabLoading) return;
     setDlAllTabLoading(true); hapticFeedback('medium');
     try {
-      // Fetch all event photos with pagination
-      const allPhotos: { name: string; blob: Blob }[] = [];
-      let page = 1;
-      let hasMore = true;
-      
-      while (hasMore) {
-        const params = new URLSearchParams({ page: String(page), page_size: '50' });
-        const res = await fetch(`${API}/public/events/${token}/photos?${params}`);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
-        
-        if (data.items && data.items.length > 0) {
-          // Fetch each photo and apply watermark
-          const photoPromises = data.items.map(async (item: PhotoItem) => {
-            const imgName = nameOf(item);
-            try {
-              const photoRes = await fetch(`${API}/public/events/${token}/photo/${imgName}`);
-              if (!photoRes.ok) return null;
-              let blob = await photoRes.blob();
-              blob = await applyWatermarkToBlob(blob);
-              return { name: imgName, blob };
-            } catch {
-              return null;
-            }
-          });
-          
-          const results = await Promise.allSettled(photoPromises);
-          for (const result of results) {
-            if (result.status === 'fulfilled' && result.value && result.value.blob.size > 0) {
-              allPhotos.push(result.value);
-            }
-          }
-        }
-        
-        hasMore = data.has_more;
-        page++;
-        
-        // Safety limit
-        if (page > 100) break;
-      }
-      
-      if (allPhotos.length === 0) throw new Error('No photos found');
-      
-      // Create ZIP
-      const JSZip = (await import('jszip')).default;
-      const zip = new JSZip();
-      for (const { name, blob } of allPhotos) {
-        zip.file(name, blob);
-      }
-      
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
-      const url = URL.createObjectURL(zipBlob);
+      const res = await fetch(`${API}/public/events/${token}/download-all`);
+      if (!res.ok) throw new Error();
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
       const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-all-photos.zip` });
-      a.click();
-      URL.revokeObjectURL(url);
-      hapticFeedback('success');
+      a.click(); URL.revokeObjectURL(url); hapticFeedback('success');
     } catch { hapticFeedback('error'); }
     finally { setDlAllTabLoading(false); }
-  }, [dlAllTabLoading, token, API, event, applyWatermarkToBlob]);
+  }, [dlAllTabLoading, token, API, event]);
 
-  // ── Batch download selected → concurrent fetch → client-side ZIP (with watermark) ──
+  // ── Batch download selected → concurrent fetch → client-side ZIP ──
   const handleBatchDownload = useCallback(async () => {
     if (multiSelect.count === 0 || batchDlLoading) return;
     setBatchDlLoading(true); hapticFeedback('medium');
@@ -831,24 +695,17 @@ export default function PublicSelfiePage() {
           const probe = await fetch(`${API}/public/events/${token}/photo/${imageName}`, {
             redirect: 'follow',
           });
-          
-          let blob: Blob;
           if (probe.ok && probe.url === `${API}/public/events/${token}/photo/${imageName}`) {
-            blob = await probe.blob();
-          } else {
-            const finalUrl = probe.url || `${API}/public/events/${token}/photo/${imageName}`;
-            const res2 = await fetch(finalUrl, { mode: 'cors' });
-            if (!res2.ok) throw new Error(`${res2.status}`);
-            blob = await res2.blob();
+            const blob = await probe.blob();
+            return { name: imageName, blob };
           }
-          
-          // Apply watermark to each photo
-          blob = await applyWatermarkToBlob(blob);
-          
+          const finalUrl = probe.url || `${API}/public/events/${token}/photo/${imageName}`;
+          const res2 = await fetch(finalUrl, { mode: 'cors' });
+          if (!res2.ok) throw new Error(`${res2.status}`);
+          const blob = await res2.blob();
           return { name: imageName, blob };
         })
       );
-      
       const JSZip = (await import('jszip')).default;
       const zip = new JSZip();
       let added = 0;
@@ -873,7 +730,7 @@ export default function PublicSelfiePage() {
       multiSelect.exitSelectMode();
     } catch { hapticFeedback('error'); }
     finally { setBatchDlLoading(false); }
-  }, [multiSelect, batchDlLoading, token, API, event, applyWatermarkToBlob]);
+  }, [multiSelect, batchDlLoading, token, API, event]);
 
   // ── Camera ──
   const handleCameraCapture = useCallback((file: File) => { setCameraOpen(false); handleUpload(file); }, [handleUpload]);
