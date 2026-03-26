@@ -3,6 +3,51 @@ add public pricing button
 add admin pricing configuration button
 
 
+## Future Enhancement Roadmap
+
+Based on the Features-List-Upgrade document:
+
+### High Priority
+- [ ] WhatsApp Bot Integration
+- [ ] Push Notifications
+- [ ] Live Slideshow Mode
+- [ ] Favorites/Bookmarks
+- [ ] Photo Selling/Store
+- [ ] Duplicate Detection
+- [ ] Group/Family Detection
+
+### Medium Priority
+- [ ] Analytics Dashboard
+- [ ] Email Delivery
+- [ ] PWA Support
+- [ ] Custom Domain
+- [ ] White-label Solution
+
+### Lower Priority
+- [ ] AR Photo Viewing
+- [ ] Wallet Passes
+- [ ] SMS Delivery
+- [ ] Collage Generator
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 Based on my research of **Samaro.ai** and its competitors (Kwikpic, Photier, FacialPrint, Kamero, GuestCam, GuestPix, etc.), here's a comprehensive list of **pro-level features** you could add to make your SNAPMATCH project stand out:
