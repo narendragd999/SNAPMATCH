@@ -7,7 +7,7 @@ import {
   Upload, Download, Camera, Info, Scan,
   ImageIcon, RefreshCw, Sparkles,
   Loader2, X, Check, ArrowLeft,
-  AlertCircle, CloudUpload,
+  AlertCircle, CloudUpload, CheckCircle,
   SlidersHorizontal, PackageOpen, Grid2X2, LayoutGrid, Lock, ShieldCheck, Eye, EyeOff,
   Images, Package, User, Users,
 } from 'lucide-react';
@@ -53,6 +53,8 @@ interface PhotoItem extends MultiSelectPhotoItem {
   object_label?: string;
   objects?:     string[];
   similarity?:  number;
+  total_faces?: number;   // Total faces detected in photo
+  other_faces?: number;   // Faces other than the matched user
 }
 
 interface PageData {
@@ -221,6 +223,15 @@ export default function PublicSelfiePage() {
   const [dlAllTabLoading, setDlAllTabLoading] = useState(false);
   const [batchDlLoading,  setBatchDlLoading]  = useState(false);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
+
+  // 🔔 Toast notification state
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Show toast helper with auto-dismiss
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
 
   // 🎨 Branding state
   const [brandingConfig, setBrandingConfig] = useState<BrandingConfig>(DEFAULT_BRANDING_CONFIG);
@@ -892,10 +903,11 @@ export default function PublicSelfiePage() {
       const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-photos.zip` });
       a.click();
       URL.revokeObjectURL(url);
+      showToast(`Downloaded ${allPhotos.length} photos successfully!`, 'success');
       hapticFeedback('success');
-    } catch { hapticFeedback('error'); }
+    } catch { showToast('Download failed. Please try again.', 'error'); hapticFeedback('error'); }
     finally { setDlAllLoading(false); }
-  }, [resultId, dlAllLoading, token, API, event, applyWatermarkToBlob]);
+  }, [resultId, dlAllLoading, token, API, event, applyWatermarkToBlob, showToast]);
 
   // ── Download all event photos as ZIP (All Photos tab) with watermark ──
   const handleDownloadAllTab = useCallback(async () => {
@@ -957,14 +969,16 @@ export default function PublicSelfiePage() {
       const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-all-photos.zip` });
       a.click();
       URL.revokeObjectURL(url);
+      showToast(`Downloaded ${allPhotos.length} photos successfully!`, 'success');
       hapticFeedback('success');
-    } catch { hapticFeedback('error'); }
+    } catch { showToast('Download failed. Please try again.', 'error'); hapticFeedback('error'); }
     finally { setDlAllTabLoading(false); }
-  }, [dlAllTabLoading, token, API, event, applyWatermarkToBlob]);
+  }, [dlAllTabLoading, token, API, event, applyWatermarkToBlob, showToast]);
 
   // ── Batch download selected → concurrent fetch → client-side ZIP (with watermark) ──
   const handleBatchDownload = useCallback(async () => {
     if (multiSelect.count === 0 || batchDlLoading) return;
+    const downloadCount = multiSelect.count;
     setBatchDlLoading(true); hapticFeedback('medium');
     try {
       const results = await Promise.allSettled(
@@ -1010,11 +1024,17 @@ export default function PublicSelfiePage() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      
+      // ✅ Success: Show toast and clear selection
+      showToast(`Downloaded ${added} photo${added !== 1 ? 's' : ''} successfully!`, 'success');
       hapticFeedback('success');
       multiSelect.exitSelectMode();
-    } catch { hapticFeedback('error'); }
+    } catch {
+      showToast('Download failed. Please try again.', 'error');
+      hapticFeedback('error');
+    }
     finally { setBatchDlLoading(false); }
-  }, [multiSelect, batchDlLoading, token, API, event, applyWatermarkToBlob]);
+  }, [multiSelect, batchDlLoading, token, API, event, applyWatermarkToBlob, showToast]);
 
   // ── Camera ──
   const handleCameraCapture = useCallback((file: File) => { setCameraOpen(false); handleUpload(file); }, [handleUpload]);
@@ -1722,44 +1742,10 @@ export default function PublicSelfiePage() {
                           ))}
                         </div>
 
-                        {/* Download All - My Photos tab */}
-                        {activeTab === 'my-photos' && myTab.total > 0 && (
-                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                            onClick={handleDownloadAll} disabled={dlAllLoading}
-                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50"
-                            style={{
-                              background: brandingConfig.brand_primary_color,
-                              color: '#fff',
-                            }}>
-                            {dlAllLoading ? (
-                              <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={14} /></motion.div> Preparing…</>
-                            ) : (
-                              <><PackageOpen size={14} /> Download All ({myTab.total})</>
-                            )}
-                          </motion.button>
-                        )}
-
-                        {/* Download All - All Photos tab */}
-                        {activeTab === 'all-photos' && (allTab.total > 0 || (event?.processed_count || 0) > 0) && (
-                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                            onClick={handleDownloadAllTab} disabled={dlAllTabLoading}
-                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50"
-                            style={{
-                              background: brandingConfig.brand_primary_color,
-                              color: '#fff',
-                            }}>
-                            {dlAllTabLoading ? (
-                              <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={14} /></motion.div> Preparing…</>
-                            ) : (
-                              <><PackageOpen size={14} /> Download All ({allTab.total || event?.processed_count || 0})</>
-                            )}
-                          </motion.button>
-                        )}
-
-                        {/* New Search button */}
+                        {/* New Search button - only on My Photos tab */}
                         {activeTab === 'my-photos' && (
                           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                            onClick={() => { setResultId(null); setMyTab(emptyTab()); setActiveScene('all'); setActiveObject('all'); }}
+                            onClick={() => { setResultId(null); setMyTab(emptyTab()); setFriendsTab(emptyTab()); setActiveScene('all'); setActiveObject('all'); }}
                             className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold border transition-colors"
                             style={{
                               background: 'var(--brand-surface, #18181b)',
@@ -1832,7 +1818,7 @@ export default function PublicSelfiePage() {
                       </div>
                     )}
 
-                    {/* Multi-select toolbar */}
+                    {/* Multi-select toolbar - unified for all tabs */}
                     <MultiSelectToolbar
                       items={activeItems}
                       selectedIds={multiSelect.selectedIds}
@@ -1843,6 +1829,10 @@ export default function PublicSelfiePage() {
                       isActive={multiSelect.isSelectMode}
                       onActivate={multiSelect.enterSelectMode}
                       onDeactivate={multiSelect.exitSelectMode}
+                      isDownloading={batchDlLoading}
+                      totalCount={activeTab === 'my-photos' ? myTab.total : activeTab === 'with-friends' ? friendsTab.total : allTab.total}
+                      onDownloadAll={activeTab === 'my-photos' ? handleDownloadAll : activeTab === 'all-photos' ? handleDownloadAllTab : undefined}
+                      primaryColor={brandingConfig.brand_primary_color}
                     />
 
                     {activeTab === 'my-photos' ? (
@@ -2164,6 +2154,30 @@ export default function PublicSelfiePage() {
         showFaceGuide={true}
         defaultTimer={0}
       />
+
+      {/* ════ TOAST NOTIFICATION ════ */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: 50, x: '-50%' }}
+            className="fixed bottom-6 left-1/2 z-[100] flex items-center gap-2 px-4 py-3 rounded-xl border shadow-lg"
+            style={{
+              background: toast.type === 'success' ? 'rgba(34, 197, 94, 0.95)' : 'rgba(239, 68, 68, 0.95)',
+              borderColor: toast.type === 'success' ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)',
+              color: '#fff',
+            }}
+          >
+            {toast.type === 'success' ? (
+              <Check size={16} className="flex-shrink-0" />
+            ) : (
+              <AlertCircle size={16} className="flex-shrink-0" />
+            )}
+            <span className="text-sm font-medium">{toast.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
