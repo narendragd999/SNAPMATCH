@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckSquare, Square, Download, X, Check, Users } from 'lucide-react';
+import { CheckSquare, Square, Download, X, Check, Users, Loader2 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -97,6 +97,10 @@ interface MultiSelectToolbarProps {
   isActive: boolean;
   onActivate: () => void;
   onDeactivate: () => void;
+  isDownloading?: boolean;  // Loading state for download
+  totalCount?: number;      // Total items count for "Download All"
+  onDownloadAll?: () => void; // Download all items
+  primaryColor?: string;    // Brand primary color
 }
 
 export function MultiSelectToolbar({
@@ -108,82 +112,141 @@ export function MultiSelectToolbar({
   isActive,
   onActivate,
   onDeactivate,
+  isDownloading = false,
+  totalCount,
+  onDownloadAll,
+  primaryColor = '#3b82f6',
 }: MultiSelectToolbarProps) {
   const count = selectedIds.size;
-  const allSelected = count === items.length && items.length > 0;
+  const total = totalCount ?? items.length;
+  const allSelected = count === total && total > 0;
 
-  /* ── Inactive trigger button ── */
+  /* ── Inactive: Default mode with Select + Download All buttons ── */
   if (!isActive) {
     return (
-      <motion.button
-        whileHover={{ scale: 1.02 }}
-        whileTap={{ scale: 0.97 }}
-        onClick={onActivate}
-        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 hover:border-zinc-600 text-zinc-300 text-xs font-medium transition-colors"
-      >
-        <CheckSquare size={13} className="text-zinc-400" />
-        Select
-      </motion.button>
+      <div className="flex items-center gap-2">
+        {/* Select Mode button */}
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.97 }}
+          onClick={onActivate}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors"
+          style={{
+            background: 'var(--brand-surface, #18181b)',
+            borderColor: 'var(--brand-border, #27272a)',
+            color: 'var(--brand-text, #f4f4f5)',
+          }}
+        >
+          <CheckSquare size={13} style={{ color: primaryColor }} />
+          Select
+        </motion.button>
+        
+        {/* Download All button */}
+        {onDownloadAll && total > 0 && (
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={onDownloadAll}
+            disabled={isDownloading}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white transition-colors disabled:opacity-50"
+            style={{ background: primaryColor }}
+          >
+            {isDownloading ? (
+              <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={13} /></motion.div> Preparing…</>
+            ) : (
+              <><Download size={13} /> Download All ({total})</>
+            )}
+          </motion.button>
+        )}
+      </div>
     );
   }
 
-  /* ── Active toolbar ── */
+  /* ── Active: Select mode toolbar ── */
   return (
     <motion.div
       initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4 }}
-      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800"
+      className="flex items-center gap-2 px-3 py-2 rounded-xl border flex-wrap"
+      style={{
+        background: 'var(--brand-surface, #0d0d10)',
+        borderColor: 'var(--brand-border, #27272a)',
+      }}
     >
-      {/* Selected count indicator — BLUE (was amber) */}
+      {/* Cancel button */}
+      <motion.button
+        whileHover={{ scale: 1.02 }}
+        whileTap={{ scale: 0.97 }}
+        onClick={onDeactivate}
+        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors"
+        style={{
+          background: 'var(--brand-border, #27272a)',
+          color: 'var(--brand-subtext, #71717a)',
+        }}
+      >
+        <X size={12} />
+        Cancel
+      </motion.button>
+
+      {/* Divider */}
+      <div className="w-px h-5 bg-zinc-700" />
+
+      {/* Selected count indicator */}
       <div className="flex items-center gap-1.5">
-        <div className="w-5 h-5 rounded-full bg-blue-500/15 border border-blue-500/30 flex items-center justify-center flex-shrink-0">
-          <div className="w-2 h-2 rounded-full bg-blue-400" />
+        <div 
+          className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
+          style={{ 
+            background: `${primaryColor}20`,
+            border: `1px solid ${primaryColor}40`,
+          }}
+        >
+          <div className="w-2 h-2 rounded-full" style={{ background: primaryColor }} />
         </div>
-        <span className="text-xs font-semibold text-zinc-200 tabular-nums">
+        <span className="text-xs font-semibold tabular-nums" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
           {count} selected
         </span>
       </div>
 
-      {/* Divider */}
-      <div className="w-px h-4 bg-zinc-700" />
+      {/* Select all / Deselect all */}
+      <button
+        onClick={allSelected ? onClearSelection : onSelectAll}
+        className="text-xs font-medium transition-colors whitespace-nowrap"
+        style={{ color: 'var(--brand-subtext, #71717a)' }}
+        onMouseEnter={(e) => e.currentTarget.style.color = 'var(--brand-text, #f4f4f5)'}
+        onMouseLeave={(e) => e.currentTarget.style.color = 'var(--brand-subtext, #71717a)'}
+      >
+        {allSelected ? 'Deselect all' : `Select all (${total})`}
+      </button>
 
-      {/* Select all / Clear */}
-      {!allSelected ? (
-        <button
-          onClick={onSelectAll}
-          className="text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors whitespace-nowrap"
-        >
-          Select all
-        </button>
-      ) : (
+      {/* Clear selection (only when some selected) */}
+      {count > 0 && !allSelected && (
         <button
           onClick={onClearSelection}
-          className="text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors whitespace-nowrap"
+          className="text-xs font-medium transition-colors whitespace-nowrap"
+          style={{ color: 'var(--brand-subtext, #71717a)' }}
+          onMouseEnter={(e) => e.currentTarget.style.color = 'var(--brand-text, #f4f4f5)'}
+          onMouseLeave={(e) => e.currentTarget.style.color = 'var(--brand-subtext, #71717a)'}
         >
           Clear
         </button>
       )}
 
-      {/* Download selected — BLUE (was amber/gold) */}
+      {/* Download selected button */}
       <motion.button
-        whileHover={{ scale: 1.02 }}
-        whileTap={{ scale: 0.97 }}
+        whileHover={{ scale: 1.02, opacity: count === 0 ? 1 : 1 }}
+        whileTap={{ scale: count === 0 ? 1 : 0.97 }}
         onClick={onBatchDownload}
-        disabled={count === 0}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors"
+        disabled={count === 0 || isDownloading}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
+        style={{ background: primaryColor }}
       >
-        <Download size={12} />
-        Download ({count})
+        {isDownloading ? (
+          <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={12} /></motion.div> Downloading…</>
+        ) : (
+          <><Download size={12} /> Download ({count})</>
+        )}
       </motion.button>
-
-      {/* Exit select mode */}
-      <button
-        onClick={onDeactivate}
-        className="w-6 h-6 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-      >
-        <X size={13} />
-      </button>
     </motion.div>
   );
 }
@@ -297,11 +360,17 @@ export function SelectablePhotoCard({
         )}
       </AnimatePresence>
 
-      {/* Group photo badge — top-right (when not selected and group photo) */}
-      {showGroupBadge && isGroupPhoto && !isSelected && !isSelectMode && (
-        <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/20">
-          <Users size={10} className="text-white/80" />
-          <span className="text-[10px] font-semibold text-white/90">+{otherFaces}</span>
+      {/* Group photo badge — bottom-right (when group photo) - always show in friends tab */}
+      {showGroupBadge && isGroupPhoto && (
+        <div 
+          className={`absolute bottom-2 right-2 flex items-center gap-1 px-2 py-1 rounded-full backdrop-blur-sm border ${isSelected ? 'opacity-50' : ''}`}
+          style={{
+            background: 'rgba(0,0,0,0.7)',
+            borderColor: 'rgba(255,255,255,0.2)',
+          }}
+        >
+          <Users size={11} className="text-white/80" />
+          <span className="text-[10px] font-semibold text-white/90">+{otherFaces} {otherFaces === 1 ? 'person' : 'people'}</span>
         </div>
       )}
 
