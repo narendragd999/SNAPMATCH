@@ -183,8 +183,10 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
     """
     Search endpoint for guests (no auth). Returns matched photos and cluster IDs.
     
-    Now includes friends_photos - photos where the user appears with people
-    they frequently appear with (family, friends, partners).
+    Returns THREE types of results:
+    - matched_photos: ALL photos where user appears (solo + group)
+    - friends_photos: Photos where user appears WITH OTHERS (group photos only)
+    - matched_cluster_ids: Cluster IDs that matched user's face
     """
     contents   = await file.read()
     embeddings = extract_all_embeddings(contents)
@@ -193,25 +195,18 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
         return {"error": "No face detected"}
 
     matched_photos, matched_cluster_ids = perform_search(event_id, embeddings, db)
-
-    # ── Group/Family Detection: Find photos with co-occurring people ──────────
-    friends_photos = []
-    try:
-        from app.services.co_occurrence_service import get_friends_photos, MIN_CO_OCCURRENCE_THRESHOLD
-        friends_photos = get_friends_photos(
-            db, event_id, matched_cluster_ids,
-            min_count=MIN_CO_OCCURRENCE_THRESHOLD,  # Uses default (1)
-            limit=500
-        )
-        print(f"👥 [Search] Found {len(friends_photos)} friends photos for clusters {matched_cluster_ids}")
-    except Exception as e:
-        # Non-fatal - log and continue without friends_photos
-        print(f"⚠️ Co-occurrence lookup failed (non-fatal): {e}")
+    
+    # ── Get group photos for "With Friends" tab ───────────────────────────────
+    from app.services.co_occurrence_service import get_friends_photos, get_companion_stats
+    
+    friends_photos = get_friends_photos(event_id, matched_photos, matched_cluster_ids, db)
+    companion_stats = get_companion_stats(event_id, matched_photos, matched_cluster_ids, db)
 
     return {
         "matched_photos":      matched_photos,
         "matched_cluster_ids": matched_cluster_ids,
         "friends_photos":      friends_photos,
+        "companion_stats":     companion_stats,
     }
 
 

@@ -1,18 +1,15 @@
-/**
- * MultiSelect — fixed to remove all amber/golden colors.
- * All accents now use blue (matching the zinc dark theme).
- */
-
 'use client';
 
 import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckSquare, Square, Download, X, Check } from 'lucide-react';
+import { CheckSquare, Square, Download, X, Check, Users } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface PhotoItem {
   image_name?: string;
+  total_faces?: number;   // Total faces detected in photo
+  other_faces?: number;  // Faces other than the matched user
   [key: string]: unknown;
 }
 
@@ -207,9 +204,11 @@ interface SelectablePhotoCardProps {
   confidence?: number;
   showConfidence?: boolean;
   watermarkConfig?: unknown;
+  showGroupBadge?: boolean;  // Show "+N" badge for group photos
 }
 
 export function SelectablePhotoCard({
+  item,
   imageId,
   imageUrl,
   thumbnailUrl,
@@ -221,9 +220,15 @@ export function SelectablePhotoCard({
   scene,
   confidence,
   showConfidence,
+  showGroupBadge = false,
 }: SelectablePhotoCardProps) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  
+  // Group photo info
+  const totalFaces = item.total_faces ?? 1;
+  const otherFaces = item.other_faces ?? (totalFaces > 1 ? totalFaces - 1 : 0);
+  const isGroupPhoto = otherFaces > 0;
 
   const handleClick = () => {
     if (isSelectMode) {
@@ -292,6 +297,14 @@ export function SelectablePhotoCard({
         )}
       </AnimatePresence>
 
+      {/* Group photo badge — top-right (when not selected and group photo) */}
+      {showGroupBadge && isGroupPhoto && !isSelected && !isSelectMode && (
+        <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/20">
+          <Users size={10} className="text-white/80" />
+          <span className="text-[10px] font-semibold text-white/90">+{otherFaces}</span>
+        </div>
+      )}
+
       {/* Selection order badge — BLUE (was amber) */}
       {isSelected && selectionIndex > 0 && (
         <div className="absolute top-2 right-2 min-w-[20px] h-5 px-1.5 rounded-full bg-blue-600 border border-blue-500/50 flex items-center justify-center">
@@ -309,7 +322,7 @@ export function SelectablePhotoCard({
       )}
 
       {/* Confidence badge */}
-      {showConfidence && confidence !== undefined && !isSelectMode && (
+      {showConfidence && confidence !== undefined && !isSelectMode && !isGroupPhoto && (
         <div className="absolute top-2 right-2">
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md backdrop-blur-sm ${
             confidence >= 0.9

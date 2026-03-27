@@ -301,7 +301,7 @@ def get_photos_with_co_occurring_clusters(
     return result_images[:limit]
 
 
-def get_friends_photos(
+def get_friends_photos_co_occurrence(
     db: Session,
     event_id: int,
     matched_cluster_ids: List[int],
@@ -309,10 +309,10 @@ def get_friends_photos(
     limit: int = 500
 ) -> List[Dict]:
     """
-    Main entry point for populating friends_photos in search results.
+    Get photos using co-occurrence index (requires build_co_occurrence_index to be called first).
     
-    Returns a list of photos where the user appears with people they
-    frequently appear with (family, friends, partners).
+    This finds photos where the user appears with people they frequently appear with.
+    Used when the co-occurrence index has been built during event finalization.
     
     Args:
         db: Database session
@@ -324,23 +324,17 @@ def get_friends_photos(
     Returns:
         List of dicts with image_name and co_occurrence metadata
     """
-    print(f"👥 [get_friends_photos] CALLED: event_id={event_id}, matched_cluster_ids={matched_cluster_ids}, min_count={min_count}")
+    print(f"👥 [get_friends_photos_co_occurrence] event_id={event_id}, matched_cluster_ids={matched_cluster_ids}")
     
     if not matched_cluster_ids:
-        print(f"👥 [get_friends_photos] No matched cluster IDs provided - returning empty list")
         return []
-    
-    print(f"👥 [get_friends_photos] Searching for friends photos...")
     
     # Get photos with co-occurring people
     image_names = get_photos_with_co_occurring_clusters(
         db, event_id, matched_cluster_ids, min_count, limit
     )
     
-    print(f"👥 [get_friends_photos] get_photos_with_co_occurring_clusters returned {len(image_names)} images")
-    
     if not image_names:
-        print(f"👥 [get_friends_photos] No image_names returned - returning empty list")
         return []
     
     # Get co-occurrence details for enrichment
@@ -348,7 +342,6 @@ def get_friends_photos(
         db, event_id, matched_cluster_ids, min_count
     )
     
-    # Calculate total co-occurrence strength per image
     # Get all clusters for the result images
     clusters = db.query(Cluster).filter(
         Cluster.event_id == event_id,
@@ -377,7 +370,6 @@ def get_friends_photos(
                         total_co_occurrence += rel["photo_count"]
                         strengths.append(rel["strength"])
         
-        # Determine overall strength
         has_strong = "strong" in strengths
         strength = "strong" if has_strong else ("moderate" if strengths else "weak")
         
@@ -387,10 +379,181 @@ def get_friends_photos(
             "relationship_strength": strength,
         })
     
-    # Sort by co_occurrence_count descending (strongest relationships first)
     results.sort(key=lambda x: x["co_occurrence_count"], reverse=True)
     
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN ENTRY POINT - Called by search_service.py
+# Signature: get_friends_photos(event_id, matched_photos, matched_cluster_ids, db)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_friends_photos(
+    event_id: int,
+    matched_photos: List[Dict],
+    matched_cluster_ids: List[int],
+    db: Session,
+) -> List[Dict]:
+    """
+    Main entry point for "With Friends" tab. Called by search_service.py.
+    
+    PURPOSE: Separate "Your Photos" from "With Friends" tabs.
+    
+    TAB DIFFERENTIATION:
+    ┌─────────────────┬─────────────────────────────────────────────────────┐
+    │ "Your Photos"   │ ALL photos where user appears (solo + group)        │
+    │                 │ → matched_photos from search                        │
+    ├─────────────────┼─────────────────────────────────────────────────────┤
+    │ "With Friends"  │ ONLY photos where user appears WITH OTHERS          │
+    │                 │ → This function returns these                       │
+    │                 │ → Excludes solo photos (user alone)                 │
+    └─────────────────┴─────────────────────────────────────────────────────┘
+    
+    HOW IT WORKS:
+    1. For each matched photo, check if OTHER faces appear
+    2. If other faces exist → add to friends_photos
+    3. If only user's face → solo photo (excluded from this list)
+    
+    Args:
+        event_id: Event ID
+        matched_photos: List of matched photo dicts with cluster_id
+        matched_cluster_ids: Cluster IDs that matched user's face
+        db: Database session
+        
+    Returns:
+        List of group photos where user appears with others
+    """
+    print(f"👥 [get_friends_photos] CALLED: event_id={event_id}, matched_count={len(matched_photos)}")
+    
+    if not matched_photos or not matched_cluster_ids:
+        print(f"👥 [get_friends_photos] Empty inputs - returning empty list")
+        return []
+    
+    # Get all clusters for the matched images to find other faces
+    matched_image_names = {p["image_name"] if isinstance(p, dict) else p for p in matched_photos}
+    
+    # Query all clusters for these images
+    all_clusters_in_images = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.image_name.in_(matched_image_names)
+    ).all()
+    
+    # Group clusters by image_name
+    clusters_by_image: Dict[str, List[Cluster]] = defaultdict(list)
+    for cluster in all_clusters_in_images:
+        clusters_by_image[cluster.image_name].append(cluster)
+    
+    # Create a set for fast lookup
+    user_cluster_ids = set(matched_cluster_ids)
+    
+    # Filter to group photos (user + others)
+    group_photos = []
+    
+    for photo in matched_photos:
+        image_name = photo["image_name"] if isinstance(photo, dict) else photo
+        clusters_in_image = clusters_by_image.get(image_name, [])
+        
+        # Find other cluster_ids in this image (not the user's)
+        other_clusters = [c.cluster_id for c in clusters_in_image if c.cluster_id not in user_cluster_ids]
+        
+        num_faces = len(clusters_in_image)
+        num_other_faces = len(other_clusters)
+        
+        # Only include if there are OTHER faces (not just the user)
+        if num_other_faces > 0:
+            group_photo = {
+                "image_name": image_name,
+                "total_faces": num_faces,
+                "other_faces": num_other_faces,
+            }
+            
+            # Preserve similarity score from original match
+            if isinstance(photo, dict):
+                if "similarity" in photo:
+                    group_photo["similarity"] = photo["similarity"]
+                if "tier" in photo:
+                    group_photo["tier"] = photo["tier"]
+                if "cluster_id" in photo:
+                    group_photo["cluster_id"] = photo["cluster_id"]
+            
+            group_photos.append(group_photo)
+    
+    # Sort by similarity (best matches first)
+    group_photos.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+    
+    print(f"👥 [get_friends_photos] Found {len(group_photos)} group photos (user + others)")
+    
+    return group_photos
+
+
+def get_companion_stats(
+    event_id: int,
+    matched_photos: List[Dict],
+    matched_cluster_ids: List[int],
+    db: Session,
+) -> Dict:
+    """
+    Get statistics about companions for the UI. Called by search_service.py.
+    
+    Returns counts and metadata for the "With Friends" tab.
+    
+    Args:
+        event_id: Event ID
+        matched_photos: List of matched photo dicts
+        matched_cluster_ids: Cluster IDs that matched user's face
+        db: Database session
+        
+    Returns:
+        {
+            "total_companions": int,       # Unique other people
+            "group_photo_count": int,      # Photos with user + others
+            "solo_photo_count": int,       # Photos with only user
+        }
+    """
+    print(f"👥 [get_companion_stats] CALLED: event_id={event_id}, matched_count={len(matched_photos)}")
+    
+    if not matched_photos or not matched_cluster_ids:
+        return {
+            "total_companions": 0,
+            "group_photo_count": 0,
+            "solo_photo_count": 0,
+        }
+    
+    # Get all clusters for the matched images
+    matched_image_names = {p["image_name"] if isinstance(p, dict) else p for p in matched_photos}
+    
+    all_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.image_name.in_(matched_image_names)
+    ).all()
+    
+    # Group by image
+    user_cluster_ids = set(matched_cluster_ids)
+    image_cluster_map: Dict[str, Set[int]] = defaultdict(set)
+    for cluster in all_clusters:
+        image_cluster_map[cluster.image_name].add(cluster.cluster_id)
+    
+    # Count companions and categorize photos
+    all_companions = set()
+    solo_count = 0
+    group_count = 0
+    
+    for image_name, cluster_ids in image_cluster_map.items():
+        user_faces = cluster_ids & user_cluster_ids
+        other_faces = cluster_ids - user_cluster_ids
+        
+        if user_faces and not other_faces:
+            solo_count += 1
+        elif user_faces and other_faces:
+            group_count += 1
+            all_companions.update(other_faces)
+    
+    return {
+        "total_companions": len(all_companions),
+        "group_photo_count": group_count,
+        "solo_photo_count": solo_count,
+    }
 
 
 # ── Analytics & Debug ──────────────────────────────────────────────────────────
@@ -423,4 +586,204 @@ def get_event_relationship_stats(db: Session, event_id: int) -> Dict:
             }
             for r in top_relationships
         ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER FUNCTIONS FOR TAB DIFFERENTIATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_my_photos_excluding_solo(
+    db: Session,
+    event_id: int,
+    matched_cluster_ids: List[int],
+    limit: int = 500
+) -> List[Dict]:
+    """
+    Get all photos where user appears, excluding solo photos.
+    
+    This is used for the "With Friends" tab when we want to show
+    all group photos, not just those with frequent companions.
+    
+    Args:
+        db: Database session
+        event_id: Event ID
+        matched_cluster_ids: Cluster IDs from the user's selfie search
+        limit: Max results to return
+        
+    Returns:
+        List of dicts with image_name and face counts
+    """
+    if not matched_cluster_ids:
+        return []
+    
+    matched_set = set(matched_cluster_ids)
+    
+    # Get all clusters for matched user's photos
+    user_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.cluster_id.in_(matched_cluster_ids)
+    ).all()
+    
+    user_image_names = {c.image_name for c in user_clusters}
+    
+    if not user_image_names:
+        return []
+    
+    # Get all clusters in those images to find group photos
+    all_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.image_name.in_(user_image_names)
+    ).all()
+    
+    # Group by image
+    image_cluster_map: Dict[str, Set[int]] = defaultdict(set)
+    for cluster in all_clusters:
+        image_cluster_map[cluster.image_name].add(cluster.cluster_id)
+    
+    # Filter to group photos (has user + at least one other face)
+    results = []
+    for image_name, cluster_ids in image_cluster_map.items():
+        user_faces = cluster_ids & matched_set
+        other_faces = cluster_ids - matched_set
+        
+        if user_faces and other_faces:
+            # This is a group photo
+            results.append({
+                "image_name": image_name,
+                "total_faces": len(cluster_ids),
+                "user_faces": len(user_faces),
+                "other_faces": len(other_faces),
+            })
+    
+    return results[:limit]
+
+
+def get_solo_photos(
+    db: Session,
+    event_id: int,
+    matched_cluster_ids: List[int],
+    limit: int = 100
+) -> List[Dict]:
+    """
+    Get photos where the user appears ALONE (no other faces detected).
+    
+    Args:
+        db: Database session
+        event_id: Event ID
+        matched_cluster_ids: Cluster IDs from the user's selfie search
+        limit: Max results to return
+        
+    Returns:
+        List of dicts with image_name
+    """
+    if not matched_cluster_ids:
+        return []
+    
+    matched_set = set(matched_cluster_ids)
+    
+    # Get all clusters for matched user's photos
+    user_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.cluster_id.in_(matched_cluster_ids)
+    ).all()
+    
+    user_image_names = {c.image_name for c in user_clusters}
+    
+    if not user_image_names:
+        return []
+    
+    # Get all clusters in those images
+    all_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.image_name.in_(user_image_names)
+    ).all()
+    
+    # Group by image
+    image_cluster_map: Dict[str, Set[int]] = defaultdict(set)
+    for cluster in all_clusters:
+        image_cluster_map[cluster.image_name].add(cluster.cluster_id)
+    
+    # Filter to solo photos (only user's face, no others)
+    results = []
+    for image_name, cluster_ids in image_cluster_map.items():
+        # Check if this image ONLY has the user's clusters
+        if cluster_ids <= matched_set and len(cluster_ids) >= 1:
+            results.append({
+                "image_name": image_name,
+                "total_faces": len(cluster_ids),
+            })
+    
+    return results[:limit]
+
+
+def get_tab_photo_counts(
+    db: Session,
+    event_id: int,
+    matched_cluster_ids: List[int]
+) -> Dict[str, int]:
+    """
+    Get counts for each tab for UI display.
+    
+    Returns:
+        {
+            "my_photos_count": int,      # All photos with user
+            "with_friends_count": int,   # Photos with user + others
+            "solo_photos_count": int,    # Photos with only user
+        }
+    """
+    if not matched_cluster_ids:
+        return {
+            "my_photos_count": 0,
+            "with_friends_count": 0,
+            "solo_photos_count": 0,
+        }
+    
+    matched_set = set(matched_cluster_ids)
+    
+    # Get all clusters for matched user's photos
+    user_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.cluster_id.in_(matched_cluster_ids)
+    ).all()
+    
+    user_image_names = {c.image_name for c in user_clusters}
+    
+    my_photos_count = len(user_image_names)
+    
+    if not user_image_names:
+        return {
+            "my_photos_count": 0,
+            "with_friends_count": 0,
+            "solo_photos_count": 0,
+        }
+    
+    # Get all clusters in those images
+    all_clusters = db.query(Cluster).filter(
+        Cluster.event_id == event_id,
+        Cluster.image_name.in_(user_image_names)
+    ).all()
+    
+    # Group by image
+    image_cluster_map: Dict[str, Set[int]] = defaultdict(set)
+    for cluster in all_clusters:
+        image_cluster_map[cluster.image_name].add(cluster.cluster_id)
+    
+    # Count solo vs group
+    solo_count = 0
+    group_count = 0
+    
+    for image_name, cluster_ids in image_cluster_map.items():
+        user_faces = cluster_ids & matched_set
+        other_faces = cluster_ids - matched_set
+        
+        if user_faces and not other_faces:
+            solo_count += 1
+        elif user_faces and other_faces:
+            group_count += 1
+    
+    return {
+        "my_photos_count": my_photos_count,
+        "with_friends_count": group_count,
+        "solo_photos_count": solo_count,
     }

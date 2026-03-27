@@ -1126,6 +1126,7 @@ export default function PublicSelfiePage() {
     emptyMsg:    string,
     emptyAction: () => void,
     emptyActionLabel: string,
+    showGroupBadge: boolean = false,  // Show "+N" badge for group photos
   ) => (
     <>
       {/* Loading state - show spinner while initially loading */}
@@ -1180,6 +1181,7 @@ export default function PublicSelfiePage() {
                 confidence={0}
                 showConfidence={false}
                 watermarkConfig={watermarkConfig}
+                showGroupBadge={showGroupBadge}
               />
             );
           })}
@@ -1554,10 +1556,12 @@ export default function PublicSelfiePage() {
                             color: activeTab === 'my-photos' ? 'var(--brand-primary, #3b82f6)' : 'var(--brand-subtext, #71717a)',
                             borderColor: activeTab === 'my-photos' ? 'var(--brand-primary, #3b82f6)' : 'transparent',
                           }}>
-                          <Scan size={14} /> My Photos ({myTab.total})
+                          <Scan size={14} /> 
+                          <span>My Photos</span>
+                          <span className="text-xs opacity-75">({myTab.total})</span>
                         </button>
-                        {/* 👥 With Friends tab - only show if there are friends photos */}
-                        {friendsTab.total > 0 && (
+                        {/* 👥 With Friends tab - show if user has any photos (even if 0 group photos) */}
+                        {myTab.total > 0 && (
                           <button onClick={() => handleTabSwitch('with-friends')}
                             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                               activeTab === 'with-friends' ? '' : 'border-transparent'
@@ -1566,7 +1570,9 @@ export default function PublicSelfiePage() {
                               color: activeTab === 'with-friends' ? 'var(--brand-primary, #3b82f6)' : 'var(--brand-subtext, #71717a)',
                               borderColor: activeTab === 'with-friends' ? 'var(--brand-primary, #3b82f6)' : 'transparent',
                             }}>
-                            <Users size={14} /> With Friends ({friendsTab.total})
+                            <Users size={14} /> 
+                            <span>With Friends</span>
+                            <span className="text-xs opacity-75">({friendsTab.total})</span>
                           </button>
                         )}
                         <button onClick={() => handleTabSwitch('all-photos')}
@@ -1577,7 +1583,9 @@ export default function PublicSelfiePage() {
                             color: activeTab === 'all-photos' ? 'var(--brand-primary, #3b82f6)' : 'var(--brand-subtext, #71717a)',
                             borderColor: activeTab === 'all-photos' ? 'var(--brand-primary, #3b82f6)' : 'transparent',
                           }}>
-                          <Images size={14} /> All Photos ({allTab.total || event?.processed_count || 0})
+                          <Images size={14} /> 
+                          <span>All Photos</span>
+                          <span className="text-xs opacity-75">({allTab.total || event?.processed_count || 0})</span>
                         </button>
                       </div>
                     </div>
@@ -1601,22 +1609,77 @@ export default function PublicSelfiePage() {
                       <motion.div 
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className="flex items-center gap-3 px-4 py-3 rounded-xl border mb-4"
+                        className="rounded-xl border mb-4 overflow-hidden"
                         style={{
                           background: `${brandingConfig.brand_primary_color}08`,
                           borderColor: `${brandingConfig.brand_primary_color}20`,
                         }}
                       >
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                          style={{ background: `${brandingConfig.brand_primary_color}15` }}>
-                          <Users size={16} style={{ color: brandingConfig.brand_primary_color }} />
+                        <div className="flex items-center gap-3 px-4 py-3">
+                          <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                            style={{ background: `${brandingConfig.brand_primary_color}15` }}>
+                            <Users size={20} style={{ color: brandingConfig.brand_primary_color }} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
+                              {friendsTab.total} group photo{friendsTab.total !== 1 ? 's' : ''}
+                            </p>
+                            <p className="text-xs" style={{ color: 'var(--brand-subtext, #71717a)' }}>
+                              Photos where you appear with others
+                            </p>
+                          </div>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
-                            <span className="font-medium">{friendsTab.total} group photo{friendsTab.total !== 1 ? 's' : ''}</span>
-                            <span style={{ color: 'var(--brand-subtext, #71717a)' }}> where you appear with people you frequently appear with</span>
+                        <div className="px-4 py-2 text-xs flex items-center gap-4"
+                          style={{ 
+                            background: `${brandingConfig.brand_primary_color}05`,
+                            color: 'var(--brand-subtext, #71717a)' 
+                          }}>
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full" style={{ background: brandingConfig.brand_primary_color }}></span>
+                            Each photo shows how many people are in it
+                          </span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full" style={{ background: brandingConfig.brand_primary_color }}></span>
+                            Solo photos are in "My Photos" tab
+                          </span>
+                        </div>
+                      </motion.div>
+                    )}
+                    
+                    {/* 👥 Friends photos empty state */}
+                    {activeTab === 'with-friends' && friendsTab.total === 0 && myTab.total > 0 && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex flex-col items-center justify-center py-12 gap-4 text-center"
+                      >
+                        <div className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                          style={{ 
+                            background: `${brandingConfig.brand_primary_color}10`,
+                            border: `1px solid ${brandingConfig.brand_primary_color}20`
+                          }}>
+                          <User size={28} style={{ color: brandingConfig.brand_primary_color }} />
+                        </div>
+                        <div>
+                          <p className="text-base font-medium mb-1" style={{ color: 'var(--brand-text, #f4f4f5)' }}>
+                            No group photos found
+                          </p>
+                          <p className="text-sm max-w-xs" style={{ color: 'var(--brand-subtext, #71717a)' }}>
+                            All {myTab.total} of your photos are solo portraits. 
+                            Group photos where you appear with others will appear here.
                           </p>
                         </div>
+                        <motion.button 
+                          whileHover={{ scale: 1.02 }} 
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => setActiveTab('my-photos')}
+                          className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                          style={{ 
+                            background: `${brandingConfig.brand_primary_color}15`,
+                            color: brandingConfig.brand_primary_color 
+                          }}>
+                          View My Photos ({myTab.total})
+                        </motion.button>
                       </motion.div>
                     )}
                     
@@ -1785,7 +1848,7 @@ export default function PublicSelfiePage() {
                     {activeTab === 'my-photos' ? (
                       renderPhotoGrid(filteredMyItems, mySentinelRef, myTab, () => handleUpload(new File([], '')), 'No photos found', () => {}, 'Take Selfie')
                     ) : activeTab === 'with-friends' ? (
-                      renderPhotoGrid(friendsTab.items, friendsSentinelRef, friendsTab, () => setActiveTab('my-photos'), 'No group photos found', () => setActiveTab('my-photos'), 'View My Photos')
+                      renderPhotoGrid(friendsTab.items, friendsSentinelRef, friendsTab, () => setActiveTab('my-photos'), 'No group photos found', () => setActiveTab('my-photos'), 'View My Photos', true /* Show group badges */)
                     ) : (
                       <>
                         {/* Scene filter for All Photos */}

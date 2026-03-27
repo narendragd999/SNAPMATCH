@@ -118,8 +118,14 @@ def _store_result(result: dict, event_id: int, db: Session) -> str:
                 "objects":     meta.get("objects", []),
             }
             # Preserve similarity score if present
-            if isinstance(item, dict) and "similarity" in item:
-                d["similarity"] = item["similarity"]
+            if isinstance(item, dict):
+                if "similarity" in item:
+                    d["similarity"] = item["similarity"]
+                # Preserve group photo fields for friends tab
+                if "total_faces" in item:
+                    d["total_faces"] = item["total_faces"]
+                if "other_faces" in item:
+                    d["other_faces"] = item["other_faces"]
             enriched.append(d)
         return enriched
 
@@ -162,7 +168,7 @@ def get_public_event(
     public_token: str,
     db: Session = Depends(get_db),
 ):
-    """Get public event info including watermark config."""
+    """Get public event info including watermark config and branding."""
     event = validate_public_event(public_token, db)
 
     # Count of photos that will actually render in the All Photos gallery.
@@ -174,6 +180,7 @@ def get_public_event(
         Photo.optimized_filename.isnot(None),
     ).count()
 
+    # Get branding config using the model helper
     branding = event.get_branding_config()
 
     return {
@@ -191,12 +198,13 @@ def get_public_event(
         "expires_at":            event.expires_at.isoformat() if event.expires_at else None,
         "owner_id":              event.owner_id,
         "upload_photo_enabled":  _get_setting(db, "upload_photo_enabled") == "true",
-        "template_id": branding["template_id"],
-        "brand_logo_url": branding["brand_logo_url"],
-        "brand_primary_color": branding["brand_primary_color"],
-        "brand_accent_color": branding["brand_accent_color"],
-        "brand_font": branding["brand_font"],
-        "brand_footer_text": branding["brand_footer_text"],
+        # 🎨 Branding fields
+        "template_id":           branding["template_id"],
+        "brand_logo_url":        branding["brand_logo_url"],
+        "brand_primary_color":   branding["brand_primary_color"],
+        "brand_accent_color":    branding["brand_accent_color"],
+        "brand_font":            branding["brand_font"],
+        "brand_footer_text":     branding["brand_footer_text"],
         "brand_show_powered_by": branding["brand_show_powered_by"],
     }
 
@@ -277,6 +285,12 @@ def verify_event_pin(
 
 # ── Serve Thumbnail ───────────────────────────────────────────────────────────
 
+# Cache headers for images - reduces R2/S3 read costs and improves performance
+IMAGE_CACHE_HEADERS = {
+    "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",  # 1 day cache, 7 day stale
+    "CDN-Cache-Control": "public, max-age=2592000",  # 30 days for CDN (Cloudflare)
+}
+
 @router.get("/events/{public_token}/thumbnail/{image_name}")
 def serve_thumbnail(
     public_token: str,
@@ -293,9 +307,14 @@ def serve_thumbnail(
         thumb_path = os.path.join(STORAGE_PATH, str(event.id), "thumbnails", thumb_filename)
         if not os.path.exists(thumb_path):
             raise HTTPException(status_code=404, detail="Thumbnail not found")
-        return FileResponse(thumb_path, media_type="image/webp")
+        return FileResponse(
+            thumb_path, 
+            media_type="image/webp",
+            headers=IMAGE_CACHE_HEADERS
+        )
     else:
         # For minio/r2: redirect to the public URL
+        # Cache headers are set at bucket level for R2/MinIO
         url = storage_service.get_thumbnail_url(event.id, thumb_filename)
         return RedirectResponse(url=url)
 
@@ -316,7 +335,10 @@ def serve_photo(
         photo_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
         if not os.path.exists(photo_path):
             raise HTTPException(status_code=404, detail="Photo not found")
-        return FileResponse(photo_path)
+        return FileResponse(
+            photo_path,
+            headers=IMAGE_CACHE_HEADERS
+        )
     else:
         url = storage_service.get_file_url(event.id, safe_name)
         return RedirectResponse(url=url)
@@ -340,10 +362,17 @@ def serve_image(
         from app.core.config import STORAGE_PATH
         thumb_path = os.path.join(STORAGE_PATH, str(event.id), "thumbnails", thumb_filename)
         if os.path.exists(thumb_path):
-            return FileResponse(thumb_path, media_type="image/webp")
+            return FileResponse(
+                thumb_path, 
+                media_type="image/webp",
+                headers=IMAGE_CACHE_HEADERS
+            )
         photo_path = os.path.join(STORAGE_PATH, str(event.id), safe_name)
         if os.path.exists(photo_path):
-            return FileResponse(photo_path)
+            return FileResponse(
+                photo_path,
+                headers=IMAGE_CACHE_HEADERS
+            )
         raise HTTPException(status_code=404, detail="Image not found")
     else:
         try:
