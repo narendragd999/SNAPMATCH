@@ -97,10 +97,11 @@ interface MultiSelectToolbarProps {
   isActive: boolean;
   onActivate: () => void;
   onDeactivate: () => void;
-  isDownloading?: boolean;  // Loading state for download
-  totalCount?: number;      // Total items count for "Download All"
-  onDownloadAll?: () => void; // Download all items
-  primaryColor?: string;    // Brand primary color
+  isDownloading?: boolean;      // Loading state for batch download
+  isDownloadAllLoading?: boolean; // Loading state for Download All button
+  totalCount?: number;          // Total items count for "Download All"
+  onDownloadAll?: () => void;   // Download all items
+  primaryColor?: string;        // Brand primary color
 }
 
 export function MultiSelectToolbar({
@@ -113,6 +114,7 @@ export function MultiSelectToolbar({
   onActivate,
   onDeactivate,
   isDownloading = false,
+  isDownloadAllLoading = false,
   totalCount,
   onDownloadAll,
   primaryColor = '#3b82f6',
@@ -147,11 +149,11 @@ export function MultiSelectToolbar({
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.97 }}
             onClick={onDownloadAll}
-            disabled={isDownloading}
+            disabled={isDownloadAllLoading}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white transition-colors disabled:opacity-50"
             style={{ background: primaryColor }}
           >
-            {isDownloading ? (
+            {isDownloadAllLoading ? (
               <><motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}><Loader2 size={13} /></motion.div> Preparing…</>
             ) : (
               <><Download size={13} /> Download All ({total})</>

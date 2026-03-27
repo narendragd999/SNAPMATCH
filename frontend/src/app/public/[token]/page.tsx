@@ -221,6 +221,7 @@ export default function PublicSelfiePage() {
   const [gridLayout,   setGridLayout]  = useState<GridLayout>('comfortable');
   const [dlAllLoading,    setDlAllLoading]    = useState(false);
   const [dlAllTabLoading, setDlAllTabLoading] = useState(false);
+  const [dlFriendsLoading, setDlFriendsLoading] = useState(false); // 👥 Friends tab download
   const [batchDlLoading,  setBatchDlLoading]  = useState(false);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK_CONFIG);
 
@@ -974,6 +975,72 @@ export default function PublicSelfiePage() {
     } catch { showToast('Download failed. Please try again.', 'error'); hapticFeedback('error'); }
     finally { setDlAllTabLoading(false); }
   }, [dlAllTabLoading, token, API, event, applyWatermarkToBlob, showToast]);
+
+  // 👥 ── Download all Friends Photos as ZIP (With Friends tab) with watermark ──
+  const handleDownloadAllFriends = useCallback(async () => {
+    if (!resultId || dlFriendsLoading) return;
+    setDlFriendsLoading(true); hapticFeedback('medium');
+    try {
+      // Fetch all friends photos with pagination
+      const allPhotos: { name: string; blob: Blob }[] = [];
+      let page = 1;
+      let hasMore = true;
+      
+      while (hasMore) {
+        const res = await fetch(`${API}/public/events/${token}/search/${resultId}?kind=friends&page=${page}&page_size=50`);
+        if (res.status === 404) break;
+        if (!res.ok) throw new Error();
+        const data = await res.json();
+        
+        if (data.items && data.items.length > 0) {
+          // Fetch each photo and apply watermark
+          const photoPromises = data.items.map(async (item: PhotoItem) => {
+            const imgName = nameOf(item);
+            try {
+              const photoRes = await fetch(`${API}/public/events/${token}/photo/${imgName}`);
+              if (!photoRes.ok) return null;
+              let blob = await photoRes.blob();
+              blob = await applyWatermarkToBlob(blob);
+              return { name: imgName, blob };
+            } catch {
+              return null;
+            }
+          });
+          
+          const results = await Promise.allSettled(photoPromises);
+          for (const result of results) {
+            if (result.status === 'fulfilled' && result.value && result.value.blob.size > 0) {
+              allPhotos.push(result.value);
+            }
+          }
+        }
+        
+        hasMore = data.has_more;
+        page++;
+        
+        // Safety limit
+        if (page > 100) break;
+      }
+      
+      if (allPhotos.length === 0) throw new Error('No photos found');
+      
+      // Create ZIP
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      for (const { name, blob } of allPhotos) {
+        zip.file(name, blob);
+      }
+      
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
+      const url = URL.createObjectURL(zipBlob);
+      const a = Object.assign(document.createElement('a'), { href: url, download: `${event?.name || 'event'}-with-friends.zip` });
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Downloaded ${allPhotos.length} group photos successfully!`, 'success');
+      hapticFeedback('success');
+    } catch { showToast('Download failed. Please try again.', 'error'); hapticFeedback('error'); }
+    finally { setDlFriendsLoading(false); }
+  }, [resultId, dlFriendsLoading, token, API, event, applyWatermarkToBlob, showToast]);
 
   // ── Batch download selected → concurrent fetch → client-side ZIP (with watermark) ──
   const handleBatchDownload = useCallback(async () => {
@@ -1830,8 +1897,9 @@ export default function PublicSelfiePage() {
                       onActivate={multiSelect.enterSelectMode}
                       onDeactivate={multiSelect.exitSelectMode}
                       isDownloading={batchDlLoading}
+                      isDownloadAllLoading={activeTab === 'my-photos' ? dlAllLoading : activeTab === 'with-friends' ? dlFriendsLoading : dlAllTabLoading}
                       totalCount={activeTab === 'my-photos' ? myTab.total : activeTab === 'with-friends' ? friendsTab.total : allTab.total}
-                      onDownloadAll={activeTab === 'my-photos' ? handleDownloadAll : activeTab === 'all-photos' ? handleDownloadAllTab : undefined}
+                      onDownloadAll={activeTab === 'my-photos' ? handleDownloadAll : activeTab === 'with-friends' ? handleDownloadAllFriends : activeTab === 'all-photos' ? handleDownloadAllTab : undefined}
                       primaryColor={brandingConfig.brand_primary_color}
                     />
 
