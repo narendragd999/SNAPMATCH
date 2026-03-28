@@ -34,6 +34,7 @@ from app.models.event_analytics import EventAnalytics, EventAnalyticsTotal  # no
 from app.models.user_activity_log import UserActivityLog  # noqa: F401
 from app.models.email_provider_config import EmailProviderConfig  # noqa: F401
 from app.models.otp import OTPVerification  # noqa: F401
+from app.models.trusted_device import TrustedDevice  # noqa: F401
 
 # ── Router imports ────────────────────────────────────────────────────────────
 from app.api.auth_routes        import router as auth_router
@@ -63,15 +64,36 @@ async def lifespan(app: FastAPI):
     """
     Startup tasks run here before the server starts accepting requests.
 
-    init_storage() is safe to call on every startup:
-      - local:  creates the storage directory tree if missing
-      - minio:  creates bucket + public-read policy + CORS (idempotent head_bucket check)
-      - r2:     no-op
+    1. Run database migrations (fallback if entrypoint didn't run them)
+    2. Initialize storage (MinIO bucket, local directories)
 
-    This guarantees the MinIO bucket exists before any /presign endpoint is
-    called. Without it, a fresh container returns 404 on the first presigned PUT
-    because the bucket hasn't been created yet.
+    This guarantees the database schema is up-to-date and storage is ready
+    before any request is processed.
     """
+    import subprocess
+    
+    # Run migrations as a fallback (idempotent - safe to run multiple times)
+    try:
+        print("[startup] Running database migrations...")
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            cwd="/app",
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode == 0:
+            print("[startup] ✅ Migrations completed successfully")
+        else:
+            print(f"[startup] ⚠️ Migration warning: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        print("[startup] ⚠️ Migration timed out, continuing anyway")
+    except FileNotFoundError:
+        print("[startup] ⚠️ Alembic not found, skipping migrations")
+    except Exception as e:
+        print(f"[startup] ⚠️ Migration error (non-fatal): {e}")
+
+    # Initialize storage
     try:
         storage_service.init_storage()
     except Exception as exc:
@@ -123,9 +145,6 @@ app.include_router(analytics_router)
 app.include_router(cms_router)
 app.include_router(admin_cms_router)
 app.include_router(admin_email_router)
-
-# Auto-create any new tables (idempotent)
-Base.metadata.create_all(bind=engine)
 
 
 @app.get("/health")
