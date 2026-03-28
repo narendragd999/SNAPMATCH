@@ -2,6 +2,7 @@
 app/api/pricing_routes.py
 
 Public  GET  /pricing/config          → full config (frontend fetches on every load)
+Public  GET  /pricing/plans           → formatted plans for landing page pricing section
 Admin   PUT  /pricing/config          → update any pricing value
 Admin   GET  /pricing/config/history  → list all past config rows (audit trail)
 """
@@ -9,10 +10,10 @@ Admin   GET  /pricing/config/history  → list all past config rows (audit trail
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 from app.core.dependencies import get_current_user, get_db
-from app.core.pricing import get_full_config
+from app.core.pricing import get_full_config, calculate_price, format_inr, _get_active
 from app.models.pricing_config import PricingConfig
 from app.models.user import User
 
@@ -31,6 +32,114 @@ def get_pricing_config(db: Session = Depends(get_db)):
     without hardcoding any limits.
     """
     return get_full_config(db)
+
+
+# ── GET /pricing/plans ────────────────────────────────────────────────────────
+
+@router.get("/plans")
+def get_pricing_plans(db: Session = Depends(get_db)):
+    """
+    Public — no auth required.
+    Returns formatted pricing plans for the landing page.
+    All values are dynamically loaded from the pricing_config table.
+    """
+    config = _get_active(db)
+    
+    # Build free tier plan
+    free_plan = {
+        "name": "Free",
+        "price": "₹0",
+        "period": "",
+        "badge": "",
+        "desc": "Try SnapFind risk-free on your first event",
+        "features": [
+            {"text": "1 event included", "included": True},
+            {"text": f"Up to {config.free_photo_quota} photos", "included": True},
+            {"text": "AI face search for guests", "included": True},
+            {"text": "Individual photo download", "included": True},
+            {"text": "Guest portal with share link", "included": True},
+            {"text": "PIN protection", "included": True},
+            {"text": f"{config.free_validity_days}-day cloud storage", "included": True},
+            {"text": "Bulk ZIP download", "included": True},
+            {"text": "Watermarking", "included": True},
+            {"text": "AI scene & object tags", "included": True},
+        ],
+        "cta": "Start Free",
+        "href": "/login?mode=register",
+        "highlight": False,
+    }
+    
+    # Add guest upload feature if free tier has guest quota
+    if config.free_guest_quota > 0:
+        free_plan["features"].insert(
+            -1,  # Before watermarking
+            {"text": f"Guest upload portal ({config.free_guest_quota} slots)", "included": True}
+        )
+    
+    # Calculate example pricing for pay-per-event
+    # Show a mid-range example: 500 photos, 50 guest uploads, 30 days
+    example_photos = min(500, config.max_photo_quota)
+    example_guests = min(50, config.max_guest_quota)
+    example_validity = 30
+    example_total_inr = None
+    
+    try:
+        example_price = calculate_price(
+            photo_quota=example_photos,
+            guest_quota=example_guests,
+            validity_days=example_validity,
+            db=db
+        )
+        starting_price = format_inr(example_price["total_paise"])
+        example_total_inr = example_price["total_inr"]
+    except Exception:
+        starting_price = "Custom"
+    
+    # Build pay-per-event plan
+    pay_per_event_plan = {
+        "name": "Pay Per Event",
+        "price": "Custom",
+        "period": "",
+        "badge": "MOST POPULAR",
+        "desc": f"Build exactly what your event needs — starting from {starting_price}",
+        "features": [
+            {"text": f"{config.min_photo_quota}–{config.max_photo_quota:,} photos (slider)", "included": True},
+            {"text": f"Storage: 30–365 days", "included": True},
+            {"text": f"Guest upload portal (optional, up to {config.max_guest_quota:,} slots)", "included": True},
+            {"text": "Bulk ZIP download", "included": True},
+            {"text": "AI face search + clustering", "included": True},
+            {"text": "AI scene & object tags", "included": True},
+            {"text": "Custom watermarking", "included": True},
+            {"text": "PIN protection", "included": True},
+            {"text": "Priority support", "included": True},
+            {"text": "Extended cloud storage", "included": True},
+        ],
+        "cta": "Configure Your Event",
+        "href": "/pricing",
+        "highlight": True,
+        "config": {
+            "minPhotoQuota": config.min_photo_quota,
+            "maxPhotoQuota": config.max_photo_quota,
+            "minGuestQuota": config.min_guest_quota,
+            "maxGuestQuota": config.max_guest_quota,
+            "baseEventFee": config.base_event_fee_paise,
+            "photoTiers": config.photo_tiers,
+            "guestTiers": config.guest_tiers,
+            "validityOptions": config.validity_options,
+            "examplePrice": {
+                "photos": example_photos,
+                "guests": example_guests,
+                "validityDays": example_validity,
+                "totalInr": example_total_inr,
+            }
+        }
+    }
+    
+    return {
+        "plans": [free_plan, pay_per_event_plan],
+        "currency": "INR",
+        "symbol": "₹",
+    }
 
 
 # ── PUT /pricing/config ───────────────────────────────────────────────────────

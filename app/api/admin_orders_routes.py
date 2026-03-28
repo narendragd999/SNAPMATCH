@@ -11,14 +11,15 @@ Endpoints:
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, extract
 from app.database.db import SessionLocal
 from app.models.user import User
 from app.models.event import Event
 from app.models.event_order import EventOrder
 from app.core.dependencies import get_current_user, get_db
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
+from collections import defaultdict
 
 router = APIRouter(prefix="/admin", tags=["admin-orders"])
 
@@ -84,6 +85,245 @@ def get_orders_stats(
         "revenue_this_month_paise":   revenue_this_month_paise,
         "revenue_this_month_inr":     revenue_this_month_paise / 100,
         "revenue_this_month_formatted": f"₹{revenue_this_month_paise / 100:,.2f}",
+    }
+
+
+# ── GET /admin/orders/analytics ─────────────────────────────────────────────────
+# IMPORTANT: This route MUST come before /orders/{order_id} to avoid route conflicts
+
+@router.get("/orders/analytics")
+def get_revenue_analytics(
+    period: str = Query("30d", description="Period: 7d, 30d, 90d, 12m"),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_admin_user),
+):
+    """
+    Get detailed revenue analytics for charts.
+    
+    Returns:
+    - Daily/Weekly/Monthly revenue trends
+    - Payment method breakdown
+    - MRR (Monthly Recurring Revenue) tracking
+    - Growth metrics
+    """
+    now = datetime.utcnow()
+    
+    # Determine date range based on period
+    if period == "7d":
+        start_date = now - timedelta(days=7)
+        group_format = "%Y-%m-%d"  # Daily
+        period_label = "Last 7 Days"
+    elif period == "30d":
+        start_date = now - timedelta(days=30)
+        group_format = "%Y-%m-%d"  # Daily
+        period_label = "Last 30 Days"
+    elif period == "90d":
+        start_date = now - timedelta(days=90)
+        group_format = "%Y-%W"  # Weekly
+        period_label = "Last 90 Days"
+    elif period == "12m":
+        start_date = now - timedelta(days=365)
+        group_format = "%Y-%m"  # Monthly
+        period_label = "Last 12 Months"
+    else:
+        start_date = now - timedelta(days=30)
+        group_format = "%Y-%m-%d"
+        period_label = "Last 30 Days"
+    
+    # Get all paid orders in the period
+    orders = (
+        db.query(EventOrder)
+        .filter(
+            EventOrder.status == "paid",
+            EventOrder.paid_at >= start_date,
+            EventOrder.paid_at <= now,
+        )
+        .order_by(EventOrder.paid_at.asc())
+        .all()
+    )
+    
+    # ── Revenue Trends ───────────────────────────────────────────────────────
+    revenue_by_period = defaultdict(int)
+    orders_by_period = defaultdict(int)
+    
+    for order in orders:
+        if order.paid_at:
+            if period in ["7d", "30d"]:
+                key = order.paid_at.strftime(group_format)
+            elif period == "90d":
+                # Weekly grouping
+                year, week, _ = order.paid_at.isocalendar()
+                key = f"{year}-W{week:02d}"
+            else:
+                # Monthly grouping
+                key = order.paid_at.strftime(group_format)
+            
+            revenue_by_period[key] += order.amount_paise or 0
+            orders_by_period[key] += 1
+    
+    # Fill missing periods with zeros
+    if period in ["7d", "30d"]:
+        current = start_date
+        while current <= now:
+            key = current.strftime("%Y-%m-%d")
+            if key not in revenue_by_period:
+                revenue_by_period[key] = 0
+                orders_by_period[key] = 0
+            current += timedelta(days=1)
+    
+    # Build revenue trend data
+    revenue_trend = []
+    for key in sorted(revenue_by_period.keys()):
+        revenue_inr = revenue_by_period[key] / 100
+        revenue_trend.append({
+            "date": key,
+            "revenue": revenue_inr,
+            "revenue_formatted": f"₹{revenue_inr:,.0f}",
+            "orders": orders_by_period[key],
+        })
+    
+    # ── MRR Calculation ───────────────────────────────────────────────────────
+    # For pay-per-event model, MRR is calculated as total revenue this month
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    mrr_orders = (
+        db.query(EventOrder)
+        .filter(
+            EventOrder.status == "paid",
+            EventOrder.paid_at >= month_start,
+        )
+        .all()
+    )
+    current_mrr = sum(o.amount_paise or 0 for o in mrr_orders) / 100
+    
+    # Previous month MRR for comparison
+    prev_month_start = (month_start - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_orders = (
+        db.query(EventOrder)
+        .filter(
+            EventOrder.status == "paid",
+            EventOrder.paid_at >= prev_month_start,
+            EventOrder.paid_at < month_start,
+        )
+        .all()
+    )
+    prev_mrr = sum(o.amount_paise or 0 for o in prev_month_orders) / 100
+    mrr_growth = ((current_mrr - prev_mrr) / prev_mrr * 100) if prev_mrr > 0 else 0
+    
+    # ── Payment Method Breakdown ─────────────────────────────────────────────
+    # Razorpay vs Free events
+    total_paid_orders = db.query(EventOrder).filter(EventOrder.status == "paid").count()
+    free_orders_count = db.query(EventOrder).filter(EventOrder.status == "free").count()
+    created_orders_count = db.query(EventOrder).filter(EventOrder.status == "created").count()
+    failed_orders_count = db.query(EventOrder).filter(EventOrder.status == "failed").count()
+    
+    payment_breakdown = [
+        {"name": "Paid (Razorpay)", "value": total_paid_orders, "color": "#10b981"},
+        {"name": "Free Tier", "value": free_orders_count, "color": "#8b5cf6"},
+        {"name": "Pending", "value": created_orders_count, "color": "#f59e0b"},
+        {"name": "Failed", "value": failed_orders_count, "color": "#ef4444"},
+    ]
+    
+    # ── Average Order Value ──────────────────────────────────────────────────
+    total_revenue_period = sum(o.amount_paise or 0 for o in orders)
+    avg_order_value = (total_revenue_period / len(orders) / 100) if orders else 0
+    
+    # Previous period comparison
+    prev_start = start_date - (now - start_date)
+    prev_orders = (
+        db.query(EventOrder)
+        .filter(
+            EventOrder.status == "paid",
+            EventOrder.paid_at >= prev_start,
+            EventOrder.paid_at < start_date,
+        )
+        .all()
+    )
+    prev_revenue = sum(o.amount_paise or 0 for o in prev_orders) / 100
+    current_revenue = total_revenue_period / 100
+    revenue_growth = ((current_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+    
+    prev_avg = (sum(o.amount_paise or 0 for o in prev_orders) / len(prev_orders) / 100) if prev_orders else 0
+    aov_growth = ((avg_order_value - prev_avg) / prev_avg * 100) if prev_avg > 0 else 0
+    
+    # ── Top Customers ────────────────────────────────────────────────────────
+    top_customers_query = (
+        db.query(
+            User.email,
+            User.plan_type,
+            func.count(EventOrder.id).label("order_count"),
+            func.sum(EventOrder.amount_paise).label("total_spent"),
+        )
+        .join(EventOrder, User.id == EventOrder.user_id)
+        .filter(EventOrder.status == "paid")
+        .group_by(User.id)
+        .order_by(func.sum(EventOrder.amount_paise).desc())
+        .limit(5)
+        .all()
+    )
+    
+    top_customers = [
+        {
+            "email": email,
+            "plan": plan,
+            "orders": count,
+            "total_spent": (total or 0) / 100,
+            "total_formatted": f"₹{(total or 0) / 100:,.0f}",
+        }
+        for email, plan, count, total in top_customers_query
+    ]
+    
+    # ── Recent Transactions ──────────────────────────────────────────────────
+    recent_orders = (
+        db.query(EventOrder)
+        .filter(EventOrder.status.in_(["paid", "free"]))
+        .order_by(EventOrder.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    
+    recent_transactions = []
+    for o in recent_orders:
+        user = db.query(User).filter(User.id == o.user_id).first() if o.user_id else None
+        recent_transactions.append({
+            "id": o.id,
+            "event_name": o.event_name,
+            "user_email": user.email if user else "deleted",
+            "amount": (o.amount_paise or 0) / 100,
+            "amount_formatted": f"₹{(o.amount_paise or 0) / 100:,.0f}" if o.amount_paise else "Free",
+            "status": o.status,
+            "date": o.created_at.isoformat() if o.created_at else None,
+        })
+    
+    return {
+        "period": period,
+        "period_label": period_label,
+        # Revenue trends for charts
+        "revenue_trend": revenue_trend,
+        # Payment breakdown
+        "payment_breakdown": payment_breakdown,
+        # MRR metrics
+        "mrr": {
+            "current": current_mrr,
+            "current_formatted": f"₹{current_mrr:,.0f}",
+            "previous": prev_mrr,
+            "previous_formatted": f"₹{prev_mrr:,.0f}",
+            "growth_percent": round(mrr_growth, 1),
+            "trend": "up" if mrr_growth > 0 else "down" if mrr_growth < 0 else "neutral",
+        },
+        # Summary metrics
+        "summary": {
+            "total_revenue": current_revenue,
+            "total_revenue_formatted": f"₹{current_revenue:,.0f}",
+            "revenue_growth_percent": round(revenue_growth, 1),
+            "total_orders": len(orders),
+            "avg_order_value": avg_order_value,
+            "avg_order_value_formatted": f"₹{avg_order_value:,.0f}",
+            "aov_growth_percent": round(aov_growth, 1),
+        },
+        # Top customers
+        "top_customers": top_customers,
+        # Recent transactions
+        "recent_transactions": recent_transactions,
     }
 
 

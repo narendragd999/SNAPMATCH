@@ -60,6 +60,34 @@ interface PlatformStats {
   photosToday: number;
 }
 
+interface PricingPlan {
+  name: string;
+  price: string;
+  period: string;
+  badge: string;
+  desc: string;
+  features: { text: string; included: boolean }[];
+  cta: string;
+  href: string;
+  highlight: boolean;
+  config?: {
+    minPhotoQuota: number;
+    maxPhotoQuota: number;
+    minGuestQuota: number;
+    maxGuestQuota: number;
+    baseEventFee: number;
+    photoTiers: { bucket: number | null; rate_paise: number }[];
+    guestTiers: { bucket: number | null; rate_paise: number }[];
+    validityOptions: { days: number; addon_paise: number; included: boolean }[];
+    examplePrice: {
+      photos: number;
+      guests: number;
+      validityDays: number;
+      totalInr: number | null;
+    } | null;
+  };
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    ANIMATION VARIANTS
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -201,7 +229,7 @@ const HOW_STEPS = [
   },
 ];
 
-const PLANS = [
+const DEFAULT_PLANS: PricingPlan[] = [
   {
     name: "Free",
     price: "₹0",
@@ -210,16 +238,15 @@ const PLANS = [
     desc: "Try SnapFind risk-free on your first event",
     features: [
       { text: "1 event included", included: true },
-      { text: "Up to 500 photos", included: true },
+      { text: "Up to 50 photos", included: true },
       { text: "AI face search for guests", included: true },
       { text: "Individual photo download", included: true },
       { text: "Guest portal with share link", included: true },
       { text: "PIN protection", included: true },
       { text: "7-day cloud storage", included: true },
-      { text: "Bulk ZIP download", included: false },
-      { text: "Watermarking", included: false },
-      { text: "AI scene & object tags", included: false },
-      { text: "Guest upload portal", included: false },
+      { text: "Bulk ZIP download", included: true },
+      { text: "Watermarking", included: true },
+      { text: "AI scene & object tags", included: true },
     ],
     cta: "Start Free",
     href: "/login?mode=register",
@@ -287,7 +314,7 @@ const DEFAULT_TESTIMONIALS: Testimonial[] = [
 ];
 
 const FAQS: FAQ[] = [
-  { q: "How accurate is the face recognition?", a: "We use InsightFace's buffalo_s model which achieves 99.2% accuracy on standard benchmarks. In real event conditions with varied lighting, expect 96-98% accuracy.", category: "Technology" },
+  { q: "How accurate is the face recognition?", a: "We use InsightFace's buffalo_l model which achieves 99.2% accuracy on standard benchmarks. In real event conditions with varied lighting, expect 96-98% accuracy.", category: "Technology" },
   { q: "How long does processing take?", a: "Processing takes approximately 3-4 minutes for 1,000 photos. It runs entirely in the background — you can share the event guest link immediately while processing completes.", category: "Performance" },
   { q: "Is guest data private and secure?", a: "Yes. Selfies uploaded for search are processed in memory and never stored. Event photos are stored securely with AES-256 encryption and deleted after your chosen retention period.", category: "Security" },
   { q: "Do guests need to create an account?", a: "No. Guests simply open your event link, take or upload a selfie, and instantly see their photos. Zero friction for attendees.", category: "Guest Experience" },
@@ -741,27 +768,49 @@ export default function HomePage() {
     activeUsers: 2400,
     photosToday: 15420,
   });
+  const [plans, setPlans] = useState<PricingPlan[]>(DEFAULT_PLANS);
   const [testimonials, setTestimonials] = useState<Testimonial[]>(DEFAULT_TESTIMONIALS);
   const [loading, setLoading] = useState(true);
 
   // Fetch dynamic data
   useEffect(() => {
-    const fetchStats = async () => {
+    const fetchData = async () => {
+      const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8080";
+      
+      // Fetch stats
       try {
-        const API = process.env.NEXT_PUBLIC_API_URL || "";
-        const res = await fetch(`${API}/public/stats`, { cache: "no-store" });
+        const res = await fetch(`${API}/public/stats`, { 
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
+        });
         if (res.ok) {
           const data = await res.json();
           setStats(data);
         }
       } catch (e) {
-        // Use defaults
-      } finally {
-        setLoading(false);
+        console.log("Stats API unavailable, using defaults");
       }
+      
+      // Fetch pricing plans
+      try {
+        const res = await fetch(`${API}/pricing/plans`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.plans && data.plans.length > 0) {
+            setPlans(data.plans);
+          }
+        }
+      } catch (e) {
+        console.log("Pricing API unavailable, using defaults");
+      }
+      
+      setLoading(false);
     };
 
-    fetchStats();
+    fetchData();
   }, []);
 
   const displayStats: Stat[] = [
@@ -1242,7 +1291,7 @@ export default function HomePage() {
 
             {/* Plan Cards */}
             <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-12">
-              {PLANS.map(({ name, price, badge, desc, features, cta, href, highlight }, i) => (
+              {plans.map(({ name, price, badge, desc, features, cta, href, highlight }, i) => (
                 <motion.div
                   key={name}
                   initial={{ opacity: 0, y: 24 }}
@@ -1422,7 +1471,7 @@ export default function HomePage() {
                     <ArrowRight size={16} />
                   </Link>
                 </motion.div>
-                <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+                {/*<motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
                   <Link
                     href="/public-search"
                     className="flex items-center gap-2 border border-white/20 text-white font-semibold px-8 py-4 rounded-xl hover:bg-white/5 transition-colors text-sm"
@@ -1430,7 +1479,7 @@ export default function HomePage() {
                     <Search size={16} />
                     Try Guest Search
                   </Link>
-                </motion.div>
+                </motion.div>*/}
               </div>
             </motion.div>
           </div>
@@ -1495,13 +1544,13 @@ export default function HomePage() {
                   <li><a href="#" className="text-gray-500 text-sm hover:text-white transition-colors">Terms of Service</a></li>
                   <li><a href="#" className="text-gray-500 text-sm hover:text-white transition-colors">Refund Policy</a></li>
                 </ul>
-                <div className="mt-6 pt-6 border-t border-white/5">
+               {/* <div className="mt-6 pt-6 border-t border-white/5">
                   <p className="text-gray-600 text-[10px] font-semibold uppercase tracking-wider mb-2">Admin</p>
                   <Link href="/admin" className="inline-flex items-center gap-1.5 text-gray-500 hover:text-[#6c63ff] text-xs transition-colors">
                     <ShieldCheck size={12} />
                     Admin Panel
                   </Link>
-                </div>
+                </div>*/}
               </div>
             </div>
 

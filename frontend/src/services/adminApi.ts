@@ -84,3 +84,6 @@ export const getAdminOrder = (id: number) =>
 
 export const getAdminOrdersStats = () =>
   API.get("/admin/orders/stats").then((r) => r.data);
+
+export const getAdminRevenueAnalytics = (period: string = "30d") =>
+  API.get("/admin/orders/analytics", { params: { period } }).then((r) => r.data);
