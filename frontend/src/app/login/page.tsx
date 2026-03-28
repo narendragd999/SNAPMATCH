@@ -159,6 +159,12 @@ function AuthForm() {
   const handleAuthSuccess = (res: any) => {
     localStorage.setItem("token", res.data.access_token);
     localStorage.setItem("user", JSON.stringify(res.data.user));
+    
+    // Show success message if device was trusted
+    if (res.data.device_trusted) {
+      console.log("Device trusted for 30 days");
+    }
+    
     if (res.data.user?.role === "admin") {
       window.location.href = "/admin";
     } else {
@@ -188,13 +194,32 @@ function AuthForm() {
     // If in dev mode or OTP step, proceed directly
     if (!otpConfig?.otp_required) {
       try {
-        const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
-        const res = await API.post(endpoint, { email, password });
-        handleAuthSuccess(res);
+        if (mode === "login") {
+          // Try simple login first
+          try {
+            const res = await API.post("/auth/login", { email, password });
+            handleAuthSuccess(res);
+          } catch (loginErr: any) {
+            // Check if OTP is required (403 response)
+            if (loginErr?.response?.status === 403 && loginErr?.response?.data?.detail?.otp_required) {
+              // OTP required - send OTP and show OTP step
+              setShowOtpStep(false);
+              handleSendOtp();
+              return;
+            }
+            throw loginErr; // Re-throw other errors
+          }
+        } else {
+          // Registration
+          const res = await API.post("/auth/register", { email, password });
+          handleAuthSuccess(res);
+        }
       } catch (err: any) {
+        const errorDetail = err?.response?.data?.detail;
         setError(
-          err?.response?.data?.detail ||
-          (mode === "login" ? "Invalid email or password." : "Registration failed. Try again.")
+          typeof errorDetail === 'string' 
+            ? errorDetail 
+            : errorDetail?.message || (mode === "login" ? "Invalid email or password." : "Registration failed. Try again.")
         );
       } finally {
         setLoading(false);
@@ -289,6 +314,21 @@ function AuthForm() {
                   className="w-full px-3 py-2.5 rounded-lg bg-zinc-950 border border-zinc-800 hover:border-zinc-700 focus:border-blue-500/60 focus:outline-none text-xs text-zinc-200 placeholder:text-zinc-700 transition-colors text-center tracking-widest text-lg font-mono"
                 />
               </div>
+
+              {/* Remember device checkbox - only for login mode */}
+              {mode === "login" && (
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={trustDevice}
+                    onChange={(e) => setTrustDevice(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-zinc-700 bg-zinc-900 text-blue-500 focus:ring-blue-500/50"
+                  />
+                  <span className="text-[11px] text-zinc-400">
+                    Remember this device for 30 days
+                  </span>
+                </label>
+              )}
 
               <div className="flex items-center justify-between text-[11px]">
                 <button
