@@ -390,12 +390,27 @@ def register_with_otp(
 
 # ---------------- LOGIN ----------------
 @router.post("/login", response_model=TokenResponse)
-def login(data: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-
+def login(
+    data: OTPLoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db)
+):
+    """
+    Login endpoint - handles both trusted and untrusted devices.
+    
+    Flow:
+    1. If dev mode (no email configured): Direct login
+    2. If trusted device: Direct login
+    3. If not trusted: Returns 403 requiring OTP
+    
+    To trust a device, use /auth/login-with-otp with trust_device=true
+    """
+    is_dev = os.getenv("ENV", "dev") == "dev"
+    
     user = db.query(User).filter(User.email == data.email).first()
 
     if not user or not verify_password(data.password, user.password_hash):
-        # Log failed login attempt
         log_activity(
             db=db,
             activity_type="login_failed",
@@ -411,6 +426,22 @@ def login(data: LoginRequest, request: Request, response: Response, db: Session 
         )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    # Check if device is trusted
+    fingerprint = data.device_fingerprint or get_device_fingerprint(request)
+    otp_config = get_otp_config(db)
+    device_trusted = is_trusted_device(db, user.id, fingerprint)
+    
+    # If OTP is configured (not dev mode) and device is not trusted, require OTP
+    if not otp_config.is_development_mode and not device_trusted:
+        raise HTTPException(
+            status_code=403, 
+            detail={
+                "message": "OTP required for this device",
+                "otp_required": True,
+                "trusted_device": False
+            }
+        )
+
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
 
@@ -418,17 +449,16 @@ def login(data: LoginRequest, request: Request, response: Response, db: Session 
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=False,   # Change to True for production
+        secure=False,
         samesite="lax"
     )
 
-    # Log successful login
     log_activity(
         db=db,
         activity_type="login",
-        action="user_logged_in",
+        action="user_logged_in_trusted_device" if device_trusted else "user_logged_in",
         user_id=user.id,
-        description=f"User logged in: {user.email}",
+        description=f"User logged in {'from trusted device' if device_trusted else ''}: {user.email}",
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         request_path="/auth/login",
@@ -442,8 +472,10 @@ def login(data: LoginRequest, request: Request, response: Response, db: Session 
             "id": user.id,
             "email": user.email,
             "plan_type": user.plan_type,
-            "role": user.role
-        }
+            "role": user.role,
+            "email_verified": user.email_verified
+        },
+        "trusted_device": device_trusted
     }
 
 
@@ -456,18 +488,19 @@ def login_with_otp(
     db: Session = Depends(get_db)
 ):
     """
-    Login with optional OTP verification.
-
-    If OTP is provided, verifies OTP before allowing login.
-    This adds an extra layer of security for sensitive operations.
+    Login with OTP verification - trusts device if requested.
+    
+    Use this endpoint when:
+    1. /auth/login returned 403 (OTP required)
+    2. User wants to trust this device for future logins
+    
+    Set trust_device=true to remember this device for 30 days.
     """
-    import os
     is_dev = os.getenv("ENV", "dev") == "dev"
     
     user = db.query(User).filter(User.email == data.email).first()
 
     if not user:
-        # In development mode, provide helpful error message
         error_detail = "User not found. Please register first." if is_dev else "Invalid email or password"
         log_activity(
             db=db,
@@ -485,7 +518,6 @@ def login_with_otp(
         raise HTTPException(status_code=401, detail=error_detail)
 
     if not verify_password(data.password, user.password_hash):
-        # In development mode, provide helpful error message
         error_detail = "Incorrect password. Please try again." if is_dev else "Invalid email or password"
         log_activity(
             db=db,
@@ -504,15 +536,19 @@ def login_with_otp(
 
     # If OTP is provided, check if already verified or verify now
     if data.otp_code:
-        # Check if OTP was already verified (frontend calls verify-otp first)
         if is_otp_verified(db, data.email, "login"):
-            # OTP was already verified by frontend call to /auth/verify-otp
             pass
         else:
-            # Try to verify the OTP now
             is_valid, message = verify_otp(db, data.email, data.otp_code, "login")
             if not is_valid:
                 raise HTTPException(status_code=401, detail=message)
+    
+    # Trust device if requested
+    device_trusted = False
+    if data.trust_device:
+        fingerprint = get_device_fingerprint(request)
+        trust_device(db, user.id, fingerprint, request)
+        device_trusted = True
 
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
@@ -544,8 +580,10 @@ def login_with_otp(
             "id": user.id,
             "email": user.email,
             "plan_type": user.plan_type,
-            "role": user.role
-        }
+            "role": user.role,
+            "email_verified": user.email_verified
+        },
+        "device_trusted": device_trusted
     }
 
 
@@ -736,88 +774,6 @@ def get_otp_configuration(
         "otp_expiry_minutes": config.expiry_minutes,
         "trusted_device": trusted_device,
         "otp_needed_for_login": not config.is_development_mode and not trusted_device
-    }
-
-
-# ---------------------------------------
-# Simple Login (for trusted devices)
-# ---------------------------------------
-@router.post("/login", response_model=TokenResponse)
-def simple_login(
-    data: OTPLoginRequest,
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db)
-):
-    """
-    Simple login without OTP for trusted devices.
-    
-    If device is not trusted, returns 403 with otp_required=True.
-    Frontend should then use /auth/send-otp + /auth/login-with-otp flow.
-    """
-    import os
-    is_dev = os.getenv("ENV", "dev") == "dev"
-    
-    user = db.query(User).filter(User.email == data.email).first()
-
-    if not user:
-        error_detail = "User not found. Please register first." if is_dev else "Invalid email or password"
-        raise HTTPException(status_code=401, detail=error_detail)
-
-    if not verify_password(data.password, user.password_hash):
-        error_detail = "Incorrect password. Please try again." if is_dev else "Invalid email or password"
-        raise HTTPException(status_code=401, detail=error_detail)
-    
-    # Check if device is trusted
-    fingerprint = data.device_fingerprint or get_device_fingerprint(request)
-    otp_config = get_otp_config(db)
-    
-    # If OTP is configured (not dev mode) and device is not trusted, require OTP
-    if not otp_config.is_development_mode and not is_trusted_device(db, user.id, fingerprint):
-        raise HTTPException(
-            status_code=403, 
-            detail={
-                "message": "OTP required for this device",
-                "otp_required": True,
-                "trusted_device": False
-            }
-        )
-
-    # Generate tokens
-    access_token = create_access_token(user.id)
-    refresh_token = create_refresh_token(user.id)
-
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=False,
-        samesite="lax"
-    )
-
-    log_activity(
-        db=db,
-        activity_type="login",
-        action="user_logged_in_trusted_device",
-        user_id=user.id,
-        description=f"User logged in from trusted device: {user.email}",
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        request_path="/auth/login",
-        request_method="POST",
-    )
-
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "plan_type": user.plan_type,
-            "role": user.role,
-            "email_verified": user.email_verified
-        },
-        "trusted_device": True
     }
 
 

@@ -38,6 +38,7 @@ function AuthForm() {
   const [otpCode, setOtpCode] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
+  const [trustDevice, setTrustDevice] = useState(true); // Default to true for better UX
 
   // Fetch OTP config on mount
   useEffect(() => {
@@ -114,11 +115,12 @@ function AuthForm() {
     setError("");
 
     try {
-      // First verify the OTP
+      // First verify the OTP (trust device during login verification)
       const verifyRes = await API.post("/auth/verify-otp", {
         email,
         otp_code: otpCode,
-        purpose: mode === "register" ? "registration" : "login"
+        purpose: mode === "register" ? "registration" : "login",
+        trust_device: mode === "login" && trustDevice // Only for login, not registration
       });
 
       if (!verifyRes.data.verified) {
@@ -140,7 +142,8 @@ function AuthForm() {
         const loginRes = await API.post("/auth/login-with-otp", {
           email,
           password,
-          otp_code: otpCode
+          otp_code: otpCode,
+          trust_device: trustDevice
         });
         handleAuthSuccess(loginRes);
       }
