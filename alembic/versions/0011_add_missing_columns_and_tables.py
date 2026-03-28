@@ -209,6 +209,47 @@ def upgrade() -> None:
         op.create_index('ix_user_activity_logs_type_created', 'user_activity_logs', ['activity_type', 'created_at'])
 
     # ──────────────────────────────────────────────────────────────────────────
+    # 4c. TABLE: event_analytics
+    #    Daily analytics snapshot for each event
+    # ──────────────────────────────────────────────────────────────────────────
+    if 'event_analytics' not in tables:
+        op.create_table(
+            'event_analytics',
+            sa.Column('id',            sa.Integer(), primary_key=True, index=True),
+            sa.Column('event_id',      sa.Integer(),
+                      sa.ForeignKey('events.id', ondelete='CASCADE'), nullable=False, index=True),
+            sa.Column('date',          sa.Date(), nullable=False),
+            sa.Column('page_views',    sa.Integer(), server_default='0', nullable=False),
+            sa.Column('face_matches',  sa.Integer(), server_default='0', nullable=False),
+            sa.Column('downloads',     sa.Integer(), server_default='0', nullable=False),
+            sa.Column('guest_uploads', sa.Integer(), server_default='0', nullable=False),
+            sa.Column('created_at',    sa.DateTime(), server_default=sa.text('now()')),
+            sa.Column('updated_at',    sa.DateTime(), server_default=sa.text('now()')),
+        )
+        op.create_index('ix_event_analytics_event_date', 'event_analytics', ['event_id', 'date'], unique=True)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4d. TABLE: event_analytics_totals
+    #    Running totals for event analytics
+    # ──────────────────────────────────────────────────────────────────────────
+    if 'event_analytics_totals' not in tables:
+        op.create_table(
+            'event_analytics_totals',
+            sa.Column('id',                 sa.Integer(), primary_key=True, index=True),
+            sa.Column('event_id',           sa.Integer(),
+                      sa.ForeignKey('events.id', ondelete='CASCADE'), nullable=False, unique=True, index=True),
+            sa.Column('total_views',        sa.Integer(), server_default='0', nullable=False),
+            sa.Column('total_matches',      sa.Integer(), server_default='0', nullable=False),
+            sa.Column('total_downloads',    sa.Integer(), server_default='0', nullable=False),
+            sa.Column('total_guest_uploads', sa.Integer(), server_default='0', nullable=False),
+            sa.Column('last_view_at',       sa.DateTime(), nullable=True),
+            sa.Column('last_match_at',      sa.DateTime(), nullable=True),
+            sa.Column('last_download_at',   sa.DateTime(), nullable=True),
+            sa.Column('created_at',         sa.DateTime(), server_default=sa.text('now()')),
+            sa.Column('updated_at',         sa.DateTime(), server_default=sa.text('now()')),
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
     # 5. COLUMNS: events
     # ──────────────────────────────────────────────────────────────────────────
     ev_cols = _cols(bind, 'events')
@@ -351,6 +392,13 @@ def downgrade() -> None:
     op.drop_index('ix_user_activity_logs_type_created', table_name='user_activity_logs')
     op.drop_index('ix_user_activity_logs_user_created', table_name='user_activity_logs')
     op.drop_table('user_activity_logs')
+
+    # ── event_analytics_totals ────────────────────────────────────────────────
+    op.drop_table('event_analytics_totals')
+
+    # ── event_analytics ───────────────────────────────────────────────────────
+    op.drop_index('ix_event_analytics_event_date', table_name='event_analytics')
+    op.drop_table('event_analytics')
 
     # ── tables ────────────────────────────────────────────────────────────────
     op.drop_index('idx_event_orders_rzp_order', table_name='event_orders')
