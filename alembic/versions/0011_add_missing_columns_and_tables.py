@@ -179,6 +179,36 @@ def upgrade() -> None:
             op.create_index(idx_name, 'event_orders', idx_cols)
 
     # ──────────────────────────────────────────────────────────────────────────
+    # 4b. TABLE: user_activity_logs
+    #    Tracks user activities for audit and analytics
+    # ──────────────────────────────────────────────────────────────────────────
+    if 'user_activity_logs' not in tables:
+        op.create_table(
+            'user_activity_logs',
+            sa.Column('id',              sa.Integer(), primary_key=True, index=True),
+            sa.Column('user_id',         sa.Integer(),
+                      sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True),
+            sa.Column('activity_type',   sa.String(50), nullable=False, index=True),
+            sa.Column('action',          sa.String(100), nullable=False),
+            sa.Column('description',     sa.Text(), nullable=True),
+            sa.Column('event_id',        sa.Integer(),
+                      sa.ForeignKey('events.id', ondelete='SET NULL'), nullable=True, index=True),
+            sa.Column('order_id',        sa.Integer(),
+                      sa.ForeignKey('event_orders.id', ondelete='SET NULL'), nullable=True),
+            sa.Column('ip_address',      sa.String(45), nullable=True),
+            sa.Column('user_agent',      sa.String(500), nullable=True),
+            sa.Column('request_path',    sa.String(500), nullable=True),
+            sa.Column('request_method',  sa.String(10), nullable=True),
+            sa.Column('status',          sa.String(20), server_default='success', nullable=False),
+            sa.Column('error_message',   sa.Text(), nullable=True),
+            sa.Column('metadata_json',   sa.Text(), nullable=True),
+            sa.Column('created_at',      sa.DateTime(), server_default=sa.text('now()'), index=True),
+        )
+        # Composite indexes for common queries
+        op.create_index('ix_user_activity_logs_user_created', 'user_activity_logs', ['user_id', 'created_at'])
+        op.create_index('ix_user_activity_logs_type_created', 'user_activity_logs', ['activity_type', 'created_at'])
+
+    # ──────────────────────────────────────────────────────────────────────────
     # 5. COLUMNS: events
     # ──────────────────────────────────────────────────────────────────────────
     ev_cols = _cols(bind, 'events')
@@ -316,6 +346,11 @@ def downgrade() -> None:
 
     # ── users.free_event_used ─────────────────────────────────────────────────
     op.drop_column('users', 'free_event_used')
+
+    # ── user_activity_logs ────────────────────────────────────────────────────
+    op.drop_index('ix_user_activity_logs_type_created', table_name='user_activity_logs')
+    op.drop_index('ix_user_activity_logs_user_created', table_name='user_activity_logs')
+    op.drop_table('user_activity_logs')
 
     # ── tables ────────────────────────────────────────────────────────────────
     op.drop_index('idx_event_orders_rzp_order', table_name='event_orders')
