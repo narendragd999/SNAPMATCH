@@ -69,3 +69,18 @@ export const updateAdminPricingConfig = async (data: Record<string, unknown>) =>
 
 export const getAdminPricingHistory = () =>
   API.get("/pricing/config/history").then((r) => r.data);
+
+// ─── Orders ───────────────────────────────────────────────
+export const getAdminOrders = (params: {
+  page?: number;
+  limit?: number;
+  search?: string;
+  status?: string;
+  order_type?: string;
+}) => API.get("/admin/orders", { params }).then((r) => r.data);
+
+export const getAdminOrder = (id: number) =>
+  API.get(`/admin/orders/${id}`).then((r) => r.data);
+
+export const getAdminOrdersStats = () =>
+  API.get("/admin/orders/stats").then((r) => r.data);

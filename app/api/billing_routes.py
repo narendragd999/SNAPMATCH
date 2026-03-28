@@ -364,7 +364,23 @@ def create_free_event(
         public_status="active",
     )
     db.add(event)
+    db.flush()
     event.set_pin(DEFAULT_EVENT_PIN)
+
+    # Create EventOrder record for free event (for admin tracking)
+    order = EventOrder(
+        user_id=current_user.id,
+        event_id=event.id,
+        razorpay_order_id=None,  # No Razorpay order for free events
+        amount_paise=0,
+        photo_quota=cfg["photo_quota"],
+        guest_quota=cfg["guest_quota"],
+        validity_days=cfg["validity_days"],
+        event_name=body.event_name,
+        status="free",  # Special status for free events
+        paid_at=datetime.utcnow(),  # Mark as "paid" immediately
+    )
+    db.add(order)
 
     current_user.free_event_used = True
 
