@@ -313,7 +313,7 @@ const DEFAULT_TESTIMONIALS: Testimonial[] = [
   },
 ];
 
-const FAQS: FAQ[] = [
+const DEFAULT_FAQS: FAQ[] = [
   { q: "How accurate is the face recognition?", a: "We use InsightFace's buffalo_l model which achieves 99.2% accuracy on standard benchmarks. In real event conditions with varied lighting, expect 96-98% accuracy.", category: "Technology" },
   { q: "How long does processing take?", a: "Processing takes approximately 3-4 minutes for 1,000 photos. It runs entirely in the background — you can share the event guest link immediately while processing completes.", category: "Performance" },
   { q: "Is guest data private and secure?", a: "Yes. Selfies uploaded for search are processed in memory and never stored. Event photos are stored securely with AES-256 encryption and deleted after your chosen retention period.", category: "Security" },
@@ -387,18 +387,40 @@ function GradientOrbs() {
 function NewsletterForm() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [message, setMessage] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
 
     setStatus("loading");
-    // Simulate API call
-    await new Promise((r) => setTimeout(r, 1500));
-    setStatus("success");
-    setEmail("");
+    
+    try {
+      const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8080";
+      const res = await fetch(`${API}/cms/newsletter/subscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setStatus("success");
+        setMessage(data.message || "Thanks for subscribing!");
+        setEmail("");
+      } else {
+        setStatus("error");
+        setMessage("Something went wrong. Please try again.");
+      }
+    } catch (e) {
+      setStatus("error");
+      setMessage("Network error. Please try again.");
+    }
 
-    setTimeout(() => setStatus("idle"), 3000);
+    setTimeout(() => {
+      setStatus("idle");
+      setMessage("");
+    }, 5000);
   };
 
   return (
@@ -425,6 +447,11 @@ function NewsletterForm() {
         {status === "success" && <CheckCircle className="w-4 h-4" />}
         {status === "success" ? "Subscribed!" : "Subscribe"}
       </motion.button>
+      {message && (
+        <span className={`text-sm ${status === "success" ? "text-emerald-400" : "text-red-400"}`}>
+          {message}
+        </span>
+      )}
     </form>
   );
 }
@@ -770,6 +797,7 @@ export default function HomePage() {
   });
   const [plans, setPlans] = useState<PricingPlan[]>(DEFAULT_PLANS);
   const [testimonials, setTestimonials] = useState<Testimonial[]>(DEFAULT_TESTIMONIALS);
+  const [faqs, setFaqs] = useState<FAQ[]>(DEFAULT_FAQS);
   const [loading, setLoading] = useState(true);
 
   // Fetch dynamic data
@@ -805,6 +833,38 @@ export default function HomePage() {
         }
       } catch (e) {
         console.log("Pricing API unavailable, using defaults");
+      }
+      
+      // Fetch testimonials
+      try {
+        const res = await fetch(`${API}/cms/testimonials`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.length > 0) {
+            setTestimonials(data);
+          }
+        }
+      } catch (e) {
+        console.log("Testimonials API unavailable, using defaults");
+      }
+      
+      // Fetch FAQs
+      try {
+        const res = await fetch(`${API}/cms/faqs`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.length > 0) {
+            setFaqs(data);
+          }
+        }
+      } catch (e) {
+        console.log("FAQs API unavailable, using defaults");
       }
       
       setLoading(false);
@@ -1419,7 +1479,7 @@ export default function HomePage() {
             </motion.div>
 
             <div className="space-y-3">
-              {FAQS.map((faq, i) => (
+              {faqs.map((faq, i) => (
                 <motion.div
                   key={faq.q}
                   initial={{ opacity: 0, y: 16 }}
@@ -1471,7 +1531,7 @@ export default function HomePage() {
                     <ArrowRight size={16} />
                   </Link>
                 </motion.div>
-                {/*<motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+                <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
                   <Link
                     href="/public-search"
                     className="flex items-center gap-2 border border-white/20 text-white font-semibold px-8 py-4 rounded-xl hover:bg-white/5 transition-colors text-sm"
@@ -1479,7 +1539,7 @@ export default function HomePage() {
                     <Search size={16} />
                     Try Guest Search
                   </Link>
-                </motion.div>*/}
+                </motion.div>
               </div>
             </motion.div>
           </div>
@@ -1544,13 +1604,13 @@ export default function HomePage() {
                   <li><a href="#" className="text-gray-500 text-sm hover:text-white transition-colors">Terms of Service</a></li>
                   <li><a href="#" className="text-gray-500 text-sm hover:text-white transition-colors">Refund Policy</a></li>
                 </ul>
-               {/* <div className="mt-6 pt-6 border-t border-white/5">
+                <div className="mt-6 pt-6 border-t border-white/5">
                   <p className="text-gray-600 text-[10px] font-semibold uppercase tracking-wider mb-2">Admin</p>
                   <Link href="/admin" className="inline-flex items-center gap-1.5 text-gray-500 hover:text-[#6c63ff] text-xs transition-colors">
                     <ShieldCheck size={12} />
                     Admin Panel
                   </Link>
-                </div>*/}
+                </div>
               </div>
             </div>
 

@@ -15,16 +15,20 @@ import {
   Menu,
   X,
   ChevronRight,
-  Receipt,
+  MessageSquare,
+  HelpCircle,
+  Mail,
 } from "lucide-react";
 
 const NAV = [
   { href: "/admin",         label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/users",   label: "Users",     icon: Users           },
   { href: "/admin/events",  label: "Events",    icon: CalendarDays    },
-  { href: "/admin/orders",  label: "Orders",    icon: Receipt         },
   { href: "/admin/plans",   label: "Plans",     icon: CreditCard      },
   { href: "/admin/pricing", label: "Pricing",   icon: IndianRupee     },
+  { href: "/admin/testimonials", label: "Testimonials", icon: MessageSquare },
+  { href: "/admin/faqs",    label: "FAQs",      icon: HelpCircle      },
+  { href: "/admin/newsletter", label: "Newsletter", icon: Mail },
   { href: "/admin/tools",   label: "Tools",     icon: Trash2          },
 ];
 
