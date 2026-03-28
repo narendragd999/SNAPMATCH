@@ -56,11 +56,12 @@ def get_device_fingerprint(request: Request) -> str:
     """Generate device fingerprint from request."""
     import hashlib
     user_agent = request.headers.get("user-agent", "")
-    accept_language = request.headers.get("accept-language", "")
     ip = request.client.host if request.client else ""
     
-    # Create fingerprint from browser characteristics
-    data = f"{user_agent}:{accept_language}:{ip[:10]}"  # Use IP prefix for privacy
+    # Only use user_agent + IP prefix — NOT accept_language.
+    # accept_language varies across tabs, extensions, and browser state,
+    # causing the same browser to get a different fingerprint each time.
+    data = f"{user_agent}:{ip[:10]}"
     return hashlib.sha256(data.encode()).hexdigest()[:32]
 
 

@@ -15,9 +15,6 @@ interface OTPConfig {
   otp_expiry_minutes: number;
 }
 
-// useSearchParams() requires a Suspense boundary in Next.js App Router.
-// Split into inner component so the boundary wraps only what needs it.
-
 function AuthForm() {
   const router       = useRouter();
   const searchParams = useSearchParams();
@@ -38,7 +35,7 @@ function AuthForm() {
   const [otpCode, setOtpCode] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
-  const [trustDevice, setTrustDevice] = useState(true); // Default to true for better UX
+  const [trustDevice, setTrustDevice] = useState(true);
 
   // Fetch OTP config on mount
   useEffect(() => {
@@ -48,7 +45,6 @@ function AuthForm() {
         setOtpConfig(res.data);
       } catch (err) {
         console.error("Failed to fetch OTP config:", err);
-        // Default to no OTP required
         setOtpConfig({
           otp_required: false,
           dev_mode: true,
@@ -87,7 +83,7 @@ function AuthForm() {
       });
 
       setOtpSent(true);
-      setResendTimer(60); // 60 second cooldown
+      setResendTimer(60);
 
       if (res.data.dev_otp) {
         setSuccess(`Development Mode: Your OTP is ${res.data.dev_otp}`);
@@ -115,12 +111,11 @@ function AuthForm() {
     setError("");
 
     try {
-      // First verify the OTP (trust device during login verification)
       const verifyRes = await API.post("/auth/verify-otp", {
         email,
         otp_code: otpCode,
         purpose: mode === "register" ? "registration" : "login",
-        trust_device: mode === "login" && trustDevice // Only for login, not registration
+        trust_device: mode === "login" && trustDevice
       });
 
       if (!verifyRes.data.verified) {
@@ -128,9 +123,7 @@ function AuthForm() {
         return;
       }
 
-      // Then proceed with registration or login
       if (mode === "register") {
-        // Registration with OTP
         const regRes = await API.post("/auth/register-with-otp", {
           email,
           password,
@@ -138,7 +131,6 @@ function AuthForm() {
         });
         handleAuthSuccess(regRes);
       } else {
-        // Login with OTP verification
         const loginRes = await API.post("/auth/login-with-otp", {
           email,
           password,
@@ -160,7 +152,6 @@ function AuthForm() {
     localStorage.setItem("token", res.data.access_token);
     localStorage.setItem("user", JSON.stringify(res.data.user));
     
-    // Show success message if device was trusted
     if (res.data.device_trusted) {
       console.log("Device trusted for 30 days");
     }
@@ -185,51 +176,62 @@ function AuthForm() {
       return;
     }
 
-    // If OTP is required, go to OTP step
-    if (otpConfig?.otp_required && !showOtpStep) {
-      handleSendOtp();
+    // ── If already in OTP verification step, just verify ──
+    if (showOtpStep) {
+      setLoading(false);
+      handleVerifyOtp();
       return;
     }
 
-    // If in dev mode or OTP step, proceed directly
-    if (!otpConfig?.otp_required) {
+    // ── LOGIN: Try direct login first ──
+    // This succeeds for: dev mode OR trusted device
+    // This returns 403 for: new/untrusted device in production
+    if (mode === "login") {
       try {
-        if (mode === "login") {
-          // Try simple login first
-          try {
-            const res = await API.post("/auth/login", { email, password });
-            handleAuthSuccess(res);
-          } catch (loginErr: any) {
-            // Check if OTP is required (403 response)
-            if (loginErr?.response?.status === 403 && loginErr?.response?.data?.detail?.otp_required) {
-              // OTP required - send OTP and show OTP step
-              setShowOtpStep(false);
-              handleSendOtp();
-              return;
-            }
-            throw loginErr; // Re-throw other errors
-          }
-        } else {
-          // Registration
-          const res = await API.post("/auth/register", { email, password });
-          handleAuthSuccess(res);
+        const res = await API.post("/auth/login", { email, password });
+        handleAuthSuccess(res);
+        return;
+      } catch (loginErr: any) {
+        // Backend says OTP required → switch to OTP flow
+        if (
+          loginErr?.response?.status === 403 &&
+          loginErr?.response?.data?.detail?.otp_required
+        ) {
+          setLoading(false);
+          handleSendOtp();
+          return;
         }
-      } catch (err: any) {
-        const errorDetail = err?.response?.data?.detail;
+        // Real error (bad credentials, etc.)
+        const errorDetail = loginErr?.response?.data?.detail;
         setError(
-          typeof errorDetail === 'string' 
-            ? errorDetail 
-            : errorDetail?.message || (mode === "login" ? "Invalid email or password." : "Registration failed. Try again.")
+          typeof errorDetail === "string"
+            ? errorDetail
+            : errorDetail?.message || "Invalid email or password."
         );
-      } finally {
         setLoading(false);
       }
       return;
     }
 
-    // OTP step verification
-    if (showOtpStep) {
-      handleVerifyOtp();
+    // ── REGISTER ──
+    if (otpConfig?.otp_required) {
+      // Production: need OTP verification before registration
+      setLoading(false);
+      handleSendOtp();
+    } else {
+      // Dev mode: direct registration
+      try {
+        const res = await API.post("/auth/register", { email, password });
+        handleAuthSuccess(res);
+      } catch (err: any) {
+        const errorDetail = err?.response?.data?.detail;
+        setError(
+          typeof errorDetail === "string"
+            ? errorDetail
+            : errorDetail?.message || "Registration failed. Try again."
+        );
+        setLoading(false);
+      }
     }
   };
 
@@ -264,7 +266,6 @@ function AuthForm() {
         <p className="text-[11px] text-zinc-500 mt-1">AI-powered event photo management</p>
       </div>
 
-      {/* Only show tabs if not in OTP step */}
       {!showOtpStep && (
         <div className="flex border-b border-zinc-800">
           {(["login", "register"] as const).map(tab => (
@@ -280,7 +281,6 @@ function AuthForm() {
 
       <div className="px-7 py-6">
         <AnimatePresence mode="wait">
-          {/* OTP Step */}
           {showOtpStep ? (
             <motion.div
               key="otp-step"
@@ -315,7 +315,6 @@ function AuthForm() {
                 />
               </div>
 
-              {/* Remember device checkbox - only for login mode */}
               {mode === "login" && (
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -437,7 +436,6 @@ function AuthForm() {
                 )}
               </div>
 
-              {/* Confirm Password for Registration */}
               {mode === "register" && (
                 <div>
                   <label className="text-[11px] font-medium text-zinc-500 block mb-1.5">Confirm Password</label>
@@ -452,7 +450,6 @@ function AuthForm() {
                 </div>
               )}
 
-              {/* Dev mode indicator */}
               {otpConfig?.dev_mode && (
                 <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
                   Development Mode: OTP verification is optional. Common OTP: <code className="font-mono">123456</code>
@@ -478,11 +475,13 @@ function AuthForm() {
                 className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-medium transition-colors mt-1"
               >
                 {loading && <div className="w-3.5 h-3.5 border border-white/30 border-t-white rounded-full animate-spin" />}
-                {loading ? "Processing…" : mode === "login"
-                  ? (otpConfig?.otp_required ? "Continue" : "Sign In")
-                  : (otpConfig?.otp_required ? "Continue" : "Create Account")
+                {loading
+                  ? "Signing in…"
+                  : mode === "login"
+                    ? "Sign In"
+                    : "Create Account"
                 }
-                {otpConfig?.otp_required && <ArrowRight size={14} />}
+                <ArrowRight size={14} />
               </button>
             </motion.form>
           )}
@@ -509,7 +508,6 @@ export default function LoginPage() {
         transition={{ duration: 0.45 }}
         className="relative z-10 w-full max-w-sm px-5"
       >
-        {/* Suspense required — AuthForm uses useSearchParams() */}
         <Suspense fallback={<div className="bg-zinc-900 border border-zinc-800 rounded-2xl h-80 animate-pulse" />}>
           <AuthForm />
         </Suspense>
