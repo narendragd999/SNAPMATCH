@@ -4,7 +4,8 @@ app/api/admin_orders_routes.py
 Admin Orders Management — View all event orders (paid + free events).
 
 Endpoints:
-  GET /admin/orders            → list all orders with pagination and filters
+  GET /admin/orders/stats   → get order statistics (MUST be before /orders/{order_id})
+  GET /admin/orders         → list all orders with pagination and filters
   GET /admin/orders/{order_id} → get order details
 """
 
@@ -16,7 +17,7 @@ from app.models.user import User
 from app.models.event import Event
 from app.models.event_order import EventOrder
 from app.core.dependencies import get_current_user, get_db
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 router = APIRouter(prefix="/admin", tags=["admin-orders"])
@@ -26,6 +27,64 @@ def get_admin_user(current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
+
+# ── GET /admin/orders/stats ────────────────────────────────────────────────────
+# IMPORTANT: This route MUST come before /orders/{order_id} to avoid route conflicts
+
+@router.get("/orders/stats")
+def get_orders_stats(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_admin_user),
+):
+    """Get summary statistics for orders."""
+    
+    # Total orders count
+    total_orders = db.query(EventOrder).count()
+    
+    # Count by status
+    status_counts = (
+        db.query(EventOrder.status, func.count(EventOrder.id))
+        .group_by(EventOrder.status)
+        .all()
+    )
+    
+    # Total revenue (sum of paid orders)
+    paid_orders = db.query(EventOrder).filter(EventOrder.status == "paid").all()
+    total_revenue_paise = sum(o.amount_paise or 0 for o in paid_orders)
+    
+    # Free events count - use is_(None) for proper SQL generation
+    free_events_count = db.query(EventOrder).filter(
+        or_(EventOrder.status == "free", EventOrder.razorpay_order_id.is_(None))
+    ).count()
+    
+    # Orders this month
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    orders_this_month = db.query(EventOrder).filter(
+        EventOrder.created_at >= month_start
+    ).count()
+    
+    revenue_this_month_paise = sum(
+        o.amount_paise or 0 
+        for o in db.query(EventOrder).filter(
+            EventOrder.status == "paid",
+            EventOrder.paid_at >= month_start
+        ).all()
+    )
+    
+    return {
+        "total_orders":               total_orders,
+        "status_distribution":        {s: c for s, c in status_counts},
+        "total_revenue_paise":        total_revenue_paise,
+        "total_revenue_inr":          total_revenue_paise / 100,
+        "total_revenue_formatted":    f"₹{total_revenue_paise / 100:,.2f}",
+        "free_events_count":          free_events_count,
+        "paid_events_count":          total_orders - free_events_count,
+        "orders_this_month":          orders_this_month,
+        "revenue_this_month_paise":   revenue_this_month_paise,
+        "revenue_this_month_inr":     revenue_this_month_paise / 100,
+        "revenue_this_month_formatted": f"₹{revenue_this_month_paise / 100:,.2f}",
+    }
 
 
 # ── GET /admin/orders ─────────────────────────────────────────────────────────
@@ -70,9 +129,9 @@ def list_orders(
     if status:
         query = query.filter(EventOrder.status == status)
     
-    # Order type filter
+    # Order type filter - use is_not(None) for proper SQL generation
     if order_type == "paid":
-        query = query.filter(EventOrder.razorpay_order_id != None)
+        query = query.filter(EventOrder.razorpay_order_id.is_not(None))
     elif order_type == "free":
         query = query.filter(EventOrder.status == "free")
     
@@ -130,6 +189,7 @@ def list_orders(
 
 
 # ── GET /admin/orders/{order_id} ──────────────────────────────────────────────
+# IMPORTANT: This route MUST come AFTER /orders/stats to avoid route conflicts
 
 @router.get("/orders/{order_id}")
 def get_order(
@@ -203,62 +263,4 @@ def get_order(
         } if event else None,
         # Quota usage
         "quota": quota_info if quota_info else None,
-    }
-
-
-# ── GET /admin/orders/stats ────────────────────────────────────────────────────
-
-@router.get("/orders/stats")
-def get_orders_stats(
-    db: Session = Depends(get_db),
-    _: User = Depends(get_admin_user),
-):
-    """Get summary statistics for orders."""
-    
-    # Total orders count
-    total_orders = db.query(EventOrder).count()
-    
-    # Count by status
-    status_counts = (
-        db.query(EventOrder.status, func.count(EventOrder.id))
-        .group_by(EventOrder.status)
-        .all()
-    )
-    
-    # Total revenue (sum of paid orders)
-    paid_orders = db.query(EventOrder).filter(EventOrder.status == "paid").all()
-    total_revenue_paise = sum(o.amount_paise or 0 for o in paid_orders)
-    
-    # Free events count
-    free_events_count = db.query(EventOrder).filter(
-        or_(EventOrder.status == "free", EventOrder.razorpay_order_id == None)
-    ).count()
-    
-    # Orders this month
-    from datetime import timedelta
-    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    orders_this_month = db.query(EventOrder).filter(
-        EventOrder.created_at >= month_start
-    ).count()
-    
-    revenue_this_month_paise = sum(
-        o.amount_paise or 0 
-        for o in db.query(EventOrder).filter(
-            EventOrder.status == "paid",
-            EventOrder.paid_at >= month_start
-        ).all()
-    )
-    
-    return {
-        "total_orders":               total_orders,
-        "status_distribution":        {s: c for s, c in status_counts},
-        "total_revenue_paise":        total_revenue_paise,
-        "total_revenue_inr":          total_revenue_paise / 100,
-        "total_revenue_formatted":    f"₹{total_revenue_paise / 100:,.2f}",
-        "free_events_count":          free_events_count,
-        "paid_events_count":          total_orders - free_events_count,
-        "orders_this_month":          orders_this_month,
-        "revenue_this_month_paise":   revenue_this_month_paise,
-        "revenue_this_month_inr":     revenue_this_month_paise / 100,
-        "revenue_this_month_formatted": f"₹{revenue_this_month_paise / 100:,.2f}",
     }
