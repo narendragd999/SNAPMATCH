@@ -46,6 +46,7 @@ from app.core.config import DEFAULT_EVENT_PIN
 from app.models.event import Event
 from app.models.event_order import EventOrder
 from app.models.user import User
+from app.api.analytics_routes import log_activity
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -255,6 +256,20 @@ def create_event_order(
     db.add(order)
     db.commit()
 
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="payment_initiate",
+        action="order_created",
+        user_id=current_user.id,
+        event_id=event.id,
+        order_id=order.id,
+        description=f"Payment initiated for event '{body.event_name}': ₹{breakdown['total_inr']}",
+        request_path="/billing/create-event-order",
+        request_method="POST",
+        metadata={"amount_paise": amount_paise, "photo_quota": body.photo_quota, "guest_quota": body.guest_quota},
+    )
+
     return {
         "order_id":      rz_order["id"],
         "razorpay_key":  os.getenv("RAZORPAY_KEY_ID"),
@@ -319,6 +334,20 @@ def verify_payment(
         current_user.plan_type = "pay_per_event"
 
     db.commit()
+
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="payment_success",
+        action="payment_verified",
+        user_id=current_user.id,
+        event_id=event.id,
+        order_id=order.id if order else None,
+        description=f"Payment successful for event '{event.name}': order {body.razorpay_order_id}",
+        request_path="/billing/verify-payment",
+        request_method="POST",
+        metadata={"razorpay_payment_id": body.razorpay_payment_id},
+    )
 
     return {
         "success":    True,
@@ -386,6 +415,19 @@ def create_free_event(
 
     db.commit()
     db.refresh(event)
+
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="free_event_create",
+        action="free_event_created",
+        user_id=current_user.id,
+        event_id=event.id,
+        order_id=order.id,
+        description=f"Free event created: '{body.event_name}'",
+        request_path="/billing/create-free-event",
+        request_method="POST",
+    )
 
     return {
         "success":       True,
@@ -472,6 +514,21 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                 db_event.payment_status = "failed"
 
             db.commit()
+
+            # Log activity
+            if order:
+                log_activity(
+                    db=db,
+                    activity_type="payment_failed",
+                    action="payment_failed_webhook",
+                    user_id=order.user_id,
+                    event_id=order.event_id,
+                    order_id=order.id,
+                    description=f"Payment failed for event: {order.event_name}",
+                    request_path="/billing/webhook",
+                    request_method="POST",
+                    status="failed",
+                )
         return {"status": "processed", "event": "payment.failed"}
 
     return {"status": "ignored", "event": event_type}

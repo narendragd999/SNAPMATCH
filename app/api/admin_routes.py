@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database.db import SessionLocal
@@ -12,6 +12,7 @@ from app.services.faiss_manager import FaissManager
 from app.core.config import INDEXES_PATH, STORAGE_PATH
 from app.services.storage_cleanup import delete_event_storage
 from app.models.platform_settings import PlatformSetting
+from app.api.analytics_routes import log_activity
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
@@ -114,7 +115,12 @@ def list_users(
 
 
 @router.post("/users")
-def create_user(data: UserCreateRequest, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+def create_user(
+    data: UserCreateRequest, 
+    request: Request,
+    db: Session = Depends(get_db), 
+    admin: User = Depends(get_admin_user)
+):
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     if data.plan_type not in VALID_PLAN_TYPES:
@@ -125,7 +131,24 @@ def create_user(data: UserCreateRequest, db: Session = Depends(get_db), _: User 
         plan_type=data.plan_type,
         role=data.role,
     )
-    db.add(user); db.commit(); db.refresh(user)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="admin_user_create",
+        action="admin_created_user",
+        user_id=admin.id,
+        description=f"Admin created user: {data.email} (role: {data.role}, plan: {data.plan_type})",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path="/admin/users",
+        request_method="POST",
+        metadata={"created_user_id": user.id, "created_user_email": data.email},
+    )
+    
     return {"id": user.id, "email": user.email, "role": user.role, "plan_type": user.plan_type}
 
 
@@ -133,40 +156,73 @@ def create_user(data: UserCreateRequest, db: Session = Depends(get_db), _: User 
 def update_user(
     user_id: int,
     data: UserUpdateRequest,
+    request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(get_admin_user),
+    admin: User = Depends(get_admin_user),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    changes = []
     if data.email is not None:
         if db.query(User).filter(User.email == data.email, User.id != user_id).first():
             raise HTTPException(status_code=400, detail="Email already in use")
         user.email = data.email
+        changes.append(f"email: {data.email}")
     if data.plan_type is not None:
         if data.plan_type not in VALID_PLAN_TYPES:
             raise HTTPException(status_code=400, detail=f"plan_type must be one of {VALID_PLAN_TYPES}")
         user.plan_type = data.plan_type
+        changes.append(f"plan: {data.plan_type}")
     if data.role is not None:
         if data.role not in ("owner", "admin"):
             raise HTTPException(status_code=400, detail="Invalid role")
         user.role = data.role
+        changes.append(f"role: {data.role}")
     if data.password is not None:
         if len(data.password) < 6:
             raise HTTPException(status_code=400, detail="Password min 6 chars")
         user.password_hash = hash_password(data.password)
-    db.commit(); db.refresh(user)
+        changes.append("password updated")
+    
+    db.commit()
+    db.refresh(user)
+    
+    # Log activity
+    if changes:
+        log_activity(
+            db=db,
+            activity_type="admin_user_update",
+            action="admin_updated_user",
+            user_id=admin.id,
+            description=f"Admin updated user {user.email}: {', '.join(changes)}",
+            ip_address=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+            request_path=f"/admin/users/{user_id}",
+            request_method="PATCH",
+            metadata={"target_user_id": user_id, "changes": changes},
+        )
+    
     return {"id": user.id, "email": user.email, "role": user.role, "plan_type": user.plan_type}
 
 
 @router.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(get_admin_user)):
+def delete_user(
+    user_id: int, 
+    request: Request,
+    db: Session = Depends(get_db), 
+    admin: User = Depends(get_admin_user)
+):
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    user_email = user.email  # Store for logging
     events = db.query(Event).filter(Event.owner_id == user_id).all()
+    event_count = len(events)
     for event in events:
         try:
             delete_event_storage(event.id)
@@ -174,7 +230,23 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
             pass
         db.query(Cluster).filter(Cluster.event_id == event.id).delete()
         db.delete(event)
-    db.delete(user); db.commit()
+    db.delete(user)
+    db.commit()
+    
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="admin_user_delete",
+        action="admin_deleted_user",
+        user_id=admin.id,
+        description=f"Admin deleted user: {user_email} with {event_count} events",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path=f"/admin/users/{user_id}",
+        request_method="DELETE",
+        metadata={"deleted_user_id": user_id, "deleted_user_email": user_email, "events_deleted": event_count},
+    )
+    
     return {"success": True}
 
 
@@ -216,16 +288,39 @@ def list_events(
 
 
 @router.delete("/events/{event_id}")
-def delete_event(event_id: int, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+def delete_event(
+    event_id: int, 
+    request: Request,
+    db: Session = Depends(get_db), 
+    admin: User = Depends(get_admin_user)
+):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+    
+    event_name = event.name
     try:
         delete_event_storage(event_id)
     except Exception:
         pass
     db.query(Cluster).filter(Cluster.event_id == event_id).delete()
-    db.delete(event); db.commit()
+    db.delete(event)
+    db.commit()
+    
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="admin_event_delete",
+        action="admin_deleted_event",
+        user_id=admin.id,
+        event_id=event_id,
+        description=f"Admin deleted event: {event_name}",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path=f"/admin/events/{event_id}",
+        request_method="DELETE",
+    )
+    
     return {"success": True}
 
 

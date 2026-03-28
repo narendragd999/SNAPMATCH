@@ -73,6 +73,11 @@ class ActivityType:
     LOGIN_FAILED    = "login_failed"
     PASSWORD_RESET  = "password_reset"
     
+    # OTP Verification
+    OTP_SENT        = "otp_sent"
+    OTP_VERIFIED    = "otp_verified"
+    OTP_FAILED      = "otp_failed"
+    
     # Event Management
     EVENT_CREATE    = "event_create"
     EVENT_UPDATE    = "event_update"

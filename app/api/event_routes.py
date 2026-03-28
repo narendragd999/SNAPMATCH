@@ -30,7 +30,7 @@ STORAGE CHANGES (MinIO integration):
   - get_event response: cover_image_url built via storage_service.get_cover_url()
 """
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from typing import List
 from pathlib import Path
@@ -47,6 +47,7 @@ from app.services.search_service import search_face
 from app.services import storage_service
 from app.services.storage_service import STORAGE_BACKEND
 from app.services.storage_cleanup import delete_event_storage
+from app.api.analytics_routes import log_activity
 from datetime import datetime, timedelta
 from app.models.user import User
 import redis as redis_lib
@@ -115,6 +116,7 @@ def create_event(
     name: str = Form(...),
     description: str = Form(None),
     cover_image: UploadFile = File(None),
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -152,6 +154,20 @@ def create_event(
     db.add(event)
     db.commit()
     db.refresh(event)
+
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="event_create",
+        action="event_created",
+        user_id=current_user.id,
+        event_id=event.id,
+        description=f"Created event: {name}",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path="/events/",
+        request_method="POST",
+    )
 
     return {
         "id":            event.id,
@@ -283,6 +299,7 @@ def update_event(
     description: str        = Form(None),
     cover_image: UploadFile = File(None),
     guest_upload_enabled: bool = Form(None),
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -293,12 +310,16 @@ def update_event(
     if event.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    changes = []
     if name is not None:
         event.name = name
+        changes.append(f"name: {name}")
     if description is not None:
         event.description = description
+        changes.append("description updated")
     if guest_upload_enabled is not None:
         event.guest_upload_enabled = guest_upload_enabled
+        changes.append(f"guest_upload: {guest_upload_enabled}")
 
     if cover_image and cover_image.filename:
         if event.cover_image:
@@ -309,9 +330,25 @@ def update_event(
         content = cover_image.file.read()
         storage_service.upload_cover(content, unique_name)
         event.cover_image = unique_name
+        changes.append("cover_image updated")
 
     db.commit()
     db.refresh(event)
+
+    # Log activity
+    if changes:
+        log_activity(
+            db=db,
+            activity_type="event_update",
+            action="event_updated",
+            user_id=current_user.id,
+            event_id=event_id,
+            description=f"Updated event: {', '.join(changes)}",
+            ip_address=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+            request_path=f"/events/{event_id}",
+            request_method="PATCH",
+        )
 
     return {
         "id":              event.id,
@@ -333,6 +370,7 @@ def update_event(
 @router.delete("/{event_id}")
 def delete_event(
     event_id: int,
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -344,6 +382,8 @@ def delete_event(
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    event_name = event.name  # Store for logging before deletion
+
     # Delete DB records first
     db.query(Cluster).filter(Cluster.event_id == event_id).delete()
     db.query(Photo).filter(Photo.event_id == event_id).delete()
@@ -353,6 +393,20 @@ def delete_event(
     # ── STORAGE: delete FAISS + all files (local/MinIO/R2) ───────────────────
     # Runs after db.commit() so DB deletion always succeeds regardless of storage errors
     delete_event_storage(event_id, cover_image=event.cover_image)
+
+    # Log activity
+    log_activity(
+        db=db,
+        activity_type="event_delete",
+        action="event_deleted",
+        user_id=current_user.id,
+        event_id=event_id,
+        description=f"Deleted event: {event_name}",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path=f"/events/{event_id}",
+        request_method="DELETE",
+    )
 
     return {"message": "Event deleted successfully"}
 
@@ -1617,43 +1671,3 @@ def delete_logo(
         db.commit()
 
     return {"message": "Logo removed"}
-
-
-
-"""
-app/api/event_routes.py  —  BRANDING SECTION
-═══════════════════════════════════════════════════════════════════════════════
-
-APPEND this entire block to the bottom of your existing event_routes.py.
-Do NOT replace the file — just paste everything below the last existing route.
-
-New endpoints added:
-  GET    /events/{event_id}/branding            → get current branding config
-  PATCH  /events/{event_id}/branding            → save branding config
-  POST   /events/{event_id}/branding/logo-presign → presign R2 PUT for logo upload
-  DELETE /events/{event_id}/branding/logo        → remove logo from R2 + clear DB field
-
-Also update get_event() response dict to include branding fields — see
-the "ADD TO get_event()" comment block below.
-
-═══════════════════════════════════════════════════════════════════════════════
-ADD TO get_event() return dict (around line 290 in your original file,
-right after the existing "pin_enabled" key):
-
-    # 🖌️  Branding
-    "template_id":          event.brand_template_id or "classic",
-    "brand_logo_url":       event.brand_logo_url or "",
-    "brand_primary_color":  event.brand_primary_color or "#3b82f6",
-    "brand_accent_color":   event.brand_accent_color or "#60a5fa",
-    "brand_font":           event.brand_font or "system",
-    "brand_footer_text":    event.brand_footer_text or "",
-    "brand_show_powered_by": bool(event.brand_show_powered_by),
-
-Also update the public event route (public_routes.py / GET /public/events/{token})
-to include the same branding keys so the public selfie page receives them.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-# ─── Additional imports (add these to the top of event_routes.py if missing) ──
-# from pydantic import BaseModel, Field, validator
-# import re

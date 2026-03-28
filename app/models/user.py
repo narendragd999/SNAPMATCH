@@ -17,3 +17,7 @@ class User(Base):
     # Tracks whether this user has consumed their one free event.
     # Once True, creating another event requires payment.
     free_event_used = Column(Boolean, default=False, nullable=False)
+
+    # ── NEW: email verification ─────────────────────────────────────────────────
+    # Tracks whether the user's email has been verified via OTP
+    email_verified = Column(Boolean, default=False, nullable=False)

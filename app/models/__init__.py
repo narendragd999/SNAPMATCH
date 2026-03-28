@@ -11,3 +11,4 @@ from .user_activity_log import UserActivityLog, ActivityType
 from .testimonial import Testimonial
 from .faq import FAQ
 from .newsletter import NewsletterSubscriber
+from .otp import OTPVerification

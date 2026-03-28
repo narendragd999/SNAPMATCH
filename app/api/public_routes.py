@@ -32,6 +32,7 @@ from app.models.photo import Photo
 from app.models.user import User
 from app.services import storage_service
 from app.services.search_service import public_search_face, search_face
+from app.api.analytics_routes import log_activity
 import json as _json
 from pydantic import BaseModel
 
@@ -389,11 +390,29 @@ def serve_image(
 async def public_search(
     public_token: str,
     file: UploadFile = File(...),
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     event = validate_public_event(public_token, db)
 
     raw_result = await public_search_face(event.id, file, db)
+
+    # Log face search activity
+    matched_count = len(raw_result.get("matched_photos", [])) if raw_result else 0
+    friends_count = len(raw_result.get("friends_photos", [])) if raw_result else 0
+    
+    log_activity(
+        db=db,
+        activity_type="face_search",
+        action="public_selfie_search",
+        event_id=event.id,
+        description=f"Face search on event '{event.name}': {matched_count} matches, {friends_count} friends",
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        request_path=f"/public/events/{public_token}/search",
+        request_method="POST",
+        metadata={"matched_count": matched_count, "friends_count": friends_count},
+    )
 
     if not raw_result or (not raw_result.get("matched_photos") and not raw_result.get("friends_photos")):
         empty_page = {"result_id": None, "page": 1, "page_size": PAGE_SIZE, "total": 0, "total_pages": 0, "has_more": False, "items": []}
@@ -733,6 +752,21 @@ async def guest_contribute(
     # It is incremented in guest_upload_routes.py when the owner APPROVES.
     # Rejected photos never consume a slot.
     db.commit()
+
+    # Log guest upload activity
+    if saved:
+        log_activity(
+            db=db,
+            activity_type="guest_upload",
+            action="guest_photos_submitted",
+            event_id=event.id,
+            description=f"Guest submitted {len(saved)} photos to event '{event.name}'",
+            ip_address=guest_ip,
+            user_agent=request.headers.get("user-agent") if request else None,
+            request_path=f"/public/events/{public_token}/contribute",
+            request_method="POST",
+            metadata={"saved_count": len(saved), "failed_count": len(failed), "guest_name": guest_name},
+        )
 
     return {
         "saved":           saved,

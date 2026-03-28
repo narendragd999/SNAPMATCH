@@ -76,7 +76,6 @@ services:
     image: snapfind-backend:latest
     container_name: event_backend
     shm_size: '512mb'
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
@@ -94,19 +93,31 @@ services:
       # These override / supplement .env for Docker-internal wiring
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
+      # Database connection for entrypoint script (migration check)
+      - DB_HOST=postgres
+      - DB_USER=postgres
+      - DB_PASSWORD=admin123
+      - DB_NAME=event_ai
       # Allow requests from nginx (port 80), direct frontend (3000), and
       # direct backend access (8000) — all used during local development.
       # On GHA nginx is port 80 (localhost), locally port 8080 (127.0.0.1:8080)
       - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://localhost:3000,http://localhost:8000,http://127.0.0.1:8080,http://127.0.0.1:3000,http://127.0.0.1:8000
       - ENV=${ENV:-dev}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
-      - FRONTEND_URL=${NEXT_PUBLIC_APP_URL:-http://localhost}
-      # SMTP (optional — app works without it, just no emails)
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
+      # ── Email Configuration ───────────────────────────────
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-smtp}
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      # ── OTP Configuration ─────────────────────────────────
+      - DEV_COMMON_OTP=${DEV_COMMON_OTP:-123456}
+      - OTP_EXPIRY_MINUTES=${OTP_EXPIRY_MINUTES:-10}
+      - OTP_LENGTH=${OTP_LENGTH:-6}
+      - OTP_MAX_ATTEMPTS=${OTP_MAX_ATTEMPTS:-5}
       # AI models
       - MAX_PHOTO_SIZE_MB=${MAX_PHOTO_SIZE_MB:-20}
       - PLACES365_MODEL_PATH=${PLACES365_MODEL_PATH:-/app/models/resnet50_places365.pth.tar}
