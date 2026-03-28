@@ -32,6 +32,8 @@ from app.models.cluster        import Cluster        # noqa: F401
 from app.models.pricing_config import PricingConfig  # noqa: F401
 from app.models.event_analytics import EventAnalytics, EventAnalyticsTotal  # noqa: F401
 from app.models.user_activity_log import UserActivityLog  # noqa: F401
+from app.models.email_provider_config import EmailProviderConfig  # noqa: F401
+from app.models.otp import OTPVerification  # noqa: F401
 
 # ── Router imports ────────────────────────────────────────────────────────────
 from app.api.auth_routes        import router as auth_router
@@ -49,6 +51,7 @@ from app.api.pricing_routes     import router as pricing_router
 from app.api.analytics_routes   import router as analytics_router
 from app.api.cms_routes         import router as cms_router
 from app.api.admin_cms_routes   import router as admin_cms_router
+from app.api.admin_email_routes import router as admin_email_router
 
 # ── Storage service ───────────────────────────────────────────────────────────
 from app.services import storage_service
@@ -119,6 +122,7 @@ app.include_router(pricing_router)
 app.include_router(analytics_router)
 app.include_router(cms_router)
 app.include_router(admin_cms_router)
+app.include_router(admin_email_router)
 
 # Auto-create any new tables (idempotent)
 Base.metadata.create_all(bind=engine)

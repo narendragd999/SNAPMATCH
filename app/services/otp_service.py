@@ -27,23 +27,24 @@ logger = logging.getLogger(__name__)
 class OTPConfig:
     """OTP configuration from environment variables"""
 
-    def __init__(self):
+    def __init__(self, db: Session = None):
         self.expiry_minutes = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
         self.otp_length = int(os.getenv("OTP_LENGTH", "6"))
         self.dev_common_otp = os.getenv("DEV_COMMON_OTP", "123456")
         self.max_attempts = int(os.getenv("OTP_MAX_ATTEMPTS", "5"))
+        self._db = db
 
     @property
     def is_development_mode(self) -> bool:
         """Check if running in development mode"""
-        # Development mode ONLY if SMTP is not configured
+        # Development mode ONLY if email provider is not configured
         # DEV_COMMON_OTP is used as the OTP code in dev mode, NOT to force dev mode
-        return get_email_config().is_development_mode
+        return get_email_config(self._db).is_development_mode
 
 
-def get_otp_config() -> OTPConfig:
+def get_otp_config(db: Session = None) -> OTPConfig:
     """Get OTP configuration instance"""
-    return OTPConfig()
+    return OTPConfig(db)
 
 
 def generate_otp(length: int = 6) -> str:
@@ -81,7 +82,7 @@ def create_otp(
         Tuple[str, bool]: (OTP code, is_development_mode)
     """
     if config is None:
-        config = get_otp_config()
+        config = get_otp_config(db)  # Pass db to check admin email config
 
     # Invalidate any existing unused OTPs for this email and purpose
     db.query(OTPVerification).filter(
@@ -120,7 +121,7 @@ def create_otp(
     # Send email (in production mode, in dev mode it will just log)
     if not is_dev_mode:
         try:
-            send_otp_email(email, otp_code, purpose, config.expiry_minutes)
+            send_otp_email(email, otp_code, purpose, config.expiry_minutes, db=db)
         except Exception as e:
             logger.error(f"Failed to send OTP email: {str(e)}")
             # Don't raise exception, as we want to return the OTP for retry
@@ -150,7 +151,7 @@ def verify_otp(
         Tuple[bool, str]: (is_valid, message)
     """
     if config is None:
-        config = get_otp_config()
+        config = get_otp_config(db)  # Pass db for consistency
 
     # Find the most recent unused OTP for this email and purpose
     otp_record = db.query(OTPVerification).filter(

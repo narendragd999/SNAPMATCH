@@ -1,5 +1,5 @@
 # ============================================================
-# SnapFind AI — Docker Compose  (localhost-compatible)
+# SnapFind AI - Docker Compose (localhost-compatible)
 # ============================================================
 # KEY CHANGES vs GitHub-Actions version:
 #   1. nginx port driven by NGINX_PORT env var (8080 local, 80 on GHA)
@@ -12,14 +12,14 @@
 
 services:
 
-  # ── PostgreSQL ───────────────────────────────────────────
+  # -- PostgreSQL --
   postgres:
     image: postgres:15-alpine
     container_name: event_postgres
     environment:
-      POSTGRES_USER:     postgres
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: admin123
-      POSTGRES_DB:       event_ai    
+      POSTGRES_DB: event_ai
     volumes:
       - postgres_data:/var/lib/postgresql/data
     command: postgres -c listen_addresses='*'
@@ -32,7 +32,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Redis ────────────────────────────────────────────────
+  # -- Redis --
   redis:
     image: redis:7-alpine
     container_name: event_redis
@@ -46,21 +46,21 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── MinIO ────────────────────────────────────────────────
-  # S3 API  → http://localhost:9000
-  # Console → http://localhost:9001  (user: minioadmin / minioadmin)
+  # -- MinIO --
+  # S3 API  -> http://localhost:9000
+  # Console -> http://localhost:9001  (user: minioadmin / minioadmin)
   minio:
     image: minio/minio:latest
     container_name: event_minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER:     minioadmin
+      MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"   # S3 API  — presigned PUTs land here from browser
-      - "9001:9001"   # Web console
+      - "9000:9000"
+      - "9001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 15s
@@ -68,7 +68,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Backend ──────────────────────────────────────────────
+  # -- Backend --
   backend:
     build:
       context: .
@@ -99,13 +99,13 @@ services:
       - DB_PASSWORD=admin123
       - DB_NAME=event_ai
       # Allow requests from nginx (port 80), direct frontend (3000), and
-      # direct backend access (8000) — all used during local development.
+      # direct backend access (8000) - all used during local development.
       # On GHA nginx is port 80 (localhost), locally port 8080 (127.0.0.1:8080)
       - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://localhost:3000,http://localhost:8000,http://127.0.0.1:8080,http://127.0.0.1:3000,http://127.0.0.1:8000
       - ENV=${ENV:-dev}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
-      # ── Email Configuration ───────────────────────────────
+      # -- Email Configuration --
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-smtp}
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -113,7 +113,16 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
-      # ── OTP Configuration ─────────────────────────────────
+      # SendGrid
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - SENDGRID_FROM_EMAIL=${SENDGRID_FROM_EMAIL:-}
+      # Brevo
+      - BREVO_API_KEY=${BREVO_API_KEY:-}
+      - BREVO_FROM_EMAIL=${BREVO_FROM_EMAIL:-}
+      # Resend
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-}
+      # -- OTP Configuration --
       - DEV_COMMON_OTP=${DEV_COMMON_OTP:-123456}
       - OTP_EXPIRY_MINUTES=${OTP_EXPIRY_MINUTES:-10}
       - OTP_LENGTH=${OTP_LENGTH:-6}
@@ -123,33 +132,33 @@ services:
       - PLACES365_MODEL_PATH=${PLACES365_MODEL_PATH:-/app/models/resnet50_places365.pth.tar}
       - YOLO_MODEL_PATH=${YOLO_MODEL_PATH:-yolov8n.pt}
       - DEFAULT_EVENT_PIN=${DEFAULT_EVENT_PIN:-0000}
-      # ── Storage ──
+      # -- Storage --
       - STORAGE_BACKEND=minio
-      - MINIO_ENDPOINT=http://minio:9000          # internal Docker host
+      - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
-      - MINIO_PUBLIC_URL=/storage                 # nginx proxies /storage → minio
-      # ★ Presign endpoint = what the BROWSER sends PUT requests to.
-      #   Locally:        http://localhost:9000  (MinIO port mapped to host)
-      #   GitHub Actions: Cloudflare tunnel URL injected by preview.yml
+      - MINIO_PUBLIC_URL=/storage
+      # Presign endpoint = what the BROWSER sends PUT requests to.
+      # Locally: http://localhost:9000 (MinIO port mapped to host)
+      # GitHub Actions: Cloudflare tunnel URL injected by preview.yml
       - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-http://localhost:9000}
-      # ── Payments ──
+      # -- Payments --
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
     restart: unless-stopped
 
-  # ── Photo Worker ─────────────────────────────────────────
+  # -- Photo Worker --
   # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
   #
-  # --concurrency=2   → 1 worker per real CPU core. More workers = thrashing
-  #                     on a 2-core machine. Each InsightFace worker needs
-  #                     ~500MB RAM, so 2 workers = ~1GB — safe given constraints.
-  # --prefetch-multiplier=1 → don't pre-fetch; avoids holding tasks in memory
-  #                     when RAM is tight.
-  # OMP_NUM_THREADS=2 → each worker gets both logical cores for ONNX math.
-  #                     2 workers × 2 threads = 4 (all logical processors used).
+  # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
+  #                    on a 2-core machine. Each InsightFace worker needs
+  #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
+  # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
+  #                    when RAM is tight.
+  # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
+  #                    2 workers x 2 threads = 4 (all logical processors used).
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
@@ -184,7 +193,7 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
-      # 2 workers × 2 threads = 4 logical processors fully used, no over-subscription
+      # 2 workers x 2 threads = 4 logical processors fully used, no over-subscription
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
@@ -192,9 +201,9 @@ services:
     mem_limit: 3g
     restart: unless-stopped
 
-  # ── Finalizer Worker ─────────────────────────────────────
+  # -- Finalizer Worker --
   # Builds FAISS index from processed face embeddings.
-  # solo pool (single process) is correct here — FAISS index build is
+  # solo pool (single process) is correct here - FAISS index build is
   # single-threaded by design. OMP threads let it use all cores for the
   # actual vector math during index construction.
   celery_finalize:
@@ -234,10 +243,9 @@ services:
       - OPENBLAS_NUM_THREADS=4
       - MKL_NUM_THREADS=4
     mem_limit: 2g
-    #restart: unless-stopped
-    restart: "no" 
+    restart: "no"
 
-  # ── AI Enrichment Worker ─────────────────────────────────
+  # -- AI Enrichment Worker --
   # Runs YOLO + Places365. Solo pool is correct (models loaded once in memory).
   celery_ai:
     image: snapfind-backend:latest
@@ -272,14 +280,14 @@ services:
       - MINIO_PUBLIC_URL=/storage
       - PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
       - YOLO_MODEL_PATH=yolov8n.pt
-      # YOLO and Places365 are both single-process — give them full CPU
+      # YOLO and Places365 are both single-process - give them full CPU
       - OMP_NUM_THREADS=4
       - OPENBLAS_NUM_THREADS=4
       - MKL_NUM_THREADS=4
     mem_limit: 2g
     restart: unless-stopped
 
-  # ── Default Worker ────────────────────────────────────────
+  # -- Default Worker --
   celery_default:
     image: snapfind-backend:latest
     container_name: event_celery_default
@@ -310,7 +318,7 @@ services:
       - MINIO_PUBLIC_URL=/storage
     restart: unless-stopped
 
-  # ── Beat Scheduler ────────────────────────────────────────
+  # -- Beat Scheduler --
   celery_beat:
     image: snapfind-backend:latest
     container_name: event_celery_beat
@@ -325,7 +333,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
     restart: unless-stopped
 
-  # Frontend
+  # -- Frontend --
   # NEXT_PUBLIC_* vars are BAKED INTO the JS bundle at build time via args.
   # They must be absolute URLs the browser can reach, not Docker-internal names.
   #
@@ -340,8 +348,8 @@ services:
       dockerfile: Dockerfile
       args:
         # NEXT_PUBLIC_APP_URL controls what gets baked into the JS bundle.
-        # LOCAL:  set to http://127.0.0.1:8080 in .env  → absolute URL
-        # GHA:    set to empty string in .env            → /api (relative)
+        # LOCAL: set to http://127.0.0.1:8080 in .env -> absolute URL
+        # GHA: set to empty string in .env -> /api (relative)
         # The conditional is handled in the shell: if the var is set and
         # non-empty, append /api; otherwise use bare /api with no host.
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-/api}
@@ -358,13 +366,13 @@ services:
       - NEXT_PUBLIC_STORAGE_URL=${NEXT_PUBLIC_STORAGE_URL:-/storage}
       - NEXT_PUBLIC_STORAGE_BACKEND=minio
 
-  # Nginx reverse proxy
+  # -- Nginx reverse proxy --
   # Routes: /  -> frontend:3000
   #         /api/ -> backend:8000
   #         /storage/ -> minio:9000/snapfind/
   #         /minio-upload/ -> minio:9000/
-  # LOCAL:  NGINX_PORT=8080 in .env  -> http://127.0.0.1:8080
-  # GHA:    NGINX_PORT unset         -> port 80 -> http://localhost
+  # LOCAL: NGINX_PORT=8080 in .env -> http://127.0.0.1:8080
+  # GHA: NGINX_PORT unset -> port 80 -> http://localhost
   nginx:
     image: nginx:alpine
     container_name: event_proxy

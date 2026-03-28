@@ -21,6 +21,7 @@ import {
   MessageSquare,
   HelpCircle,
   Mail,
+  Settings,
 } from "lucide-react";
 
 const NAV = [
@@ -34,6 +35,7 @@ const NAV = [
   { href: "/admin/activity-logs",label: "Activity Logs", icon: Activity        },
   { href: "/admin/plans",        label: "Plans",         icon: CreditCard      },
   { href: "/admin/pricing",      label: "Pricing",       icon: IndianRupee     },
+  { href: "/admin/email-settings",label: "Email Settings",icon: Settings       },
   { href: "/admin/tools",        label: "Tools",         icon: Trash2          },
 ];
 

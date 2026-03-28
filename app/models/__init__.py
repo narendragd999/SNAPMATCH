@@ -12,3 +12,4 @@ from .testimonial import Testimonial
 from .faq import FAQ
 from .newsletter import NewsletterSubscriber
 from .otp import OTPVerification
+from .email_provider_config import EmailProviderConfig

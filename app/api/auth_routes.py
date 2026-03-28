@@ -2,10 +2,17 @@
 Authentication Routes with OTP Email Verification
 
 Supports:
-- Traditional email/password registration with OTP verification
-- Login with optional OTP verification
-- Password reset with OTP
+- Traditional email/password registration with OTP verification (REQUIRED)
+- Login with optional OTP verification (skip for trusted devices)
+- Password reset with OTP (REQUIRED)
+- Trusted device management for better UX
 - Development mode with common OTP for testing
+
+Recommended Flow:
+- Registration: OTP required (verify email ownership)
+- Login (trusted device): Direct login, no OTP
+- Login (new device): OTP required
+- Password Reset: OTP required (security critical)
 """
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from sqlalchemy.orm import Session
@@ -15,7 +22,8 @@ from app.models.otp import OTPVerification
 from app.schemas.auth_schema import RegisterRequest, LoginRequest, TokenResponse
 from app.schemas.otp_schema import (
     SendOTPRequest, VerifyOTPRequest, RegisterWithOTPRequest,
-    LoginWithOTPRequest, OTPResponse, OTPVerificationResponse
+    LoginWithOTPRequest, OTPResponse, OTPVerificationResponse,
+    OTPConfigResponse, LoginRequest as OTPLoginRequest
 )
 from app.core.security import (
     hash_password,
@@ -38,6 +46,108 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_device_fingerprint(request: Request) -> str:
+    """Generate device fingerprint from request."""
+    import hashlib
+    user_agent = request.headers.get("user-agent", "")
+    accept_language = request.headers.get("accept-language", "")
+    ip = request.client.host if request.client else ""
+    
+    # Create fingerprint from browser characteristics
+    data = f"{user_agent}:{accept_language}:{ip[:10]}"  # Use IP prefix for privacy
+    return hashlib.sha256(data.encode()).hexdigest()[:32]
+
+
+def is_trusted_device(db: Session, user_id: int, fingerprint: str) -> bool:
+    """Check if device is in user's trusted devices list."""
+    try:
+        from app.models.trusted_device import TrustedDevice
+        from datetime import datetime
+        
+        device = db.query(TrustedDevice).filter(
+            TrustedDevice.user_id == user_id,
+            TrustedDevice.device_fingerprint == fingerprint,
+            TrustedDevice.is_active == True
+        ).first()
+        
+        if not device:
+            return False
+        
+        # Check expiration
+        if device.expires_at and device.expires_at < datetime.utcnow():
+            return False
+        
+        # Update last used
+        device.last_used_at = datetime.utcnow()
+        db.commit()
+        
+        return True
+    except Exception as e:
+        logger.warning(f"Could not check trusted device: {e}")
+        return False
+
+
+def trust_device(db: Session, user_id: int, fingerprint: str, request: Request, expires_days: int = 30):
+    """Add device to trusted list."""
+    try:
+        from app.models.trusted_device import TrustedDevice
+        from datetime import datetime, timedelta
+        
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Parse device name from user agent
+        device_name = "Unknown Device"
+        if "Chrome" in user_agent and "Windows" in user_agent:
+            device_name = "Chrome on Windows"
+        elif "Chrome" in user_agent and "Mac" in user_agent:
+            device_name = "Chrome on Mac"
+        elif "Safari" in user_agent and "iPhone" in user_agent:
+            device_name = "Safari on iPhone"
+        elif "Safari" in user_agent and "Mac" in user_agent:
+            device_name = "Safari on Mac"
+        elif "Firefox" in user_agent:
+            device_name = "Firefox"
+        elif "Edge" in user_agent:
+            device_name = "Microsoft Edge"
+        
+        # Check if already exists
+        existing = db.query(TrustedDevice).filter(
+            TrustedDevice.user_id == user_id,
+            TrustedDevice.device_fingerprint == fingerprint
+        ).first()
+        
+        if existing:
+            existing.is_active = True
+            existing.trusted_at = datetime.utcnow()
+            existing.expires_at = datetime.utcnow() + timedelta(days=expires_days)
+            existing.last_used_at = datetime.utcnow()
+            existing.device_name = device_name
+            db.commit()
+            return existing
+        
+        # Create new
+        device = TrustedDevice(
+            user_id=user_id,
+            device_fingerprint=fingerprint,
+            device_name=device_name,
+            user_agent=user_agent[:500],
+            ip_address=request.client.host if request.client else None,
+            expires_at=datetime.utcnow() + timedelta(days=expires_days)
+        )
+        
+        db.add(device)
+        db.commit()
+        return device
+        
+    except Exception as e:
+        logger.warning(f"Could not trust device: {e}")
+        return None
 
 
 # ---------------- SEND OTP ----------------
@@ -102,10 +212,21 @@ def verify_otp_endpoint(
     Verify OTP code.
 
     Returns success/failure status with remaining attempts if failed.
+    If trust_device=True and purpose=login, adds device to trusted list.
     """
     is_valid, message = verify_otp(db, data.email, data.otp_code, data.purpose.value)
 
+    device_trusted = False
+    
     if is_valid:
+        # If trust_device requested for login, add to trusted devices
+        if data.trust_device and data.purpose.value == "login":
+            user = db.query(User).filter(User.email == data.email).first()
+            if user:
+                fingerprint = get_device_fingerprint(request)
+                trust_device(db, user.id, fingerprint, request)
+                device_trusted = True
+        
         log_activity(
             db=db,
             activity_type="otp_verified",
@@ -121,7 +242,8 @@ def verify_otp_endpoint(
     return OTPVerificationResponse(
         success=is_valid,
         message=message,
-        verified=is_valid
+        verified=is_valid,
+        device_trusted=device_trusted
     )
 
 
@@ -339,29 +461,58 @@ def login_with_otp(
     If OTP is provided, verifies OTP before allowing login.
     This adds an extra layer of security for sensitive operations.
     """
+    import os
+    is_dev = os.getenv("ENV", "dev") == "dev"
+    
     user = db.query(User).filter(User.email == data.email).first()
 
-    if not user or not verify_password(data.password, user.password_hash):
+    if not user:
+        # In development mode, provide helpful error message
+        error_detail = "User not found. Please register first." if is_dev else "Invalid email or password"
         log_activity(
             db=db,
             activity_type="login_failed",
-            action="invalid_credentials",
-            user_id=user.id if user else None,
-            description=f"Failed login attempt for email: {data.email}",
+            action="user_not_found",
+            user_id=None,
+            description=f"Login attempt for non-existent email: {data.email}",
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             request_path="/auth/login-with-otp",
             request_method="POST",
             status="failed",
-            error_message="Invalid email or password"
+            error_message="User not found"
         )
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401, detail=error_detail)
 
-    # If OTP is provided, verify it
+    if not verify_password(data.password, user.password_hash):
+        # In development mode, provide helpful error message
+        error_detail = "Incorrect password. Please try again." if is_dev else "Invalid email or password"
+        log_activity(
+            db=db,
+            activity_type="login_failed",
+            action="invalid_password",
+            user_id=user.id,
+            description=f"Failed login attempt (wrong password) for email: {data.email}",
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            request_path="/auth/login-with-otp",
+            request_method="POST",
+            status="failed",
+            error_message="Invalid password"
+        )
+        raise HTTPException(status_code=401, detail=error_detail)
+
+    # If OTP is provided, check if already verified or verify now
     if data.otp_code:
-        is_valid, message = verify_otp(db, data.email, data.otp_code, "login")
-        if not is_valid:
-            raise HTTPException(status_code=401, detail=message)
+        # Check if OTP was already verified (frontend calls verify-otp first)
+        if is_otp_verified(db, data.email, "login"):
+            # OTP was already verified by frontend call to /auth/verify-otp
+            pass
+        else:
+            # Try to verify the OTP now
+            is_valid, message = verify_otp(db, data.email, data.otp_code, "login")
+            if not is_valid:
+                raise HTTPException(status_code=401, detail=message)
 
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
@@ -557,17 +708,185 @@ def reset_password(
 # Check OTP Configuration (for frontend)
 # ---------------------------------------
 @router.get("/otp-config")
-def get_otp_configuration():
+def get_otp_configuration(
+    request: Request,
+    email: str = None,
+    db: Session = Depends(get_db)
+):
     """
     Get OTP configuration status.
 
-    Returns whether OTP is required and if development mode is active.
+    Returns whether OTP is required and if current device is trusted.
     Frontend can use this to determine which auth flow to use.
     """
-    config = get_otp_config()
+    config = get_otp_config(db)
+    
+    # Check if device is trusted (if email provided)
+    trusted_device = False
+    if email:
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            fingerprint = get_device_fingerprint(request)
+            trusted_device = is_trusted_device(db, user.id, fingerprint)
+    
     return {
         "otp_required": not config.is_development_mode,
         "dev_mode": config.is_development_mode,
         "otp_length": config.otp_length,
-        "otp_expiry_minutes": config.expiry_minutes
+        "otp_expiry_minutes": config.expiry_minutes,
+        "trusted_device": trusted_device,
+        "otp_needed_for_login": not config.is_development_mode and not trusted_device
     }
+
+
+# ---------------------------------------
+# Simple Login (for trusted devices)
+# ---------------------------------------
+@router.post("/login", response_model=TokenResponse)
+def simple_login(
+    data: OTPLoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db)
+):
+    """
+    Simple login without OTP for trusted devices.
+    
+    If device is not trusted, returns 403 with otp_required=True.
+    Frontend should then use /auth/send-otp + /auth/login-with-otp flow.
+    """
+    import os
+    is_dev = os.getenv("ENV", "dev") == "dev"
+    
+    user = db.query(User).filter(User.email == data.email).first()
+
+    if not user:
+        error_detail = "User not found. Please register first." if is_dev else "Invalid email or password"
+        raise HTTPException(status_code=401, detail=error_detail)
+
+    if not verify_password(data.password, user.password_hash):
+        error_detail = "Incorrect password. Please try again." if is_dev else "Invalid email or password"
+        raise HTTPException(status_code=401, detail=error_detail)
+    
+    # Check if device is trusted
+    fingerprint = data.device_fingerprint or get_device_fingerprint(request)
+    otp_config = get_otp_config(db)
+    
+    # If OTP is configured (not dev mode) and device is not trusted, require OTP
+    if not otp_config.is_development_mode and not is_trusted_device(db, user.id, fingerprint):
+        raise HTTPException(
+            status_code=403, 
+            detail={
+                "message": "OTP required for this device",
+                "otp_required": True,
+                "trusted_device": False
+            }
+        )
+
+    # Generate tokens
+    access_token = create_access_token(user.id)
+    refresh_token = create_refresh_token(user.id)
+
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax"
+    )
+
+    log_activity(
+        db=db,
+        activity_type="login",
+        action="user_logged_in_trusted_device",
+        user_id=user.id,
+        description=f"User logged in from trusted device: {user.email}",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        request_path="/auth/login",
+        request_method="POST",
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "plan_type": user.plan_type,
+            "role": user.role,
+            "email_verified": user.email_verified
+        },
+        "trusted_device": True
+    }
+
+
+# ---------------------------------------
+# Trusted Device Management
+# ---------------------------------------
+@router.get("/trusted-devices")
+def get_trusted_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of trusted devices for current user."""
+    from app.models.trusted_device import TrustedDevice
+    from datetime import datetime
+    
+    devices = db.query(TrustedDevice).filter(
+        TrustedDevice.user_id == current_user.id,
+        TrustedDevice.is_active == True
+    ).order_by(TrustedDevice.trusted_at.desc()).all()
+    
+    return {
+        "devices": [
+            {
+                "id": d.id,
+                "device_name": d.device_name,
+                "trusted_at": d.trusted_at.isoformat() if d.trusted_at else None,
+                "last_used_at": d.last_used_at.isoformat() if d.last_used_at else None,
+                "expires_at": d.expires_at.isoformat() if d.expires_at else None,
+                "is_current": False  # Frontend can determine this
+            }
+            for d in devices
+        ]
+    }
+
+
+@router.delete("/trusted-devices/{device_id}")
+def remove_trusted_device(
+    device_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove a trusted device."""
+    from app.models.trusted_device import TrustedDevice
+    
+    device = db.query(TrustedDevice).filter(
+        TrustedDevice.id == device_id,
+        TrustedDevice.user_id == current_user.id
+    ).first()
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    db.delete(device)
+    db.commit()
+    
+    return {"success": True, "message": "Device removed from trusted list"}
+
+
+@router.delete("/trusted-devices")
+def remove_all_trusted_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove all trusted devices for current user."""
+    from app.models.trusted_device import TrustedDevice
+    
+    db.query(TrustedDevice).filter(
+        TrustedDevice.user_id == current_user.id
+    ).delete()
+    db.commit()
+    
+    return {"success": True, "message": "All trusted devices removed"}
