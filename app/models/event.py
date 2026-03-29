@@ -48,6 +48,12 @@ class Event(Base):
         passive_deletes=True,
         back_populates="event",
     )
+    guests = relationship(
+        "Guest",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        back_populates="event"
+    )
 
     name                    = Column(String,   nullable=False)
     slug                    = Column(String,   unique=True, index=True)
@@ -136,6 +142,24 @@ class Event(Base):
     slideshow_show_qr       = Column(Boolean,     default=True,       nullable=False)
     slideshow_show_branding = Column(Boolean,     default=True,       nullable=False)
     slideshow_music_url     = Column(Text,        nullable=True)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 📧  EMAIL NOTIFICATION PREFERENCES (NEW)
+    #
+    # Control which automatic notifications are sent for this event.
+    #   notify_on_guest_upload       → Email photographer when guests upload
+    #   notify_on_expiry_warning     → Email warning before event expires
+    #   expiry_warning_days         → How many days before expiry to warn
+    #   notify_on_processing_complete → Email when photo processing done
+    # ═══════════════════════════════════════════════════════════════
+    notify_on_guest_upload       = Column(Boolean, default=True, nullable=False)
+    notify_on_expiry_warning     = Column(Boolean, default=True, nullable=False)
+    expiry_warning_days          = Column(Integer, default=7, nullable=False)
+    notify_on_processing_complete = Column(Boolean, default=True, nullable=False)
+    
+    # Tracking for notification history
+    last_notification_at         = Column(DateTime, nullable=True)
+    notifications_sent_count     = Column(Integer, default=0, nullable=False)
 
     # ───────────────────────────────────────────────────────────────
     # Watermark helpers (unchanged)
@@ -246,6 +270,35 @@ class Event(Base):
 
         music_url = config.get("music_url", "")
         self.slideshow_music_url = music_url if isinstance(music_url, str) else None
+
+    # ───────────────────────────────────────────────────────────────
+    # 📧  Notification helpers (NEW)
+    # ───────────────────────────────────────────────────────────────
+    def get_notification_config(self) -> dict:
+        """Return notification preference fields as a dict."""
+        return {
+            "notify_on_guest_upload": bool(self.notify_on_guest_upload),
+            "notify_on_expiry_warning": bool(self.notify_on_expiry_warning),
+            "expiry_warning_days": self.expiry_warning_days or 7,
+            "notify_on_processing_complete": bool(self.notify_on_processing_complete),
+        }
+
+    def set_notification_config(self, config: dict) -> None:
+        """Apply notification preferences from a dict."""
+        if "notify_on_guest_upload" in config:
+            self.notify_on_guest_upload = bool(config["notify_on_guest_upload"])
+        if "notify_on_expiry_warning" in config:
+            self.notify_on_expiry_warning = bool(config["notify_on_expiry_warning"])
+        if "expiry_warning_days" in config:
+            days = config["expiry_warning_days"]
+            self.expiry_warning_days = days if 1 <= days <= 30 else 7
+        if "notify_on_processing_complete" in config:
+            self.notify_on_processing_complete = bool(config["notify_on_processing_complete"])
+
+    def record_notification_sent(self) -> None:
+        """Record that a notification was sent (for tracking)."""
+        self.last_notification_at = datetime.utcnow()
+        self.notifications_sent_count = (self.notifications_sent_count or 0) + 1
 
     # ───────────────────────────────────────────────────────────────
     # PIN helpers (unchanged)

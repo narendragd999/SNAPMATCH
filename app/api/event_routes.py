@@ -246,6 +246,18 @@ def get_event(
         Photo.approval_status == "pending",
     ).count()
 
+    # Guest management stats (graceful - returns 0 if table doesn't exist or no guests)
+    try:
+        from app.models.guest import Guest
+        guest_count = db.query(func.count(Guest.id)).filter(Guest.event_id == event_id).scalar() or 0
+        pending_notifications = db.query(func.count(Guest.id)).filter(
+            Guest.event_id == event_id,
+            Guest.email_sent == False
+        ).scalar() or 0
+    except:
+        guest_count = 0
+        pending_notifications = 0
+
     return {
         "id":                   event.id,
         "name":                 event.name,
@@ -286,6 +298,10 @@ def get_event(
         "brand_font":            event.brand_font or "system",
         "brand_footer_text":     event.brand_footer_text or "",
         "brand_show_powered_by": bool(event.brand_show_powered_by),
+        # 👥 Guest management
+        "guest_count":          guest_count,
+        "pending_notifications": pending_notifications,
+        "has_guests":           guest_count > 0,
     }
 
 

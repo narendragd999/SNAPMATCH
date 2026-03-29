@@ -3,6 +3,7 @@ from .event import Event
 from .cluster import Cluster
 from .photo import Photo
 from .guest_upload import GuestUpload
+from .guest import Guest
 from .event_order import EventOrder
 from .pricing_config import PricingConfig
 from .co_occurrence import CoOccurrence

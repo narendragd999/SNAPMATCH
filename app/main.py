@@ -35,6 +35,7 @@ from app.models.user_activity_log import UserActivityLog  # noqa: F401
 from app.models.email_provider_config import EmailProviderConfig  # noqa: F401
 from app.models.otp import OTPVerification  # noqa: F401
 from app.models.trusted_device import TrustedDevice  # noqa: F401
+from app.models.guest import Guest  # noqa: F401
 
 # ── Router imports ────────────────────────────────────────────────────────────
 from app.api.auth_routes        import router as auth_router
@@ -55,6 +56,8 @@ from app.api.admin_cms_routes   import router as admin_cms_router
 from app.api.admin_email_routes import router as admin_email_router
 from app.api.slideshow_routes   import router as slideshow_router
 from app.api.ws_routes          import router as ws_router
+from app.api.notification_routes import router as notification_router
+from app.api.guest_routes       import router as guest_router
 
 # ── Storage service ───────────────────────────────────────────────────────────
 from app.services import storage_service
@@ -149,6 +152,8 @@ app.include_router(admin_cms_router)
 app.include_router(admin_email_router)
 app.include_router(slideshow_router)
 app.include_router(ws_router)
+app.include_router(notification_router)
+app.include_router(guest_router)
 
 
 @app.get("/health")

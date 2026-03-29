@@ -22,6 +22,7 @@ import { WatermarkConfig, DEFAULT_WATERMARK_CONFIG } from "@/lib/snapmatch/water
 import EventQuotaBar from "@/components/EventQuotaBar";
 import { BrandingSettings, BrandingConfig } from '@/components/snapmatch/BrandingSettings';
 import { SlideshowSettings } from '@/components/snapmatch/SlideshowSettings';
+import { GuestManagement } from '@/components/GuestManagement';
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ interface SceneItem {
   count: number;
 }
 
-type ViewMode = 'overview' | 'clusters' | 'search' | 'guest_uploads' | 'branding' | 'slideshow';
+type ViewMode = 'overview' | 'clusters' | 'search' | 'guest_uploads' | 'branding' | 'slideshow' | 'guests';
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 //
@@ -1918,6 +1919,8 @@ export default function OwnerEventDetailPage() {
               { id: "search",        label: "Face Search",   icon: <Search      size={13} />, guard: !isCompleted },
               { id: "guest_uploads", label: "Guest Uploads", icon: <CloudUpload size={13} />,
                 badge: guestUploads?.total_pending ?? (event as any)?.pending_guest_uploads ?? 0 },
+              { id: "guests",        label: "Guests",        icon: <Users       size={13} />,
+                badge: (event as any)?.pending_notifications ?? 0 },
               { id: "slideshow",     label: "Slideshow",     icon: <Monitor     size={13} /> },
               { id: "branding",      label: "Branding",      icon: <Droplet     size={13} /> },
             ] as { id: ViewMode; label: string; icon: React.ReactNode; guard?: boolean; badge?: number }[]).map(t => (
@@ -1957,7 +1960,7 @@ export default function OwnerEventDetailPage() {
                 exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
 
                 {/* Stat cards */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
                   {[
                     { l: "Photos",   v: (event.image_count   ?? 0).toLocaleString(), icon: <ImageIcon size={16} />, c: "blue"    },
                     { l: "Faces",    v: (event.total_faces    ?? 0).toLocaleString(), icon: <Users     size={16} />, c: "violet"  },
@@ -1965,14 +1968,17 @@ export default function OwnerEventDetailPage() {
                     { l: "Progress", v: `${Math.min(Math.max(event.processing_progress, 0), 100)}%`, icon: <BarChart2 size={16} />, c: "emerald" },
                     {
                       l: "Guests",
+                      v: (event as any).guest_count ?? 0,
+                      icon: <Users size={16} />,
+                      c: "cyan",
+                    },
+                    {
+                      l: "Uploads",
                       v: event.guest_quota != null && event.guest_quota > 0
                         ? `${Math.max(0, (event.guest_quota ?? 0) - (event.guest_uploads_used ?? 0))} left`
                         : "N/A",
                       icon: <UserCheck size={16} />,
                       c: "amber",
-                      sublabel: event.guest_upload_enabled
-                        ? (event.guest_quota ? "Enabled" : "No quota")
-                        : "Disabled",
                     },                   
                   ].map(s => (
                     <div key={s.l} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
@@ -1980,6 +1986,8 @@ export default function OwnerEventDetailPage() {
                         s.c === "blue"   ? "bg-blue-500/10 text-blue-400"     :
                         s.c === "violet" ? "bg-violet-500/10 text-violet-400" :
                         s.c === "indigo" ? "bg-indigo-500/10 text-indigo-400" :
+                        s.c === "cyan"   ? "bg-cyan-500/10 text-cyan-400"     :
+                        s.c === "amber"  ? "bg-amber-500/10 text-amber-400"   :
                                            "bg-emerald-500/10 text-emerald-400"
                       }`}>{s.icon}</div>
                       <p className="text-2xl font-bold tracking-tight">{s.v}</p>
@@ -2520,6 +2528,27 @@ export default function OwnerEventDetailPage() {
                     authToken={localStorage.getItem("token") ?? ""}
                   />
                 </div>
+              </motion.div>
+            )}
+
+            {/* ──────────── Guest Management ──────────── */}
+            {view === "guests" && (
+              <motion.div key="guests" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                className="max-w-5xl mx-auto px-5 py-8">
+                <div className="mb-6">
+                  <h2 className="text-lg font-semibold">Guest Management</h2>
+                  <p className="text-sm text-zinc-500 mt-1">
+                    Add guests and send notifications when photos are ready
+                  </p>
+                </div>
+                <GuestManagement
+                  eventId={eventId}
+                  eventName={event.name}
+                  publicToken={event.public_token}
+                  apiUrl={API}
+                  authToken={localStorage.getItem("token") ?? ""}
+                  imageCount={event.image_count ?? 0}
+                />
               </motion.div>
             )}
 
