@@ -860,7 +860,13 @@ export default function HomePage() {
         if (res.ok) {
           const data = await res.json();
           if (data && data.length > 0) {
-            setFaqs(data);
+            // Map API response (question, answer) to frontend interface (q, a)
+            const mappedFaqs = data.map((faq: any) => ({
+              q: faq.question,
+              a: faq.answer,
+              category: faq.category,
+            }));
+            setFaqs(mappedFaqs);
           }
         }
       } catch (e) {

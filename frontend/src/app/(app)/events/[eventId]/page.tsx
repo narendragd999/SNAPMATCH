@@ -12,7 +12,7 @@ import {
   ChevronDown, Loader2, AlertTriangle,
   CloudUpload, CheckCircle2, XCircle, ThumbsUp, ThumbsDown,
   RefreshCw, ImagePlus, Pause, RotateCcw, Zap,
-  FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound, UserCheck, FolderOpen
+  FileImage, QrCode, Droplet, Lock, LockOpen, KeyRound, UserCheck, FolderOpen, Monitor
 } from "lucide-react";
 import { APP_CONFIG } from "@/config/app";
 import PeopleGallery from "@/components/PeopleGallery";
@@ -21,6 +21,7 @@ import { WatermarkSettings } from "@/components/snapmatch/WatermarkSettings";
 import { WatermarkConfig, DEFAULT_WATERMARK_CONFIG } from "@/lib/snapmatch/watermark";
 import EventQuotaBar from "@/components/EventQuotaBar";
 import { BrandingSettings, BrandingConfig } from '@/components/snapmatch/BrandingSettings';
+import { SlideshowSettings } from '@/components/snapmatch/SlideshowSettings';
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ interface SceneItem {
   count: number;
 }
 
-type ViewMode = 'overview' | 'clusters' | 'search' | 'guest_uploads' | 'branding';
+type ViewMode = 'overview' | 'clusters' | 'search' | 'guest_uploads' | 'branding' | 'slideshow';
 
 // ─── Bulk Upload Types ────────────────────────────────────────────────────────
 //
@@ -1917,7 +1918,8 @@ export default function OwnerEventDetailPage() {
               { id: "search",        label: "Face Search",   icon: <Search      size={13} />, guard: !isCompleted },
               { id: "guest_uploads", label: "Guest Uploads", icon: <CloudUpload size={13} />,
                 badge: guestUploads?.total_pending ?? (event as any)?.pending_guest_uploads ?? 0 },
-              { id: "branding", label: "Branding", icon: <Droplet size={13} /> },
+              { id: "slideshow",     label: "Slideshow",     icon: <Monitor     size={13} /> },
+              { id: "branding",      label: "Branding",      icon: <Droplet     size={13} /> },
             ] as { id: ViewMode; label: string; icon: React.ReactNode; guard?: boolean; badge?: number }[]).map(t => (
               <button key={t.id}
                 onClick={() => !t.guard && setView(t.id)}
@@ -2502,6 +2504,22 @@ export default function OwnerEventDetailPage() {
                   className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors">
                   Open Branding Editor
                 </button>
+              </motion.div>
+            )}
+
+            {/* ──────────── Slideshow Settings ──────────── */}
+            {view === "slideshow" && (
+              <motion.div key="slideshow" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                className="max-w-2xl mx-auto px-5 py-10">
+                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+                  <SlideshowSettings
+                    eventId={event.id}
+                    eventName={event.name}
+                    publicToken={event.public_token}
+                    apiUrl={API}
+                    authToken={localStorage.getItem("token") ?? ""}
+                  />
+                </div>
               </motion.div>
             )}
 

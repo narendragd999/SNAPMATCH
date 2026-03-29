@@ -53,6 +53,8 @@ from app.api.analytics_routes   import router as analytics_router
 from app.api.cms_routes         import router as cms_router
 from app.api.admin_cms_routes   import router as admin_cms_router
 from app.api.admin_email_routes import router as admin_email_router
+from app.api.slideshow_routes   import router as slideshow_router
+from app.api.ws_routes          import router as ws_router
 
 # ── Storage service ───────────────────────────────────────────────────────────
 from app.services import storage_service
@@ -145,6 +147,8 @@ app.include_router(analytics_router)
 app.include_router(cms_router)
 app.include_router(admin_cms_router)
 app.include_router(admin_email_router)
+app.include_router(slideshow_router)
+app.include_router(ws_router)
 
 
 @app.get("/health")

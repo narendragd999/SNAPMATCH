@@ -1,0 +1,455 @@
+You're right, let me do a more thorough and complete exploration of the repository. I'll clone it and examine every file in detail.
+Let me read all the key files to get a complete understanding of the codebase:
+Let me read more key files to complete the understanding:
+Now I have a complete and thorough understanding of the SNAPMATCH repository. Let me provide you with a comprehensive analysis:
+
+---
+
+# 📸 SNAPMATCH (SnapFind AI) - Complete Codebase & Architecture Analysis
+
+## 🎯 Project Overview
+
+**SNAPMATCH** is a full-stack **AI-powered event photo delivery SaaS platform** that enables:
+- Event photographers/organizers to **upload and process event photos** using AI
+- **Face recognition and clustering** using InsightFace + FAISS
+- **Guest selfie search** - guests upload a selfie to find all photos they appear in
+- **Guest photo contributions** with owner approval workflow
+- **Tiered pricing and monetization** via Razorpay integration
+
+---
+
+## 🏗️ Complete Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           FRONTEND (Next.js 16)                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  App Router Pages                                                     │  │
+│  │  ├── (app)/dashboard/          → Owner dashboard                      │  │
+│  │  ├── (app)/events/             → Event management                     │  │
+│  │  ├── (app)/events/create/      → Create event wizard                  │  │
+│  │  ├── (app)/events/[eventId]/   → Event detail/settings                │  │
+│  │  ├── admin/ (12 pages)         → Admin panel                          │  │
+│  │  ├── public/[token]/           → Public selfie search page            │  │
+│  │  ├── login/                    → Authentication                       │  │
+│  │  └── pricing/                  → Public pricing page                  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Key Components:                                                            │
+│  • PhotoPreview, WatermarkSettings, BrandingSettings                       │
+│  • CameraEnhancements, MultiSelect, PersistenceUI                          │
+│  • QRCodeDisplay, EventQuotaBar, PeopleGallery                             │
+│                                                                             │
+│  State: React Query + AuthContext + Custom Hooks                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         NGINX REVERSE PROXY                                  │
+│  Routes: / → frontend:3000, /api/ → backend:8000, /storage/ → minio:9000   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        ▼                           ▼                           ▼
+┌───────────────────┐    ┌───────────────────┐    ┌───────────────────┐
+│   FASTAPI         │    │   CELERY WORKERS  │    │   MINIO/R2        │
+│   BACKEND         │    │                   │    │   (S3 Storage)    │
+│                   │    │  4 Workers:       │    │                   │
+│  15 Route Files:  │    │  • photo_proc (4) │    │  • Event photos   │
+│  • auth_routes    │    │  • event_finalize │    │  • Thumbnails     │
+│  • event_routes   │    │  • ai_enrichment  │    │  • Guest previews │
+│  • public_routes  │    │  • default        │    │  • Covers         │
+│  • billing_routes │    │  • beat (sched)   │    │  • Branding logos │
+│  • upload_routes  │    │                   │    │                   │
+│  • admin_routes   │    │  AI/ML Models:    │    │                   │
+│  • etc...         │    │  • InsightFace    │    │                   │
+│                   │    │  • YOLOv8         │    │                   │
+│  13 Services:     │    │  • Places365      │    │                   │
+│  • face_service   │    │  • FAISS          │    │                   │
+│  • search_service │    │                   │    │                   │
+│  • storage_svc    │    └─────────┬─────────┘    └───────────────────┘
+│  • clustering_svc │              │
+│  • email_service  │              │
+│  • otp_service    │              │
+└────────┬──────────┘              │
+         │                         │
+         ▼                         ▼
+┌───────────────────┐    ┌───────────────────┐
+│   POSTGRESQL      │    │     REDIS         │
+│   Database        │    │   Message Broker  │
+│                   │    │                   │
+│  17 Models:       │    │  • Task queue     │
+│  • User           │    │  • Progress cache │
+│  • Event          │    │  • Session store  │
+│  • Photo          │    │  • Result cache   │
+│  • Cluster        │    │                   │
+│  • EventOrder     │    │                   │
+│  • PricingConfig  │    │                   │
+│  • OTP            │    │                   │
+│  • TrustedDevice  │    │                   │
+│  • CoOccurrence   │    │                   │
+│  • EmailConfig    │    │                   │
+│  • FAQ/Testimonial│    │                   │
+│  • etc...         │    │                   │
+└───────────────────┘    └───────────────────┘
+```
+
+---
+
+## 📁 Complete Directory Structure
+
+```
+snapmatch/
+├── app/                              # FastAPI Backend
+│   ├── api/                          # 15 Route Files
+│   │   ├── auth_routes.py            # JWT auth, OTP, trusted devices
+│   │   ├── event_routes.py           # Event CRUD, processing, watermark
+│   │   ├── public_routes.py          # Selfie search, PIN verify, downloads
+│   │   ├── billing_routes.py         # Razorpay integration
+│   │   ├── upload_routes.py          # Photo upload endpoints
+│   │   ├── bulk_upload_routes.py     # Batch upload (max 50)
+│   │   ├── guest_upload_routes.py    # Guest contribution workflow
+│   │   ├── approval_routes.py        # Photo approval/rejection
+│   │   ├── admin_routes.py           # Admin dashboard
+│   │   ├── admin_orders_routes.py    # Order management
+│   │   ├── admin_cms_routes.py       # FAQ/Testimonial CMS
+│   │   ├── admin_email_routes.py     # Email provider config
+│   │   ├── analytics_routes.py       # Activity logging
+│   │   ├── pricing_routes.py         # Pricing configuration
+│   │   ├── task_routes.py            # Celery task status
+│   │   └── cms_routes.py             # Public CMS content
+│   │
+│   ├── core/                         # Configuration
+│   │   ├── config.py                 # App settings, paths
+│   │   ├── security.py               # JWT, password hashing
+│   │   ├── dependencies.py           # Auth middleware
+│   │   ├── pricing.py                # Tiered pricing engine
+│   │   ├── plans.py                  # Subscription plans
+│   │   ├── pricing_config.json       # Default pricing
+│   │   └── razorpay_config.py        # Payment config
+│   │
+│   ├── database/                     # Database Layer
+│   │   ├── db.py                     # SQLAlchemy engine
+│   │   └── migration_*.py            # Migration scripts
+│   │
+│   ├── models/                       # 17 SQLAlchemy Models
+│   │   ├── user.py                   # User accounts
+│   │   ├── event.py                  # Events with branding, watermark, PIN
+│   │   ├── photo.py                  # Photos with processing status
+│   │   ├── cluster.py                # Face embeddings
+│   │   ├── event_order.py            # Payment orders
+│   │   ├── pricing_config.py         # Platform pricing
+│   │   ├── guest_upload.py           # Guest contributions
+│   │   ├── co_occurrence.py          # Group photo detection
+│   │   ├── otp.py                    # OTP verification
+│   │   ├── trusted_device.py         # Device trust
+│   │   ├── email_provider_config.py  # Email settings
+│   │   ├── user_activity_log.py      # Audit trail
+│   │   ├── event_analytics.py        # Event stats
+│   │   ├── faq.py                    # FAQ CMS
+│   │   ├── testimonial.py            # Testimonials CMS
+│   │   ├── newsletter.py             # Newsletter subscribers
+│   │   └── platform_settings.py      # Feature flags
+│   │
+│   ├── schemas/                      # Pydantic Schemas
+│   │   ├── auth_schema.py
+│   │   └── otp_schema.py
+│   │
+│   ├── services/                     # 13 Business Logic Services
+│   │   ├── face_service.py           # InsightFace detection
+│   │   ├── face_model.py             # Lazy model singleton
+│   │   ├── search_service.py         # FAISS similarity search
+│   │   ├── faiss_manager.py          # Index lifecycle
+│   │   ├── faiss_index.py            # Index operations
+│   │   ├── clustering_service.py     # DBSCAN clustering
+│   │   ├── image_pipeline.py         # pyvips/Pillow optimization
+│   │   ├── image_normalizer.py       # Image preprocessing
+│   │   ├── storage_service.py        # Unified S3/MinIO/local
+│   │   ├── storage_cleanup.py        # Event cleanup
+│   │   ├── email_service.py          # Multi-provider email
+│   │   ├── otp_service.py            # OTP generation/verification
+│   │   ├── scene_service.py          # Places365 classification
+│   │   ├── scene_normalizer.py       # Scene preprocessing
+│   │   ├── object_service.py         # YOLO detection
+│   │   └── co_occurrence_service.py  # Group photo detection
+│   │
+│   ├── workers/                      # Celery Task Queue
+│   │   ├── celery_worker.py          # Celery configuration
+│   │   ├── tasks.py                  # Main processing pipeline
+│   │   ├── ai_enrichment_task.py     # Scene/object detection
+│   │   ├── tasks-single.py           # Single photo variant
+│   │   ├── tasks-batched.py          # Batched variant
+│   │   └── tasks-bk.py               # Backup version
+│   │
+│   ├── scripts/                      # Utility Scripts
+│   │   ├── setup_minio.py            # MinIO initialization
+│   │   └── migrate_to_minio.py       # Storage migration
+│   │
+│   └── main.py                       # FastAPI entry point
+│
+├── frontend/                         # Next.js 16 Frontend
+│   ├── src/
+│   │   ├── app/                      # App Router Pages
+│   │   │   ├── (app)/                # Authenticated routes
+│   │   │   │   ├── dashboard/        # Owner dashboard
+│   │   │   │   └── events/           # Event management
+│   │   │   ├── admin/                # Admin panel (12 pages)
+│   │   │   │   ├── page.tsx          # Admin dashboard
+│   │   │   │   ├── users/            # User management
+│   │   │   │   ├── events/           # Event management
+│   │   │   │   ├── orders/           # Order management
+│   │   │   │   ├── pricing/          # Pricing config
+│   │   │   │   ├── plans/            # Subscription plans
+│   │   │   │   ├── email-settings/   # Email config
+│   │   │   │   ├── activity-logs/    # Audit logs
+│   │   │   │   ├── faqs/             # FAQ management
+│   │   │   │   ├── testimonials/     # Testimonials
+│   │   │   │   ├── newsletter/       # Newsletter subs
+│   │   │   │   └── tools/            # Admin tools
+│   │   │   ├── public/[token]/       # Public selfie search
+│   │   │   ├── login/                # Login page
+│   │   │   ├── forgot-password/      # Password reset
+│   │   │   ├── reset-password/       # Reset form
+│   │   │   ├── pricing/              # Public pricing
+│   │   │   └── page.tsx              # Landing page
+│   │   │
+│   │   ├── components/               # React Components
+│   │   │   ├── snapmatch/            # Feature components
+│   │   │   │   ├── PhotoPreview.tsx  # Full-screen viewer
+│   │   │   │   ├── WatermarkSettings.tsx
+│   │   │   │   ├── BrandingSettings.tsx
+│   │   │   │   ├── CameraEnhancements.tsx
+│   │   │   │   ├── MultiSelect.tsx
+│   │   │   │   ├── PersistenceUI.tsx
+│   │   │   │   ├── QRCodeDisplay.tsx
+│   │   │   │   ├── UploadProgress.tsx
+│   │   │   │   ├── WatermarkedPhoto.tsx
+│   │   │   │   └── UIComponents.tsx
+│   │   │   ├── AdminBadge.tsx
+│   │   │   ├── AuthGuard.tsx
+│   │   │   ├── EventPricingAdvisor.tsx
+│   │   │   ├── EventQuotaBar.tsx
+│   │   │   ├── PeopleGallery.tsx
+│   │   │   ├── PricingCalculator.tsx
+│   │   │   └── ProtectedRoute.tsx
+│   │   │
+│   │   ├── services/                 # API Client
+│   │   │   ├── api.ts                # Axios instance
+│   │   │   ├── auth.ts               # Auth API
+│   │   │   └── adminApi.ts           # Admin API
+│   │   │
+│   │   ├── context/                  # React Context
+│   │   │   └── AuthContext.tsx       # Auth state
+│   │   │
+│   │   ├── hooks/                    # Custom Hooks
+│   │   │   ├── snapmatch/
+│   │   │   │   ├── useSnapmatch.ts
+│   │   │   │   └── useWatermark.ts
+│   │   │   └── useRazorpay.ts
+│   │   │
+│   │   ├── lib/                      # Utility Libraries
+│   │   │   ├── api.ts
+│   │   │   ├── pricing.ts
+│   │   │   └── snapmatch/
+│   │   │       ├── watermark.ts      # Canvas watermark
+│   │   │       ├── persistence.ts    # Local storage
+│   │   │       └── utils.ts          # Helpers
+│   │   │
+│   │   └── config/
+│   │       └── app.ts
+│   │
+│   ├── public/                       # Static assets
+│   └── package.json
+│
+├── alembic/                          # Database Migrations
+│   ├── env.py
+│   └── versions/                     # 18 migration files
+│
+├── infra/nginx/                      # Nginx config
+│   └── default.conf
+│
+├── models/                           # AI Model files
+│   └── matplotlib/fontlist-v390.json
+│
+├── docker-compose.yml                # Multi-service orchestration
+├── Dockerfile                        # Root Dockerfile
+├── Dockerfile.backend                # Backend container
+├── requirements.txt                  # Python dependencies
+├── package.json                      # Root package
+└── README.md
+```
+
+---
+
+## 🛠️ Tech Stack Summary
+
+| Layer | Technology |
+|-------|------------|
+| **Backend Framework** | FastAPI (Python 3.10) |
+| **Database** | PostgreSQL 15 + SQLAlchemy ORM + Alembic migrations |
+| **Task Queue** | Celery + Redis (4 queues: photo_processing, event_finalize, ai_enrichment, default) |
+| **Face Recognition** | InsightFace buffalo_l (ONNX) + FAISS IndexFlatIP |
+| **Clustering** | DBSCAN with cosine distance |
+| **Object Detection** | YOLOv8n (Ultralytics) |
+| **Scene Classification** | Places365 (ResNet50) |
+| **Image Processing** | pyvips, Pillow, OpenCV |
+| **Object Storage** | MinIO / Cloudflare R2 (S3-compatible) |
+| **Payments** | Razorpay (UPI + cards) |
+| **Authentication** | JWT (7d access + 30d refresh) + OTP verification |
+| **Email** | SMTP / SendGrid / Brevo / Resend |
+| **Frontend** | Next.js 16 + React 19 + TypeScript |
+| **Styling** | Tailwind CSS 4 |
+| **State Management** | React Query + AuthContext |
+| **Animations** | Framer Motion |
+| **Infrastructure** | Docker + Docker Compose + Nginx |
+
+---
+
+## 🔑 Key Features Implemented
+
+### 1. **Photo Processing Pipeline**
+- **Task 1**: `process_event` - Orchestrator, dispatches per-photo tasks
+- **Task 2**: `process_single_photo` - Image optimization + InsightFace detection
+- **Task 3**: `finalize_event` - DBSCAN clustering, FAISS index build, merge pass
+- **Task 4**: `enrich_event_photos` - Places365 + YOLO detection
+- **Task 5**: `cleanup_expired_events` - Daily cleanup (Celery Beat)
+
+### 2. **Face Search System**
+- Multi-embedding search (original + 3 augmented variants)
+- Tiered similarity thresholds: STRICT (0.68), NORMAL (0.55), FALLBACK (0.40)
+- In-memory result cache (30 min TTL)
+- Paginated results with infinite scroll
+
+### 3. **Branding System**
+- 5 templates: classic, minimal, wedding, corporate, dark
+- Custom colors, fonts (Google Fonts), logo upload
+- Dynamic CSS variable injection
+- Footer customization
+
+### 4. **Watermark System**
+- Client-side Canvas API rendering
+- Text and logo watermark support
+- Configurable position, opacity, rotation, tiling
+- Applied on download (not upload)
+
+### 5. **PIN Protection**
+- 4-digit PIN with SHA256 salted hash
+- Rate limiting (5 attempts / 5 minutes)
+- Session-based verification with localStorage
+
+### 6. **Guest Upload Workflow**
+- Guest uploads → Pending approval → Owner reviews → Approve/Reject
+- Guest quota management
+- Preview thumbnails for owner review
+
+### 7. **Group/Family Detection**
+- "With Friends" tab shows group photos
+- Co-occurrence tracking
+- Companion statistics
+
+### 8. **Selfie Persistence**
+- Optional local storage of selfie (7-day retention)
+- Auto-search on return visit
+- Cached results for instant display
+
+### 9. **Pricing System**
+- Pay-per-event model with tiered rates
+- Base fee + photo tiers + guest tiers + validity addon
+- Free tier: 50 photos, 10 guests, 7 days (one per user)
+- Admin-configurable via dashboard
+
+---
+
+## 📊 Database Schema (Key Tables)
+
+| Table | Key Columns |
+|-------|-------------|
+| `users` | id, email, password_hash, role, plan_type, free_event_used, email_verified |
+| `events` | id, name, public_token, owner_id, processing_status, photo_quota, guest_quota, payment_status, watermark_config, pin_hash, brand_* columns |
+| `photos` | id, event_id, stored_filename, optimized_filename, uploaded_by, approval_status, status, faces_detected, scene_label, objects_detected |
+| `clusters` | id, event_id, cluster_id, image_name, embedding (LargeBinary) |
+| `event_orders` | id, user_id, event_id, razorpay_order_id, amount_paise, status |
+
+---
+
+## 🔌 API Endpoints Summary
+
+| Route | Key Endpoints |
+|-------|---------------|
+| `/auth/*` | register, login, refresh, logout, forgot-password, reset-password, otp-config, trusted-devices |
+| `/events/*` | CRUD, process, clusters, scenes, search, watermark, branding, thumbnail, image, download |
+| `/public/*` | event info, PIN verify, selfie search, photos gallery, scenes, contribute, download-all |
+| `/billing/*` | create-order, verify-payment, webhook, user-status |
+| `/upload/*` | single upload, bulk upload, presign URLs |
+| `/admin/*` | stats, users, events, orders, pricing, email-settings, activity-logs, CMS |
+| `/pricing/*` | config (public GET), config (admin PUT) |
+
+---
+
+## ⚙️ Environment Variables
+
+```bash
+# Database
+DATABASE_URL=postgresql://user:pass@host:5432/event_ai
+
+# Security
+SECRET_KEY=your-secret-key
+ENV=dev|prod
+
+# Storage
+STORAGE_BACKEND=local|minio|r2
+MINIO_ENDPOINT=http://minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=snapfind
+MINIO_PUBLIC_URL=https://your-domain.com
+MINIO_PRESIGN_ENDPOINT=https://public-url
+
+# Redis
+CELERY_BROKER_URL=redis://redis:6379/0
+
+# Payments
+RAZORPAY_KEY_ID=rzp_test_xxx
+RAZORPAY_KEY_SECRET=secret
+RAZORPAY_WEBHOOK_SECRET=webhook_secret
+
+# Email (multi-provider)
+EMAIL_PROVIDER=smtp|sendgrid|brevo|resend
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+
+# OTP
+DEV_COMMON_OTP=123456  # Dev only
+OTP_EXPIRY_MINUTES=10
+OTP_LENGTH=6
+
+# AI Models
+MAX_PHOTO_SIZE_MB=20
+YOLO_MODEL_PATH=yolov8n.pt
+PLACES365_MODEL_PATH=/app/models/resnet50_places365.pth.tar
+DEFAULT_EVENT_PIN=0000
+```
+
+---
+
+## 🚀 Planned Features (from Features-List-Upgrade)
+
+### High Priority
+- WhatsApp Bot Integration
+- Push Notifications
+- Live Slideshow Mode
+- Favorites/Bookmarks
+- Photo Selling/Store
+- Duplicate Detection
+- Team Login
+
+### Medium Priority
+- Analytics Dashboard
+- Email Delivery
+- PWA Support
+- Custom Domain
+- White-label Solution
+
+---
+
+This is a **production-ready, enterprise-grade** AI photo delivery platform with sophisticated features like tiered face matching, branding customization, guest contribution workflow, and comprehensive admin panel. The architecture follows best practices with clear separation of concerns, async task processing, and scalable object storage.

@@ -119,6 +119,24 @@ class Event(Base):
     brand_footer_text     = Column(String(100), nullable=True)
     brand_show_powered_by = Column(Boolean,     default=True,       nullable=False)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 🖼️  LIVE SLIDESHOW MODE (NEW)
+    #
+    # These columns power the live slideshow feature for events:
+    #   slideshow_enabled       → toggle slideshow on/off
+    #   slideshow_speed         → seconds per slide (3, 5, 8, 10)
+    #   slideshow_transition    → transition effect (fade, slide, zoom)
+    #   slideshow_show_qr       → show QR code for guests to find photos
+    #   slideshow_show_branding → show event logo/name overlay
+    #   slideshow_music_url     → URL to background music (optional)
+    # ═══════════════════════════════════════════════════════════════
+    slideshow_enabled       = Column(Boolean,     default=False,      nullable=False)
+    slideshow_speed         = Column(Integer,     default=5,          nullable=False)
+    slideshow_transition    = Column(String(20),  default="fade",     nullable=True)
+    slideshow_show_qr       = Column(Boolean,     default=True,       nullable=False)
+    slideshow_show_branding = Column(Boolean,     default=True,       nullable=False)
+    slideshow_music_url     = Column(Text,        nullable=True)
+
     # ───────────────────────────────────────────────────────────────
     # Watermark helpers (unchanged)
     # ───────────────────────────────────────────────────────────────
@@ -193,6 +211,41 @@ class Event(Base):
         self.brand_footer_text = str(footer)[:100]  # enforce DB column length
 
         self.brand_show_powered_by = bool(config.get("brand_show_powered_by", True))
+
+    # ───────────────────────────────────────────────────────────────
+    # 🖼️  Slideshow helpers (NEW — same pattern as branding helpers)
+    # ───────────────────────────────────────────────────────────────
+    VALID_TRANSITIONS = {"fade", "slide", "zoom", "none"}
+    VALID_SPEEDS = {3, 5, 8, 10, 15}
+
+    def get_slideshow_config(self) -> dict:
+        """Return slideshow fields as a dict ready for JSON serialisation."""
+        return {
+            "enabled":        bool(self.slideshow_enabled),
+            "speed":          self.slideshow_speed or 5,
+            "transition":     self.slideshow_transition or "fade",
+            "show_qr":        bool(self.slideshow_show_qr),
+            "show_branding":  bool(self.slideshow_show_branding),
+            "music_url":      self.slideshow_music_url or "",
+        }
+
+    def set_slideshow_config(self, config: dict) -> None:
+        """
+        Apply a validated slideshow dict to the model columns.
+        """
+        self.slideshow_enabled = bool(config.get("enabled", False))
+
+        speed = config.get("speed", 5)
+        self.slideshow_speed = speed if speed in self.VALID_SPEEDS else 5
+
+        transition = config.get("transition", "fade")
+        self.slideshow_transition = transition if transition in self.VALID_TRANSITIONS else "fade"
+
+        self.slideshow_show_qr = bool(config.get("show_qr", True))
+        self.slideshow_show_branding = bool(config.get("show_branding", True))
+
+        music_url = config.get("music_url", "")
+        self.slideshow_music_url = music_url if isinstance(music_url, str) else None
 
     # ───────────────────────────────────────────────────────────────
     # PIN helpers (unchanged)
