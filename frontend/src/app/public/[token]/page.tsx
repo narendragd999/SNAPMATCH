@@ -321,10 +321,10 @@ export default function PublicSelfiePage() {
           brand_footer_text: data.brand_footer_text || '',
           brand_show_powered_by: data.brand_show_powered_by !== false,
         };
-        console.log('[Branding] Event data received:', {
-          brand_logo_url: data.brand_logo_url,
-          template_id: data.template_id,
-        });
+        // console.log('[Branding] Event data received:', {
+        //   brand_logo_url: data.brand_logo_url,
+        //   template_id: data.template_id,
+        // });
         setBrandingConfig(newBrandingConfig);
       })
       .catch(console.error);
