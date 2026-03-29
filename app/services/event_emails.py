@@ -622,7 +622,7 @@ def check_and_send_expiry_warnings(db: Session, days_threshold: int = 7) -> dict
         try:
             success = send_event_expiry_warning(
                 photographer_email=owner.email,
-                photographer_name=owner.name or owner.email,
+                photographer_name=getattr(owner, 'name', None) or owner.email,
                 event_name=event.name,
                 event_token=event.public_token,
                 days_remaining=max(1, days_remaining),

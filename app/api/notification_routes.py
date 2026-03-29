@@ -118,7 +118,7 @@ def notify_photos_ready(
             event_token=event.public_token,
             photo_count=photo_count,
             event_url=event_url,
-            photographer_name=current_user.name or "The Photographer",
+            photographer_name=getattr(current_user, 'name', None) or "The Photographer",
             db=None,  # Can't use same session in background
         )
         logger.info(f"Bulk photos ready emails: {results}")
@@ -182,7 +182,7 @@ def notify_single_guest(
             event_token=event.public_token,
             photo_count=photo_count,
             event_url=event_url,
-            photographer_name=current_user.name or "The Photographer",
+            photographer_name=getattr(current_user, 'name', None) or "The Photographer",
         )
     
     background_tasks.add_task(send_email_task)
@@ -226,7 +226,7 @@ def trigger_guest_upload_notification(
     
     success = send_guest_upload_notification(
         photographer_email=owner.email,
-        photographer_name=owner.name or owner.email,
+        photographer_name=getattr(owner, 'name', None) or owner.email,
         event_name=event.name,
         event_id=event_id,
         guest_name=guest_name or "A guest",
@@ -341,7 +341,7 @@ def send_test_event_email(
         event_token=event.public_token,
         photo_count=photo_count,
         event_url=event_url,
-        photographer_name=current_user.name or "Test",
+        photographer_name=getattr(current_user, 'name', None) or "Test",
         db=db,
     )
     

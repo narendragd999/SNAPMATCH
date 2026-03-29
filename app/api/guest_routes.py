@@ -702,78 +702,92 @@ def send_notifications(
     GRACEFUL: If no guests exist, returns success with 0 sent.
     Does NOT throw errors or break the system.
     """
-    # Verify ownership
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    if event.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    # Get guests to notify - gracefully handles empty list
-    if data.guest_ids:
-        guests = db.query(Guest).filter(
-            Guest.event_id == event_id,
-            Guest.id.in_(data.guest_ids)
-        ).all()
-    else:
-        # Send to all guests who haven't received notification
-        guests = db.query(Guest).filter(
-            Guest.event_id == event_id,
-            Guest.email_sent == False
-        ).all()
-    
-    # GRACEFUL: No guests to notify is perfectly fine
-    if not guests:
+    try:
+        # Verify ownership
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        if event.owner_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Get guests to notify - gracefully handles empty list
+        if data.guest_ids:
+            guests = db.query(Guest).filter(
+                Guest.event_id == event_id,
+                Guest.id.in_(data.guest_ids)
+            ).all()
+        else:
+            # Send to all guests who haven't received notification
+            guests = db.query(Guest).filter(
+                Guest.event_id == event_id,
+                Guest.email_sent == False
+            ).all()
+        
+        # GRACEFUL: No guests to notify is perfectly fine
+        if not guests:
+            return {
+                "success": True,
+                "sent_count": 0,
+                "failed_count": 0,
+                "message": "No guests to notify"
+            }
+        
+        # Build event URL
+        event_url = data.event_url
+        if not event_url:
+            # Try to construct from request
+            if request:
+                base_url = str(request.base_url).rstrip('/')
+                event_url = f"{base_url}/public/{event.public_token}"
+            else:
+                event_url = f"https://snapmatch.com/public/{event.public_token}"
+        
+        # Get photographer name
+        photographer_name = getattr(current_user, 'name', None) or current_user.email
+        
+        # Send emails
+        emails = [g.email for g in guests]
+        photo_count = data.photo_count or event.image_count or 0
+        
+        results = send_bulk_photos_ready_emails(
+            emails=emails,
+            event_name=event.name,
+            photo_count=photo_count,
+            event_url=event_url,
+            photographer_name=photographer_name,
+            db=db,
+        )
+        
+        # Update guest records for successful sends
+        for guest in guests:
+            if results['sent'] > 0:
+                guest.mark_email_sent()
+        
+        # Update event notification tracking
+        if results['sent'] > 0:
+            event.record_notification_sent()
+        
+        db.commit()
+        
         return {
             "success": True,
-            "sent_count": 0,
-            "failed_count": 0,
-            "message": "No guests to notify"
+            "sent_count": results['sent'],
+            "failed_count": results['failed'],
+            "errors": results.get('errors', [])[:5],
         }
     
-    # Build event URL
-    event_url = data.event_url
-    if not event_url:
-        # Try to construct from request
-        if request:
-            base_url = str(request.base_url).rstrip('/')
-            event_url = f"{base_url}/public/{event.public_token}"
-        else:
-            event_url = f"https://snapmatch.com/public/{event.public_token}"
-    
-    # Get photographer name
-    photographer_name = current_user.name or current_user.email
-    
-    # Send emails
-    emails = [g.email for g in guests]
-    photo_count = data.photo_count or event.image_count or 0
-    
-    results = send_bulk_photos_ready_emails(
-        emails=emails,
-        event_name=event.name,
-        photo_count=photo_count,
-        event_url=event_url,
-        photographer_name=photographer_name,
-        db=db,
-    )
-    
-    # Update guest records for successful sends
-    for guest in guests:
-        if results['sent'] > 0:
-            guest.mark_email_sent()
-    
-    # Update event notification tracking
-    if results['sent'] > 0:
-        event.record_notification_sent()
-    
-    db.commit()
-    
-    return {
-        "success": True,
-        "sent_count": results['sent'],
-        "failed_count": results['failed'],
-        "errors": results.get('errors', [])[:5],
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending notifications: {e}")
+        # Return graceful error instead of crashing
+        return {
+            "success": False,
+            "sent_count": 0,
+            "failed_count": 0,
+            "message": f"Failed to send notifications: {str(e)}",
+            "error": str(e)
+        }
 
 
 @router.post("/{event_id}/guests/resend/{guest_id}")
@@ -806,7 +820,7 @@ def resend_notification(
         event_url = f"https://snapmatch.com/public/{event.public_token}"
     
     # Get photographer name
-    photographer_name = current_user.name or current_user.email
+    photographer_name = getattr(current_user, 'name', None) or current_user.email
     
     # Send email
     success = send_photos_ready_email(
@@ -875,7 +889,7 @@ def notify_guests_processing_complete(
     
     # Get owner info
     owner = db.query(User).filter(User.id == event.owner_id).first()
-    photographer_name = owner.name or owner.email if owner else "the photographer"
+    photographer_name = getattr(owner, 'name', None) or (owner.email if owner else "the photographer")
     
     # Send notifications
     emails = [g.email for g in guests_to_notify]
