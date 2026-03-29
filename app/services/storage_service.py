@@ -562,39 +562,14 @@ def _public_url(key: str) -> str:
         return f"{MINIO_PUBLIC_URL.rstrip('/')}/{key}"
 
 
-
-"""
-app/services/storage_service.py  —  BRANDING ADDITIONS
-═══════════════════════════════════════════════════════════════════════════════
-
-Your existing storage_service already handles local / MinIO / R2.
-Add these THREE methods to the existing file (don't replace anything).
-
-The branding routes need:
-  1. generate_presigned_put()   → presigned PUT URL for logo upload
-  2. get_public_url()           → permanent public URL for a stored object
-  3. delete_file_by_key()       → delete any object by its full key
-
-Find the section in your storage_service.py where the MinIO/R2 client
-is initialized and append these methods there.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-# ─── PASTE THESE METHODS into your existing storage_service.py ───────────────
-#
-# They follow the same pattern as your existing get_file_url() /
-# thumbnail_exists() etc.  The STORAGE_BACKEND env var already controls
-# which branch runs.
-#
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎨 BRANDING LOGO STORAGE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+# These methods support the branding logo upload flow:
+#   1. POST /events/{id}/branding/logo-presign → returns presigned PUT URL
+#   2. Browser PUTs logo directly to MinIO/R2
+#   3. PATCH /events/{id}/branding → stores the public URL
 # ─────────────────────────────────────────────────────────────────────────────
-
-import os
-
-# These are already imported in your storage_service.py — shown here for context
-# STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")   # "local" | "minio" | "r2"
-# R2_PUBLIC_URL   = os.getenv("R2_PUBLIC_URL", "")          # e.g. "https://pub-xxx.r2.dev"
-# MINIO_ENDPOINT  = os.getenv("MINIO_ENDPOINT", "")
-# MINIO_BUCKET    = os.getenv("MINIO_BUCKET",   "snapmatch")
 
 
 def generate_presigned_put(
@@ -611,109 +586,56 @@ def generate_presigned_put(
 
     Returns the presigned PUT URL string.
     Raises RuntimeError for the local backend (caller handles 501).
-    """
-    backend = os.getenv("STORAGE_BACKEND", "local")
 
-    if backend == "local":
+    IMPORTANT: Uses _get_presign_s3() which uses MINIO_PRESIGN_ENDPOINT so that
+    the signature includes the PUBLIC host. This is critical for Cloudflare Tunnel
+    or any scenario where the browser PUTs to a different host than the internal
+    MinIO endpoint. See the docstring of _get_presign_s3() for details.
+    """
+    if STORAGE_BACKEND == "local":
         raise RuntimeError("Presigned PUT not supported on local backend")
 
-    if backend in ("minio", "r2"):
-        # boto3 / botocore S3-compatible presign
-        import boto3
-        from botocore.config import Config
+    # Ensure bucket exists before generating presigned URL (critical on fresh containers)
+    _get_s3()
 
-        s3 = boto3.client(
-            "s3",
-            endpoint_url          = os.getenv("MINIO_ENDPOINT") or os.getenv("R2_ENDPOINT"),
-            aws_access_key_id     = os.getenv("MINIO_ACCESS_KEY") or os.getenv("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key = os.getenv("MINIO_SECRET_KEY") or os.getenv("R2_SECRET_ACCESS_KEY"),
-            region_name           = os.getenv("MINIO_REGION", "auto"),
-            config                = Config(signature_version="s3v4"),
-        )
-        bucket = os.getenv("MINIO_BUCKET", "snapmatch")
-
-        url = s3.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket":      bucket,
-                "Key":         object_key,
-                "ContentType": content_type,
-            },
-            ExpiresIn=expires_in,
-        )
-        return url
-
-    raise RuntimeError(f"Unknown STORAGE_BACKEND: {backend}")
+    # Use the presign-specific client (signed with the PUBLIC host)
+    url = _get_presign_s3().generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket":      MINIO_BUCKET,
+            "Key":         object_key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=expires_in,
+        HttpMethod="PUT",
+    )
+    return url
 
 
 def get_public_url(object_key: str) -> str:
     """
     Return the permanent public URL for an object already in storage.
 
-    For R2  : R2_PUBLIC_URL / object_key
-    For MinIO: constructed from MINIO_ENDPOINT / bucket / object_key
-    For local: not supported (logo data URL stored directly in DB)
+    Uses MINIO_PUBLIC_URL for consistency with the rest of the codebase.
+    This works for MinIO, R2, or any S3-compatible storage.
+
+    For local backend: returns /storage/{object_key} (served by FastAPI StaticFiles)
     """
-    backend = os.getenv("STORAGE_BACKEND", "local")
+    if STORAGE_BACKEND == "local":
+        # Served by FastAPI StaticFiles at /storage
+        return f"/storage/{object_key}"
 
-    if backend == "r2":
-        base = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
-        if not base:
-            raise RuntimeError("R2_PUBLIC_URL env var is not set")
-        return f"{base}/{object_key}"
-
-    if backend == "minio":
-        endpoint = os.getenv("MINIO_ENDPOINT", "").rstrip("/")
-        bucket   = os.getenv("MINIO_BUCKET", "snapmatch")
-        return f"{endpoint}/{bucket}/{object_key}"
-
-    raise RuntimeError("get_public_url not supported on local backend")
+    # Use the same MINIO_PUBLIC_URL that the rest of the codebase uses
+    # This ensures consistency with get_file_url(), get_thumbnail_url(), etc.
+    return f"{MINIO_PUBLIC_URL.rstrip('/')}/{object_key}"
 
 
 def delete_file_by_key(object_key: str) -> None:
     """
     Delete any object from storage by its full key.
     Used when the owner removes their logo.
-    Silent no-op on local backend.
+
+    For local backend: deletes from local filesystem
+    For MinIO/R2: uses the existing _delete() helper which uses _get_s3()
     """
-    backend = os.getenv("STORAGE_BACKEND", "local")
-
-    if backend == "local":
-        return  # nothing to do
-
-    if backend in ("minio", "r2"):
-        import boto3
-        from botocore.config import Config
-
-        s3 = boto3.client(
-            "s3",
-            endpoint_url          = os.getenv("MINIO_ENDPOINT") or os.getenv("R2_ENDPOINT"),
-            aws_access_key_id     = os.getenv("MINIO_ACCESS_KEY") or os.getenv("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key = os.getenv("MINIO_SECRET_KEY") or os.getenv("R2_SECRET_ACCESS_KEY"),
-            region_name           = os.getenv("MINIO_REGION", "auto"),
-            config                = Config(signature_version="s3v4"),
-        )
-        bucket = os.getenv("MINIO_BUCKET", "snapmatch")
-        s3.delete_object(Bucket=bucket, Key=object_key)
-        return
-
-    raise RuntimeError(f"Unknown STORAGE_BACKEND: {backend}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PUBLIC ROUTE UPDATE  (public_routes.py)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# In your GET /public/events/{token} route, add these fields to the
-# response dict so BrandingSettings data reaches the public selfie page:
-#
-#   # 🖌️  Branding — consumed by public/[token]/page.tsx
-#   "template_id":           event.brand_template_id or "classic",
-#   "brand_logo_url":        event.brand_logo_url or "",
-#   "brand_primary_color":   event.brand_primary_color or "#3b82f6",
-#   "brand_accent_color":    event.brand_accent_color or "#60a5fa",
-#   "brand_font":            event.brand_font or "system",
-#   "brand_footer_text":     event.brand_footer_text or "",
-#   "brand_show_powered_by": bool(event.brand_show_powered_by),
-#
-# ─────────────────────────────────────────────────────────────────────────────        
+    _delete(object_key)

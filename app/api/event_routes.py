@@ -383,18 +383,9 @@ def delete_event(
         raise HTTPException(status_code=404, detail="Event not found")
 
     event_name = event.name  # Store for logging before deletion
+    cover_image = event.cover_image  # Store cover image before deletion
 
-    # Delete DB records first
-    db.query(Cluster).filter(Cluster.event_id == event_id).delete()
-    db.query(Photo).filter(Photo.event_id == event_id).delete()
-    db.delete(event)
-    db.commit()
-
-    # ── STORAGE: delete FAISS + all files (local/MinIO/R2) ───────────────────
-    # Runs after db.commit() so DB deletion always succeeds regardless of storage errors
-    delete_event_storage(event_id, cover_image=event.cover_image)
-
-    # Log activity
+    # Log activity BEFORE deleting the event (so FK constraint works)
     log_activity(
         db=db,
         activity_type="event_delete",
@@ -407,6 +398,16 @@ def delete_event(
         request_path=f"/events/{event_id}",
         request_method="DELETE",
     )
+
+    # Delete DB records
+    db.query(Cluster).filter(Cluster.event_id == event_id).delete()
+    db.query(Photo).filter(Photo.event_id == event_id).delete()
+    db.delete(event)
+    db.commit()
+
+    # ── STORAGE: delete FAISS + all files (local/MinIO/R2) ───────────────────
+    # Runs after db.commit() so DB deletion always succeeds regardless of storage errors
+    delete_event_storage(event_id, cover_image=cover_image)
 
     return {"message": "Event deleted successfully"}
 
@@ -1468,9 +1469,9 @@ class BrandingUpdateRequest(BaseModel):
     def validate_logo_url(cls, v):
         if v is None or v == "":
             return v
-        # Accept: https:// R2 URLs, http:// (dev), data: URLs (fallback)
-        if not (v.startswith("https://") or v.startswith("http://") or v.startswith("data:")):
-            raise ValueError("brand_logo_url must be an https/http/data URL")
+        # Accept: https:// R2 URLs, http:// (dev), data: URLs (fallback), /storage/ (local backend)
+        if not (v.startswith("https://") or v.startswith("http://") or v.startswith("data:") or v.startswith("/storage/")):
+            raise ValueError("brand_logo_url must be an https/http/data URL or /storage/ path")
         # Reject suspiciously large data URLs (>500 KB is almost certainly wrong)
         if v.startswith("data:") and len(v) > 700_000:
             raise ValueError("Logo data URL is too large — upload via presign endpoint instead")
@@ -1618,8 +1619,8 @@ def logo_presign(
             expires_in=300,         # 5 minutes — plenty for a logo upload
         )
         public_url = storage_service.get_public_url(object_key)
-    except AttributeError:
-        # storage_service doesn't expose generate_presigned_put yet (local backend)
+    except (AttributeError, RuntimeError):
+        # storage_service doesn't support presigned PUT (local backend)
         # Return a fallback so the frontend can gracefully use data URL storage.
         raise HTTPException(
             status_code=501,

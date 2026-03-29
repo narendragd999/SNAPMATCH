@@ -55,6 +55,75 @@ interface SlideshowData {
   owner_id: number;
 }
 
+// ─── Branding Constants ───────────────────────────────────────────────────────
+
+const DEFAULT_BRANDING_CONFIG: BrandingConfig = {
+  template_id: 'classic',
+  brand_logo_url: '',
+  brand_primary_color: '#3b82f6',
+  brand_accent_color: '#60a5fa',
+  brand_font: 'system',
+  brand_footer_text: '',
+  brand_show_powered_by: true,
+};
+
+// 🎨 Template theme definitions (same as public page)
+const TEMPLATE_THEMES: Record<string, {
+  bg: string;
+  surface: string;
+  text: string;
+  subtext: string;
+  border: string;
+}> = {
+  classic: {
+    bg: '#09090f',
+    surface: '#0d0d10',
+    text: '#f4f4f5',
+    subtext: '#71717a',
+    border: '#27272a',
+  },
+  minimal: {
+    bg: '#fafafa',
+    surface: '#ffffff',
+    text: '#18181b',
+    subtext: '#a1a1aa',
+    border: '#e4e4e7',
+  },
+  wedding: {
+    bg: '#1a0a10',
+    surface: '#2d1119',
+    text: '#fdf2f8',
+    subtext: '#f9a8d4',
+    border: '#4a1626',
+  },
+  corporate: {
+    bg: '#0a0f1a',
+    surface: '#0f172a',
+    text: '#f8fafc',
+    subtext: '#94a3b8',
+    border: '#1e293b',
+  },
+  dark: {
+    bg: '#000000',
+    surface: '#0a0a0a',
+    text: '#ffffff',
+    subtext: '#a855f7',
+    border: '#1a1a1a',
+  },
+};
+
+// 🎨 Font family mappings (same as public page)
+const FONT_FAMILIES: Record<string, string> = {
+  system: 'system-ui, -apple-system, sans-serif',
+  playfair: "'Playfair Display', serif",
+  'dm-serif': "'DM Serif Display', serif",
+  cormorant: "'Cormorant Garamond', serif",
+  syne: "'Syne', sans-serif",
+  outfit: "'Outfit', sans-serif",
+  josefin: "'Josefin Sans', sans-serif",
+  mono: "'JetBrains Mono', monospace",
+};
+
 // ─── Transition Animations ─────────────────────────────────────────────────────
 
 const transitions = {
@@ -121,6 +190,9 @@ export default function SlideshowPage() {
   const [showQR, setShowQR] = useState(false);
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [lastPhotoId, setLastPhotoId] = useState(0);
+
+  // 🎨 Branding state
+  const [brandingConfig, setBrandingConfig] = useState<BrandingConfig>(DEFAULT_BRANDING_CONFIG);
 
   // ── PIN State ──
   const [pinVerified, setPinVerified] = useState(false);
@@ -194,6 +266,64 @@ export default function SlideshowPage() {
     }
   }, [pinInput]);
 
+  // 🎨 Inject CSS variables when branding changes (same as public page)
+  useEffect(() => {
+    const theme = TEMPLATE_THEMES[brandingConfig.template_id] || TEMPLATE_THEMES.classic;
+    const root = document.documentElement;
+
+    // Primary/accent colors
+    root.style.setProperty('--brand-primary', brandingConfig.brand_primary_color);
+    root.style.setProperty('--brand-accent', brandingConfig.brand_accent_color);
+
+    // Template theme colors
+    root.style.setProperty('--brand-bg', theme.bg);
+    root.style.setProperty('--brand-surface', theme.surface);
+    root.style.setProperty('--brand-text', theme.text);
+    root.style.setProperty('--brand-subtext', theme.subtext);
+    root.style.setProperty('--brand-border', theme.border);
+
+    // Font family
+    const fontFamily = FONT_FAMILIES[brandingConfig.brand_font] || FONT_FAMILIES.system;
+    root.style.setProperty('--brand-font', fontFamily);
+
+    return () => {
+      // Cleanup on unmount
+      root.style.removeProperty('--brand-primary');
+      root.style.removeProperty('--brand-accent');
+      root.style.removeProperty('--brand-bg');
+      root.style.removeProperty('--brand-surface');
+      root.style.removeProperty('--brand-text');
+      root.style.removeProperty('--brand-subtext');
+      root.style.removeProperty('--brand-border');
+      root.style.removeProperty('--brand-font');
+    };
+  }, [brandingConfig]);
+
+  // 🎨 Load Google Fonts if custom font selected (same as public page)
+  useEffect(() => {
+    const font = brandingConfig.brand_font;
+    if (font && font !== 'system' && font !== 'mono') {
+      const fontMap: Record<string, string> = {
+        'playfair': 'Playfair+Display:wght@400;500;600;700',
+        'dm-serif': 'DM+Serif+Display:wght@400;500;600;700',
+        'cormorant': 'Cormorant+Garamond:wght@400;500;600;700',
+        'syne': 'Syne:wght@400;500;600;700',
+        'outfit': 'Outfit:wght@400;500;600;700',
+        'josefin': 'Josefin+Sans:wght@400;500;600;700',
+      };
+
+      const href = `https://fonts.googleapis.com/css2?family=${fontMap[font]}&display=swap`;
+
+      // Check if already loaded
+      if (!document.querySelector(`link[href="${href}"]`)) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = href;
+        document.head.appendChild(link);
+      }
+    }
+  }, [brandingConfig.brand_font]);
+
   // ── Load slideshow data ──
   useEffect(() => {
     if (!token) return;
@@ -209,6 +339,17 @@ export default function SlideshowPage() {
         }
         const slideshowData: SlideshowData = await res.json();
         setData(slideshowData);
+
+        // 🎨 Set branding config (same as public page)
+        setBrandingConfig({
+          template_id: slideshowData.branding.template_id || 'classic',
+          brand_logo_url: slideshowData.branding.brand_logo_url || '',
+          brand_primary_color: slideshowData.branding.brand_primary_color || '#3b82f6',
+          brand_accent_color: slideshowData.branding.brand_accent_color || '#60a5fa',
+          brand_font: slideshowData.branding.brand_font || 'system',
+          brand_footer_text: slideshowData.branding.brand_footer_text || '',
+          brand_show_powered_by: slideshowData.branding.brand_show_powered_by !== false,
+        });
 
         // Check PIN verification
         if (!slideshowData.pin_enabled) {
@@ -440,13 +581,17 @@ export default function SlideshowPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [goToNext, goToPrev, toggleFullscreen, showQR]);
 
+  // 🎨 Get theme colors for inline styles
+  const theme = TEMPLATE_THEMES[brandingConfig.template_id] || TEMPLATE_THEMES.classic;
+  const isDarkTheme = ['classic', 'wedding', 'corporate', 'dark'].includes(brandingConfig.template_id);
+
   // ── Loading state ──
   if (loading) {
     return (
-      <div className="fixed inset-0 bg-black flex items-center justify-center">
+      <div className="fixed inset-0 flex items-center justify-center" style={{ backgroundColor: theme.bg }}>
         <div className="text-center">
-          <RefreshCw className="w-12 h-12 text-white/50 animate-spin mx-auto mb-4" />
-          <p className="text-white/70">Loading slideshow...</p>
+          <RefreshCw className="w-12 h-12 animate-spin mx-auto mb-4" style={{ color: brandingConfig.brand_primary_color }} />
+          <p style={{ color: theme.subtext }}>Loading slideshow...</p>
         </div>
       </div>
     );
@@ -455,14 +600,15 @@ export default function SlideshowPage() {
   // ── Error state ──
   if (error) {
     return (
-      <div className="fixed inset-0 bg-black flex items-center justify-center">
+      <div className="fixed inset-0 flex items-center justify-center" style={{ backgroundColor: theme.bg }}>
         <div className="text-center max-w-md px-6">
-          <ImageIcon className="w-16 h-16 text-red-400/50 mx-auto mb-4" />
-          <h1 className="text-xl font-semibold text-white mb-2">Unable to Load Slideshow</h1>
-          <p className="text-white/60 mb-4">{error}</p>
+          <ImageIcon className="w-16 h-16 mx-auto mb-4" style={{ color: '#ef4444' }} />
+          <h1 className="text-xl font-semibold mb-2" style={{ color: theme.text, fontFamily: FONT_FAMILIES[brandingConfig.brand_font] }}>Unable to Load Slideshow</h1>
+          <p className="mb-4" style={{ color: theme.subtext }}>{error}</p>
           <button
             onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
+            className="px-4 py-2 rounded-lg transition-colors"
+            style={{ backgroundColor: brandingConfig.brand_primary_color, color: '#fff' }}
           >
             Try Again
           </button>
@@ -474,7 +620,7 @@ export default function SlideshowPage() {
   // ── PIN Required Screen ──
   if (data?.pin_enabled && !pinVerified) {
     return (
-      <div className="fixed inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
+      <div className="fixed inset-0 flex items-center justify-center p-4" style={{ backgroundColor: theme.bg }}>
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -482,17 +628,26 @@ export default function SlideshowPage() {
         >
           {/* Header */}
           <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-gradient-to-br from-violet-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-violet-500/20">
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg"
+              style={{
+                background: `linear-gradient(135deg, ${brandingConfig.brand_primary_color}, ${brandingConfig.brand_accent_color})`,
+                boxShadow: `0 10px 30px ${brandingConfig.brand_primary_color}30`
+              }}
+            >
               <Lock className="w-8 h-8 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-white mb-2">PIN Required</h1>
-            <p className="text-slate-400 text-sm">
+            <h1 className="text-2xl font-bold mb-2" style={{ color: theme.text, fontFamily: FONT_FAMILIES[brandingConfig.brand_font] }}>PIN Required</h1>
+            <p className="text-sm" style={{ color: theme.subtext }}>
               Enter the 4-digit PIN to access the slideshow
             </p>
           </div>
 
           {/* PIN Input */}
-          <div className="bg-slate-800/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-700/50">
+          <div
+            className="backdrop-blur-sm rounded-2xl p-6 border"
+            style={{ backgroundColor: theme.surface, borderColor: theme.border }}
+          >
             <div className="flex justify-center gap-3 mb-4">
               {pinInput.map((digit, i) => (
                 <div key={i} className="relative">
@@ -504,7 +659,14 @@ export default function SlideshowPage() {
                     value={digit}
                     onChange={(e) => handlePinChange(i, e.target.value)}
                     onKeyDown={(e) => handlePinKeydown(i, e)}
-                    className="w-14 h-16 text-center text-2xl font-bold bg-slate-700/50 border-2 border-slate-600 rounded-xl text-white focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 transition-all"
+                    className="w-14 h-16 text-center text-2xl font-bold rounded-xl focus:outline-none transition-all"
+                    style={{
+                      backgroundColor: theme.bg,
+                      border: `2px solid ${theme.border}`,
+                      color: theme.text,
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = brandingConfig.brand_primary_color}
+                    onBlur={(e) => e.target.style.borderColor = theme.border}
                   />
                 </div>
               ))}
@@ -513,7 +675,8 @@ export default function SlideshowPage() {
             {/* Show/Hide PIN */}
             <button
               onClick={() => setShowPin(!showPin)}
-              className="flex items-center justify-center gap-2 text-slate-400 hover:text-white text-sm mx-auto mb-4 transition-colors"
+              className="flex items-center justify-center gap-2 text-sm mx-auto mb-4 transition-colors"
+              style={{ color: theme.subtext }}
             >
               {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               {showPin ? 'Hide' : 'Show'} PIN
@@ -524,7 +687,8 @@ export default function SlideshowPage() {
               <motion.p
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="text-red-400 text-sm text-center mb-4"
+                className="text-sm text-center mb-4"
+                style={{ color: '#ef4444' }}
               >
                 {pinError}
               </motion.p>
@@ -532,7 +696,7 @@ export default function SlideshowPage() {
 
             {/* Loading */}
             {pinLoading && (
-              <div className="flex items-center justify-center gap-2 text-violet-400 text-sm">
+              <div className="flex items-center justify-center gap-2 text-sm" style={{ color: brandingConfig.brand_primary_color }}>
                 <RefreshCw className="w-4 h-4 animate-spin" />
                 Verifying...
               </div>
@@ -540,7 +704,7 @@ export default function SlideshowPage() {
           </div>
 
           {/* Event name */}
-          <p className="text-center text-slate-500 text-sm mt-6">
+          <p className="text-center text-sm mt-6" style={{ color: theme.subtext }}>
             {data.event_name}
           </p>
         </motion.div>
@@ -551,13 +715,13 @@ export default function SlideshowPage() {
   // ── No photos state ──
   if (photos.length === 0) {
     return (
-      <div className="fixed inset-0 bg-black flex items-center justify-center">
+      <div className="fixed inset-0 flex items-center justify-center" style={{ backgroundColor: theme.bg }}>
         <div className="text-center">
-          <ImageIcon className="w-16 h-16 text-white/30 mx-auto mb-4" />
-          <h1 className="text-xl font-semibold text-white mb-2">No Photos Yet</h1>
-          <p className="text-white/60">Photos will appear here once they're uploaded.</p>
+          <ImageIcon className="w-16 h-16 mx-auto mb-4" style={{ color: theme.subtext }} />
+          <h1 className="text-xl font-semibold mb-2" style={{ color: theme.text, fontFamily: FONT_FAMILIES[brandingConfig.brand_font] }}>No Photos Yet</h1>
+          <p style={{ color: theme.subtext }}>Photos will appear here once they're uploaded.</p>
           {isConnected && (
-            <div className="flex items-center justify-center gap-2 mt-4 text-emerald-400">
+            <div className="flex items-center justify-center gap-2 mt-4" style={{ color: '#10b981' }}>
               <Wifi className="w-4 h-4" />
               <span className="text-sm">Waiting for photos...</span>
             </div>
@@ -573,7 +737,8 @@ export default function SlideshowPage() {
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 bg-black overflow-hidden cursor-none"
+      className="fixed inset-0 overflow-hidden cursor-none"
+      style={{ backgroundColor: theme.bg, cursor: showControls ? 'default' : 'none' }}
       onMouseMove={() => {
         setShowControls(true);
         if (controlsTimeoutRef.current) {
@@ -583,7 +748,6 @@ export default function SlideshowPage() {
           if (isPlaying) setShowControls(false);
         }, 3000);
       }}
-      style={{ cursor: showControls ? 'default' : 'none' }}
     >
       {/* ── Main Photo ── */}
       <AnimatePresence mode="wait">
@@ -608,17 +772,23 @@ export default function SlideshowPage() {
 
       {/* ── Branding Overlay ── */}
       {data?.slideshow.show_branding && data.branding && (
-        <div className="absolute top-0 left-0 right-0 p-6 bg-gradient-to-b from-black/60 to-transparent pointer-events-none z-10">
+        <div className="absolute top-0 left-0 right-0 p-6 pointer-events-none z-10" style={{
+          background: isDarkTheme
+            ? 'linear-gradient(to bottom, rgba(0,0,0,0.6), transparent)'
+            : 'linear-gradient(to bottom, rgba(0,0,0,0.4), transparent)'
+        }}>
           <div className="flex items-center gap-4">
-            {data.branding.brand_logo_url && (
+            {brandingConfig.brand_logo_url && (
               <img
-                src={data.branding.brand_logo_url}
+                src={brandingConfig.brand_logo_url}
                 alt="Logo"
                 className="h-12 w-auto object-contain"
               />
             )}
             <div>
-              <h1 className="text-xl font-semibold text-white">{data.event_name}</h1>
+              <h1 className="text-xl font-semibold text-white" style={{ fontFamily: FONT_FAMILIES[brandingConfig.brand_font] }}>
+                {data.event_name}
+              </h1>
               <p className="text-sm text-white/60">{data.total_photos} photos</p>
             </div>
           </div>
@@ -628,19 +798,25 @@ export default function SlideshowPage() {
       {/* ── Connection Status ── */}
       <div className="absolute top-4 right-4 z-30">
         {isConnected ? (
-          <div className="flex items-center gap-1.5 text-emerald-400 text-xs bg-black/40 px-2 py-1 rounded-full">
+          <div className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-full" style={{
+            color: '#10b981',
+            backgroundColor: 'rgba(0,0,0,0.4)'
+          }}>
             <Wifi className="w-3.5 h-3.5" />
             <span>Live</span>
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 text-white/40 text-xs bg-black/40 px-2 py-1 rounded-full">
+          <div className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-full" style={{
+            color: isDarkTheme ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.5)',
+            backgroundColor: 'rgba(0,0,0,0.4)'
+          }}>
             <WifiOff className="w-3.5 h-3.5" />
             <span>Offline</span>
           </div>
         )}
       </div>
 
-      {/* ── QR Code - Right Side Overlay (Touching right border) ── */}
+      {/* ── QR Code - Right Side Overlay ── */}
       <AnimatePresence>
         {showQR && qrCodeUrl && (
           <motion.div
@@ -651,11 +827,18 @@ export default function SlideshowPage() {
             className="absolute top-1/2 right-0 -translate-y-1/2 z-40 flex flex-col items-end"
           >
             {/* QR Code Container - Right aligned */}
-            <div className="bg-white/95 backdrop-blur-sm rounded-l-2xl shadow-2xl p-4 pr-0 border-l border-t border-b border-white/20">
+            <div
+              className="backdrop-blur-sm rounded-l-2xl shadow-2xl p-4 pr-0 border-l border-t border-b"
+              style={{
+                backgroundColor: isDarkTheme ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.98)',
+                borderColor: 'rgba(0,0,0,0.1)'
+              }}
+            >
               {/* Close button */}
               <button
                 onClick={() => setShowQR(false)}
-                className="absolute -top-2 -left-2 w-8 h-8 flex items-center justify-center rounded-full bg-black/80 hover:bg-black text-white transition-colors shadow-lg"
+                className="absolute -top-2 -left-2 w-8 h-8 flex items-center justify-center rounded-full text-white transition-colors shadow-lg"
+                style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -671,8 +854,10 @@ export default function SlideshowPage() {
 
               {/* Text */}
               <div className="text-center pr-4">
-                <p className="text-slate-800 font-semibold text-sm">Scan to Find Your Photos</p>
-                <p className="text-slate-500 text-xs mt-1">
+                <p className="font-semibold text-sm" style={{ color: theme.text, fontFamily: FONT_FAMILIES[brandingConfig.brand_font] }}>
+                  Scan to Find Your Photos
+                </p>
+                <p className="text-xs mt-1" style={{ color: theme.subtext }}>
                   Point your camera at the code
                 </p>
               </div>
@@ -688,7 +873,12 @@ export default function SlideshowPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/60 to-transparent z-20"
+            className="absolute bottom-0 left-0 right-0 p-6 z-20"
+            style={{
+              background: isDarkTheme
+                ? 'linear-gradient(to top, rgba(0,0,0,0.6), transparent)'
+                : 'linear-gradient(to top, rgba(0,0,0,0.5), transparent)'
+            }}
           >
             {/* Progress bar */}
             <div className="mb-4">
@@ -698,12 +888,19 @@ export default function SlideshowPage() {
                     key={idx}
                     onClick={() => setCurrentIndex(idx)}
                     className={`h-1 flex-1 rounded-full transition-colors ${
-                      idx === currentIndex ? 'bg-white' : 'bg-white/20 hover:bg-white/40'
+                      idx === currentIndex ? '' : 'hover:opacity-80'
                     }`}
+                    style={{
+                      backgroundColor: idx === currentIndex
+                        ? brandingConfig.brand_primary_color
+                        : 'rgba(255,255,255,0.2)'
+                    }}
                   />
                 ))}
                 {photos.length > 50 && (
-                  <span className="text-white/40 text-xs ml-2">+{photos.length - 50} more</span>
+                  <span className="text-xs ml-2" style={{ color: 'rgba(255,255,255,0.4)' }}>
+                    +{photos.length - 50} more
+                  </span>
                 )}
               </div>
             </div>
@@ -714,7 +911,8 @@ export default function SlideshowPage() {
                 {/* Previous */}
                 <button
                   onClick={goToPrev}
-                  className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                  className="w-10 h-10 flex items-center justify-center rounded-full text-white transition-colors"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -722,7 +920,8 @@ export default function SlideshowPage() {
                 {/* Play/Pause */}
                 <button
                   onClick={() => setIsPlaying(prev => !prev)}
-                  className="w-12 h-12 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                  className="w-12 h-12 flex items-center justify-center rounded-full text-white transition-colors"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                 >
                   {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
                 </button>
@@ -730,14 +929,15 @@ export default function SlideshowPage() {
                 {/* Next */}
                 <button
                   onClick={goToNext}
-                  className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                  className="w-10 h-10 flex items-center justify-center rounded-full text-white transition-colors"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                 >
                   <ChevronRight className="w-5 h-5" />
                 </button>
               </div>
 
               {/* Photo counter */}
-              <div className="text-white/60 text-sm">
+              <div className="text-sm" style={{ color: 'rgba(255,255,255,0.6)' }}>
                 {currentIndex + 1} / {photos.length}
               </div>
 
@@ -747,11 +947,12 @@ export default function SlideshowPage() {
                 {data?.slideshow.show_qr && (
                   <button
                     onClick={() => setShowQR(true)}
-                    className={`w-10 h-10 flex items-center justify-center rounded-full text-white transition-colors ${
-                      showQR
-                        ? 'bg-violet-500 hover:bg-violet-400'
-                        : 'bg-white/10 hover:bg-white/20'
-                    }`}
+                    className="w-10 h-10 flex items-center justify-center rounded-full text-white transition-colors"
+                    style={{
+                      backgroundColor: showQR
+                        ? brandingConfig.brand_primary_color
+                        : 'rgba(255,255,255,0.1)'
+                    }}
                     title="Show QR Code (Q)"
                   >
                     <QrCode className="w-5 h-5" />
@@ -761,7 +962,8 @@ export default function SlideshowPage() {
                 {/* Fullscreen */}
                 <button
                   onClick={toggleFullscreen}
-                  className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                  className="w-10 h-10 flex items-center justify-center rounded-full text-white transition-colors"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                   title="Fullscreen (F)"
                 >
                   {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
@@ -770,7 +972,7 @@ export default function SlideshowPage() {
             </div>
 
             {/* Keyboard shortcuts hint */}
-            <div className="text-center mt-4 text-white/40 text-xs">
+            <div className="text-center mt-4 text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
               ← → Navigate • Space Play/Pause • F Fullscreen • Q QR Code
             </div>
           </motion.div>
@@ -778,9 +980,24 @@ export default function SlideshowPage() {
       </AnimatePresence>
 
       {/* ── Powered by (if enabled) ── */}
-      {data?.branding.brand_show_powered_by && (
+      {brandingConfig.brand_show_powered_by && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 pointer-events-none z-10">
-          <span className="text-white/30 text-xs">Powered by SNAPMATCH</span>
+          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>Powered by SNAPMATCH</span>
+        </div>
+      )}
+
+      {/* ── Custom Footer Text (if set) ── */}
+      {brandingConfig.brand_footer_text && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+          <span
+            className="text-xs"
+            style={{
+              color: 'rgba(255,255,255,0.5)',
+              fontFamily: FONT_FAMILIES[brandingConfig.brand_font]
+            }}
+          >
+            {brandingConfig.brand_footer_text}
+          </span>
         </div>
       )}
     </div>
