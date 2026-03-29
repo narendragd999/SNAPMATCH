@@ -26,11 +26,11 @@ def upgrade() -> None:
         # Email notification preferences
         ('notify_on_guest_upload', sa.Column('notify_on_guest_upload', sa.Boolean(), nullable=True, server_default=sa.text('true'))),
         ('notify_on_expiry_warning', sa.Column('notify_on_expiry_warning', sa.Boolean(), nullable=True, server_default=sa.text('true'))),
-        ('expiry_warning_days', sa.Column('expiry_warning_days', sa.Integer(), nullable=True, server_default=7)),
+        ('expiry_warning_days', sa.Column('expiry_warning_days', sa.Integer(), nullable=True, server_default=sa.text('7'))),
         ('notify_on_processing_complete', sa.Column('notify_on_processing_complete', sa.Boolean(), nullable=True, server_default=sa.text('true'))),
         # Tracking for notification history
         ('last_notification_at', sa.Column('last_notification_at', sa.DateTime(), nullable=True)),
-        ('notifications_sent_count', sa.Column('notifications_sent_count', sa.Integer(), default=0)),
+        ('notifications_sent_count', sa.Column('notifications_sent_count', sa.Integer(), nullable=True, server_default=sa.text('0'))),
     ]
     
     for col_name, col_def in additions:
@@ -42,9 +42,9 @@ def downgrade() -> None:
     for col in [
         'notifications_sent_count',
         'last_notification_at',
-        'notify_on_processing_complete'
-        'expiry_warning_days'
-        'notify_on_expiry_warning'
-        'notify_on_guest_upload'
+        'notify_on_processing_complete',
+        'expiry_warning_days',
+        'notify_on_expiry_warning',
+        'notify_on_guest_upload',
     ]:
         op.drop_column('events', col)

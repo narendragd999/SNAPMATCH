@@ -295,6 +295,24 @@ def finalize_event(self, photo_results: list[dict], event_id: int):
         # ── Phase: done ───────────────────────────────────────────────────────
         r.set(f"event:{event_id}:phase", "done", ex=86400)             # ← ADD
 
+        # ── GUEST NOTIFICATION: Notify guests if configured ───────────────────────
+        # This is graceful - if no guests exist or notifications are disabled, nothing happens
+        try:
+            event = db.query(Event).filter(Event.id == event_id).first()
+            if event and getattr(event, 'notify_on_processing_complete', True):
+                from app.models.guest import Guest
+                from sqlalchemy import func
+                pending_guests = db.query(func.count(Guest.id)).filter(
+                    Guest.event_id == event_id,
+                    Guest.email_sent == False
+                ).scalar() or 0
+                
+                if pending_guests > 0:
+                    notify_guests_task.apply_async(args=[event_id], queue="photo_processing")
+                    print(f"📧 Queued notification for {pending_guests} guests")
+        except Exception as e:
+            print(f"⚠️ Guest notification check failed (non-fatal): {e}")
+
         _redis_cleanup(event_id)
         _release_lock(event_id)
 
@@ -322,6 +340,80 @@ def enrich_event_photos(self, event_id: int):
     """Run Places365 + YOLO on all approved photos — delegates to ai_enrichment_task."""
     from app.workers.ai_enrichment_task import ai_enrich_event
     ai_enrich_event.apply_async(args=[event_id], queue=AI_QUEUE)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASK 6 — GUEST NOTIFICATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery.task(bind=True, queue=PHOTO_QUEUE)
+def notify_guests_task(self, event_id: int):
+    """
+    Send 'Photos Ready' notifications to guests.
+    Graceful: Does nothing if no guests or if notifications are disabled.
+    """
+    db = SessionLocal()
+    try:
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            return {"status": "event_not_found"}
+        
+        # Check if notifications are enabled for this event
+        if not getattr(event, 'notify_on_processing_complete', True):
+            return {"status": "notifications_disabled"}
+        
+        # Get guests who haven't been notified
+        from app.models.guest import Guest
+        guests = db.query(Guest).filter(
+            Guest.event_id == event_id,
+            Guest.email_sent == False
+        ).all()
+        
+        if not guests:
+            return {"status": "no_guests_to_notify"}
+        
+        # Get owner info
+        from app.models.user import User
+        owner = db.query(User).filter(User.id == event.owner_id).first()
+        photographer_name = owner.name or owner.email if owner else "the photographer"
+        
+        # Build event URL
+        event_url = f"https://snapmatch.com/public/{event.public_token}"
+        
+        # Import email functions
+        from app.api.guest_routes import send_bulk_photos_ready_emails
+        
+        # Send emails
+        emails = [g.email for g in guests]
+        results = send_bulk_photos_ready_emails(
+            emails=emails,
+            event_name=event.name,
+            photo_count=event.image_count or 0,
+            event_url=event_url,
+            photographer_name=photographer_name,
+            db=db,
+        )
+        
+        # Update guest records
+        for guest in guests:
+            if results['sent'] > 0:
+                guest.mark_email_sent()
+        
+        # Update event notification tracking
+        if results['sent'] > 0:
+            event.record_notification_sent()
+        
+        db.commit()
+        print(f"✅ Guest notifications sent: {results['sent']} success, {results['failed']} failed")
+        
+        return {"status": "completed", "sent": results['sent'], "failed": results['failed']}
+        
+    except Exception as e:
+        print(f"❌ notify_guests_task failed: {e}")
+        import traceback; traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

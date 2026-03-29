@@ -10,6 +10,7 @@ from app.database.db import Base
 from app.models.user           import User
 from app.models.event          import Event
 from app.models.cluster        import Cluster
+from app.models.guest          import Guest          # noqa: F401 — required for autogenerate
 from app.models.pricing_config import PricingConfig  # noqa: F401 — required for autogenerate
 
 config = context.config
