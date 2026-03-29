@@ -312,7 +312,7 @@ export default function PublicSelfiePage() {
           setWatermarkConfig({ ...DEFAULT_WATERMARK_CONFIG, enabled: !!data.watermark_enabled });
         }
         // 🎨 Set branding config
-        setBrandingConfig({
+        const newBrandingConfig = {
           template_id: data.template_id || 'classic',
           brand_logo_url: data.brand_logo_url || '',
           brand_primary_color: data.brand_primary_color || '#3b82f6',
@@ -320,7 +320,12 @@ export default function PublicSelfiePage() {
           brand_font: data.brand_font || 'system',
           brand_footer_text: data.brand_footer_text || '',
           brand_show_powered_by: data.brand_show_powered_by !== false,
+        };
+        console.log('[Branding] Event data received:', {
+          brand_logo_url: data.brand_logo_url,
+          template_id: data.template_id,
         });
+        setBrandingConfig(newBrandingConfig);
       })
       .catch(console.error);
   }, [token, API]);
@@ -1442,8 +1447,15 @@ export default function PublicSelfiePage() {
               <img
                 src={brandingConfig.brand_logo_url}
                 alt="Logo"
+                crossOrigin="anonymous"
                 className="w-9 h-9 rounded-xl object-contain"
                 style={{ background: 'rgba(255,255,255,0.05)' }}
+                onLoad={() => console.log('[Branding] Logo loaded successfully:', brandingConfig.brand_logo_url)}
+                onError={(e) => {
+                  console.error('[Branding] Logo failed to load:', brandingConfig.brand_logo_url, e);
+                  // Hide broken image and show fallback
+                  (e.target as HTMLImageElement).style.display = 'none';
+                }}
               />
             ) : (
               <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ring-2"

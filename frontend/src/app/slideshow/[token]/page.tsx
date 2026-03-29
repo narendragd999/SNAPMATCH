@@ -341,7 +341,7 @@ export default function SlideshowPage() {
         setData(slideshowData);
 
         // 🎨 Set branding config (same as public page)
-        setBrandingConfig({
+        const newBrandingConfig = {
           template_id: slideshowData.branding.template_id || 'classic',
           brand_logo_url: slideshowData.branding.brand_logo_url || '',
           brand_primary_color: slideshowData.branding.brand_primary_color || '#3b82f6',
@@ -349,7 +349,12 @@ export default function SlideshowPage() {
           brand_font: slideshowData.branding.brand_font || 'system',
           brand_footer_text: slideshowData.branding.brand_footer_text || '',
           brand_show_powered_by: slideshowData.branding.brand_show_powered_by !== false,
+        };
+        console.log('[Slideshow Branding] Data received:', {
+          branding: slideshowData.branding,
+          show_branding: slideshowData.slideshow?.show_branding,
         });
+        setBrandingConfig(newBrandingConfig);
 
         // Check PIN verification
         if (!slideshowData.pin_enabled) {
@@ -782,7 +787,13 @@ export default function SlideshowPage() {
               <img
                 src={brandingConfig.brand_logo_url}
                 alt="Logo"
-                className="h-12 w-auto object-contain"
+                crossOrigin="anonymous"
+                className="w-9 h-9 rounded-xl object-contain"
+                onLoad={() => console.log('[Slideshow] Logo loaded successfully:', brandingConfig.brand_logo_url)}
+                onError={(e) => {
+                  console.error('[Slideshow] Logo failed to load:', brandingConfig.brand_logo_url, e);
+                  (e.target as HTMLImageElement).style.display = 'none';
+                }}
               />
             )}
             <div>
