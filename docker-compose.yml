@@ -35,28 +35,16 @@ services:
   # -- Redis --
   redis:
     image: redis:7-alpine
+    container_name: event_redis
+    command: redis-server --bind 0.0.0.0 --protected-mode no
     ports:
       - "6379:6379"
-    container_name: event_redis
-    #command: redis-server --bind 0.0.0.0 --protected-mode no  -----------#old version
-    # ★★★ ADD THESE CONFIGURATION OPTIONS ★★★
-    command: >
-      redis-server 
-      --maxmemory 2gb 
-      --maxmemory-policy allkeys-lru
-      --save ""
-      --appendonly no
-    deploy:
-      resources:
-        limits:
-          memory: 2500M  # Hard limit
-    restart: unless-stopped    
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    
+    restart: unless-stopped
 
   # -- MinIO --
   # S3 API  -> http://localhost:9000
@@ -161,31 +149,34 @@ services:
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
     restart: unless-stopped
 
-    # -- Photo Worker --
-    # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
-    #
-    # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
-    #                    on a 2-core machine. Each InsightFace worker needs
-    #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
-    # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
-    #                    when RAM is tight.
-    # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
-    #                    2 workers x 2 threads = 4 (all logical processors used).
-    # -- Photo Worker (GHA ULTRA-OPTIMIZED) --
+  # -- Photo Worker --
+  # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
+  #
+  # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
+  #                    on a 2-core machine. Each InsightFace worker needs
+  #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
+  # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
+  #                    when RAM is tight.
+  # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
+  #                    2 workers x 2 threads = 4 (all logical processors used).
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
-    shm_size: '4gb'
-    # ★ SINGLE-LINE COMMAND (no multi-line issues!) ★
-    command: celery -A app.workers.celery_worker worker --hostname=gha-worker-%h --concurrency=6 --queues=photo_processing,event_finalize,ai_enrichment,default --prefetch-multiplier=3 --max-tasks-per-child=150 -Ofair --time-limit=300 --soft-time-limit=270 --loglevel=info
+    shm_size: '512mb'
+    command: >
+      celery -A app.workers.celery_worker worker
+      -Q photo_processing
+      --concurrency=4
+      --pool=prefork
+      --prefetch-multiplier=1
+      --loglevel=info
+      --time-limit=180
+      --soft-time-limit=150
+      --without-mingle
+      --without-gossip
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
-      - type: tmpfs
-        target: /tmp
-        tmpfs:
-          size: 8gb
-          mode: 1777
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,14 +184,6 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 14500M
-        reservations:
-          cpus: '4'
-          memory: 14000M
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -210,29 +193,13 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
-      - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-http://localhost:9000}
+      # 2 workers x 2 threads = 4 logical processors fully used, no over-subscription
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - ONNXRUNTIME_NUM_THREADS=1
-      - MAX_MEMORY_MB=13000
-      - PYTHONDONTWRITEBYTECODE=1
-      - EMBEDDINGS_STORAGE=redis
-      - MAX_REDIS_VALUE_MB=50
-      - EMBEDDINGS_TTL_HOURS=24
-      - FINALIZE_CHUNK_SIZE=1000
-      - DB_COMMIT_CHUNK=500
-      - MERGE_CLUSTER_CAP=2000
-      - CELERY_PHOTO_BATCH_SIZE=10
-      - MAX_FACES_PER_PHOTO_FOR_COOCCURRENCE=25
-      - ENABLE_COOCCURRENCE=true
-      - CLUSTER_MERGE_THRESHOLD=0.72
-      - WORKER_MAX_TASKS_PER_CHILD=150
-      - USE_GPU=false
-      - GHA_OPTIMIZED=true
+    mem_limit: 3g
     restart: unless-stopped
-    scale: 1
-
 
   # -- Finalizer Worker --
   # Builds FAISS index from processed face embeddings.
