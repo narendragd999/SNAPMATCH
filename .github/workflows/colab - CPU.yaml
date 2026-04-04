@@ -748,6 +748,7 @@ jobs:
         }
 
         # NOTE: event_celery_photo stopped — Colab handles it
+        tail_worker event_celery_photo    "Photo"
         tail_worker event_celery_finalize "FINALIZE"
         tail_worker event_celery_ai       "AI      "
         tail_worker event_celery_default  "DEFAULT "
