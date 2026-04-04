@@ -24,8 +24,8 @@ from typing import TypedDict
 # is identical to the post-migration experience.
 
 _DEFAULTS = {
-    "free_photo_quota":      500,
-    "free_guest_quota":      100,
+    "free_photo_quota":      5000,
+    "free_guest_quota":      1000,
     "free_validity_days":    7,
     "min_photo_quota":       50,
     "max_photo_quota":       10000,
