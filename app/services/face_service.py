@@ -14,7 +14,7 @@ MAX_DIM = 640
 # face_app model (read-only during inference — thread-safe).
 # Tune down to 2 if you see memory pressure (each thread holds a decoded
 # image in RAM simultaneously).
-MAX_WORKERS = 2
+MAX_WORKERS = 4
 
 # PERF: Hard cap on faces returned per image.
 # A 7-face group photo produces 7 embeddings × recognition overhead.
