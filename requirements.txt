@@ -27,3 +27,5 @@ torchvision
 pyvips>=2.2.1
 boto3==1.35.85
 botocore==1.35.85
+# ✓ NEW: EXIF handling for image orientation
+piexif==1.1.3

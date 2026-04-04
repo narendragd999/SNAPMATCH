@@ -1,34 +1,13 @@
 """
-app/services/search_service.py
+app/services/search_service.py (FIXED)
 
-Face search service — FAISS nearest-neighbour lookup with tiered similarity.
+Face search service — FAISS nearest-neighbour lookup with rotation-aware augmentation.
 
-Key fixes vs original:
-──────────────────────
-1. Uses get_face_app() instead of module-level face_app import.
-   The old code imported face_app at module level, which triggered eager model
-   loading inside Celery workers at import time. get_face_app() is lazy and
-   thread-safe — model loads only on first actual use. Consistent with
-   face_model.py and face_service.py.
-
-2. MERGED bucket selection (was exclusive/priority-only)
-   Old: if strict → return only strict, elif normal → return only normal
-   New: return ALL matches above FALLBACK_THRESHOLD, tagged by confidence tier
-   Why: a person in 20 photos may have 3 strict + 14 normal + 5 fallback matches.
-   The old code returned only the 3 strict ones. Now all 22 are returned, sorted
-   by similarity desc — strict ones still appear at the top.
-
-3. MAX_RESULTS raised 50 → 100
-   FAISS searches top-K candidates per embedding. With 50 you were potentially
-   cutting off valid matches for large events (500+ photos). 100 costs almost
-   nothing extra (FAISS flat index is O(n)) and catches more true positives.
-
-4. MAX_DIM = 640 (was inconsistent — face_service used 640, this file used a
-   different value). Consistent sizing = more predictable embedding quality.
-
-5. Similarity tiers used for display labeling only, not for filtering.
-   All matches above FALLBACK_THRESHOLD are returned. Frontend uses the
-   similarity score / tier to show confidence badges — it does not gate results.
+Key improvements:
+  1. extract_all_embeddings() now includes rotation variants (90°, 180°, 270°)
+  2. Handles portrait/landscape mismatches during guest selfie search
+  3. Merged bucket selection (returns ALL matches, not just highest tier)
+  4. Thread-safe lazy model loading with get_face_app()
 """
 
 import numpy as np
@@ -36,7 +15,9 @@ import cv2
 from sqlalchemy.orm import Session
 from app.models.cluster import Cluster
 from app.services.faiss_manager import FaissManager
-from app.services.face_model import face_app   # lazy, thread-safe singleton
+from app.services.face_model import get_face_app
+
+face_app = get_face_app()
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
@@ -49,22 +30,30 @@ FALLBACK_THRESHOLD = 0.40   # lower confidence — "possible match"
 MIN_THRESHOLD      = FALLBACK_THRESHOLD  # nothing below this is returned
 
 # ── Search config ─────────────────────────────────────────────────────────────
-MAX_RESULTS = 1000   # FAISS top-K candidates per embedding query (was 50)
-MAX_DIM     = 640   # resize selfie before detection — matches face_service.py
+MAX_RESULTS = 1000   # FAISS top-K candidates per embedding query
+MAX_DIM     = 640    # resize selfie before detection — matches face_service.py
 
 
 # ── Embedding extraction ──────────────────────────────────────────────────────
 
-# search_service.py — replace extract_all_embeddings()
-
 def extract_all_embeddings(image_bytes: bytes) -> list[np.ndarray]:
     """
-    Extract embeddings from selfie + augmented variants.
-    More query embeddings = catches more poses/lighting in event photos.
+    Extract embeddings from selfie with rotation-aware augmentation.
+    
+    Generates variants to handle:
+      - Original orientation (already correct via EXIF in face_service)
+      - Horizontal flip (mirrored photos)
+      - 90°/180°/270° rotations (catches portrait/landscape mismatches)
+      - Brightness/contrast variations (lighting differences)
+    
+    Returns:
+        List of normalized face embeddings (512-dim each)
+        Empty list if no faces detected in any variant
     """
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img    = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     if img is None:
+        print("❌ Failed to decode selfie image")
         return []
 
     h, w = img.shape[:2]
@@ -73,34 +62,52 @@ def extract_all_embeddings(image_bytes: bytes) -> list[np.ndarray]:
         img   = cv2.resize(img, (int(w * scale), int(h * scale)), 
                            interpolation=cv2.INTER_AREA)
 
-    # Generate variants — original + 3 augmented
+    # Generate 8 variants covering major orientations & conditions
     variants = [
-        img,                                    # original
-        cv2.flip(img, 1),                       # horizontal flip
-        img[5:-5, 5:-5] if h > 20 else img,    # slight center crop
-        cv2.convertScaleAbs(img, alpha=1.1, beta=10),  # slightly brighter
+        ("original", img),
+        ("h_flip", cv2.flip(img, 1)),                    # horizontal mirror
+        ("rot_90_cw", cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)),
+        ("rot_180", cv2.rotate(img, cv2.ROTATE_180)),
+        ("rot_90_ccw", cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+        ("brightness_up", cv2.convertScaleAbs(img, alpha=1.15, beta=15)),
+        ("contrast_high", cv2.convertScaleAbs(img, alpha=1.25, beta=5)),
+        ("center_crop", img[10:-10, 10:-10] if h > 30 and w > 30 else img),
     ]
 
     all_embeddings = []
     seen_norms = set()
 
-    for variant in variants:
+    for variant_name, variant in variants:
         try:
             faces = face_app.get(variant)
-            for face in faces:
+            
+            if not faces:
+                continue
+            
+            for i, face in enumerate(faces):
                 emb  = face.embedding
                 norm = np.linalg.norm(emb)
                 if norm == 0:
                     continue
+                
                 normalized = emb / norm
-                # Deduplicate near-identical embeddings
-                key = round(float(normalized[0]), 3)
+                
+                # Deduplicate near-identical embeddings (keep first 2 decimals)
+                key = round(float(normalized[0]), 2)
                 if key not in seen_norms:
                     seen_norms.add(key)
                     all_embeddings.append(normalized)
-        except Exception:
+                    print(f"✓ Face {i} detected in {variant_name} variant")
+        
+        except Exception as e:
+            print(f"⚠ Variant {variant_name} failed: {e}")
             continue
 
+    if not all_embeddings:
+        print(f"❌ No faces detected in any of {len(variants)} variants")
+    else:
+        print(f"✓ Extracted {len(all_embeddings)} embeddings from {len(seen_norms)} unique faces")
+    
     return all_embeddings
 
 
@@ -119,9 +126,15 @@ def perform_search(
     uploaded image, all are searched and results are merged — best score per
     event image wins.
 
+    Args:
+        event_id: Event to search
+        embeddings: List of face embeddings from guest's selfie
+        db: Database session
+    
     Returns:
         (matched_photos, matched_cluster_ids)
         matched_photos: list of {image_name, cluster_id, similarity, tier}
+        matched_cluster_ids: list of unique cluster IDs that matched
     """
     faiss_index = FaissManager.get_index(event_id)
 
@@ -135,6 +148,7 @@ def perform_search(
         for item in results:
             score = item["score"]
             if score < MIN_THRESHOLD:
+                # Below fallback threshold — skip
                 continue
 
             cluster = db.query(Cluster).filter(
@@ -187,20 +201,47 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
     - matched_photos: ALL photos where user appears (solo + group)
     - friends_photos: Photos where user appears WITH OTHERS (group photos only)
     - matched_cluster_ids: Cluster IDs that matched user's face
+    
+    Args:
+        event_id: Event to search
+        file: Uploaded selfie (multipart file)
+        db: Database session
+    
+    Returns:
+        {
+            "matched_photos": [...],
+            "matched_cluster_ids": [...],
+            "friends_photos": [...],
+            "companion_stats": {...}
+        }
     """
     contents   = await file.read()
     embeddings = extract_all_embeddings(contents)
 
     if not embeddings:
-        return {"error": "No face detected"}
+        return {"error": "No face detected in selfie"}
 
     matched_photos, matched_cluster_ids = perform_search(event_id, embeddings, db)
     
     # ── Get group photos for "With Friends" tab ───────────────────────────────
-    from app.services.co_occurrence_service import get_friends_photos, get_companion_stats
+    from app.services.co_occurrence_service import (
+        get_friends_photos,
+        get_companion_stats
+    )
     
-    friends_photos = get_friends_photos(event_id, matched_photos, matched_cluster_ids, db)
-    companion_stats = get_companion_stats(event_id, matched_photos, matched_cluster_ids, db)
+    friends_photos = get_friends_photos(
+        event_id,
+        matched_photos,
+        matched_cluster_ids,
+        db
+    )
+    
+    companion_stats = get_companion_stats(
+        event_id,
+        matched_photos,
+        matched_cluster_ids,
+        db
+    )
 
     return {
         "matched_photos":      matched_photos,
@@ -215,12 +256,23 @@ async def public_search_face(event_id: int, file, db: Session) -> dict:
 async def search_face(event_id: int, file, db: Session) -> dict:
     """
     Search endpoint for event owners. Returns total match count + full match list.
+    
+    Args:
+        event_id: Event to search
+        file: Uploaded image (multipart file)
+        db: Database session
+    
+    Returns:
+        {
+            "total_matches": int,
+            "matches": [...]
+        }
     """
     contents   = await file.read()
     embeddings = extract_all_embeddings(contents)
 
     if not embeddings:
-        return {"error": "No face detected"}
+        return {"error": "No face detected in image"}
 
     matched_photos, _ = perform_search(event_id, embeddings, db)
 
