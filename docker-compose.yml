@@ -35,16 +35,28 @@ services:
   # -- Redis --
   redis:
     image: redis:7-alpine
-    container_name: event_redis
-    command: redis-server --bind 0.0.0.0 --protected-mode no
     ports:
       - "6379:6379"
+    container_name: event_redis
+    #command: redis-server --bind 0.0.0.0 --protected-mode no  -----------#old version
+    # ★★★ ADD THESE CONFIGURATION OPTIONS ★★★
+    command: >
+      redis-server 
+      --maxmemory 2gb 
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    deploy:
+      resources:
+        limits:
+          memory: 2500M  # Hard limit
+    restart: unless-stopped    
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+    
 
   # -- MinIO --
   # S3 API  -> http://localhost:9000
@@ -165,15 +177,14 @@ services:
     shm_size: '512mb'
     command: >
       celery -A app.workers.celery_worker worker
-      -Q photo_processing
-      --concurrency=4
-      --pool=prefork
-      --prefetch-multiplier=1
-      --loglevel=info
-      --time-limit=180
-      --soft-time-limit=150
-      --without-mingle
-      --without-gossip
+        --hostname=worker-%h
+        --concurrency=4              
+        --queues=photo_processing,event_finalize,ai_enrichment,default
+        --prefetch-multiplier=2      
+        --max-tasks-per-child=50   
+        -Ofair
+        --time-limit=300
+        --loglevel=info
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
@@ -184,6 +195,11 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2'                   # ★ CHANGED: Limit to 2 cores
+          memory: 4096M               # ★ CHANGED: 4GB (safe for local)
     environment:
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -198,8 +214,23 @@ services:
       - OPENBLAS_NUM_THREADS=1
       - MKL_NUM_THREADS=1
       - ONNXRUNTIME_NUM_THREADS=1
-    mem_limit: 3g
+      # ★★★ ALL THE SCALABILITY VARS FROM BEFORE ★★★
+      - EMBEDDINGS_STORAGE=redis
+      - MAX_REDIS_VALUE_MB=50
+      - EMBEDDINGS_TTL_HOURS=24
+      - FINALIZE_CHUNK_SIZE=1000
+      - DB_COMMIT_CHUNK=500
+      - MAX_MEMORY_MB=3000           # ★ CHANGED: 3GB limit for local
+      - MERGE_CLUSTER_CAP=2000
+      - CELERY_PHOTO_BATCH_SIZE=5     # ★ CHANGED: Smaller batches
+      - MAX_FACES_PER_PHOTO_FOR_COOCCURRENCE=25
+      - ENABLE_COOCCURRENCE=true
+      - CLUSTER_MERGE_THRESHOLD=0.72
+      - WORKER_MAX_TASKS_PER_CHILD=50   # ★ CHANGED: Faster recycling
+      - CELERY_WORKER_CONCURRENCY=2      # ★ NEW: Override for local
+    #mem_limit: 3g
     restart: unless-stopped
+    scale: 1
 
   # -- Finalizer Worker --
   # Builds FAISS index from processed face embeddings.
