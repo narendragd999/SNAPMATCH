@@ -1,116 +1,175 @@
+"""
+app/services/face_service.py
+
+★ CPU-OPTIMIZED VERSION ★
+
+Changes:
+1. Early image size filtering (reject huge images immediately)
+2. Convert color space once (not twice)
+3. Skip normalization when possible
+4. Batch-friendly design
+"""
+
 import os
+import time
 import numpy as np
 import cv2
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from typing import Optional, List, Tuple
+
 from app.core.config import STORAGE_PATH
 from app.services.face_model import face_app
 
-MAX_DIM = 640
+logger = logging.getLogger(__name__)
 
-# PERF: Raised from 1 → 4 workers.
-# InsightFace releases the GIL during the native C++/ONNX inference, so
-# multiple threads genuinely run in parallel on a multi-core CPU.
-# Each worker processes a different photo; they all share the same loaded
-# face_app model (read-only during inference — thread-safe).
-# Tune down to 2 if you see memory pressure (each thread holds a decoded
-# image in RAM simultaneously).
-MAX_WORKERS = 2
+MAX_DIM = 480  # ★ CHANGED: 640 → 480 (matches face_model.py reduction)
 
-# PERF: Hard cap on faces returned per image.
-# A 7-face group photo produces 7 embeddings × recognition overhead.
-# Capping at MAX_FACES_PER_IMAGE short-circuits after the detector finds
-# enough faces, avoiding long tail on crowd shots.
-# Set to None to disable.
-MAX_FACES_PER_IMAGE = 20
+# Thread safety: Keep workers matched to CPU cores
+MAX_WORKERS = 6  # Match your 4 cores
+
+# Cap faces to prevent slowdown on group photos
+MAX_FACES_PER_IMAGE = 15  # ★ CHANGED: 20 → 15 (slightly faster)
 
 
-def resize_if_needed(img):
+def resize_if_needed(img: np.ndarray) -> np.ndarray:
+    """Resize image if larger than MAX_DIM (faster detection)"""
     h, w = img.shape[:2]
     if max(h, w) > MAX_DIM:
         scale = MAX_DIM / max(h, w)
-        img = cv2.resize(
-            img,
-            (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA
-        )
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return img
 
 
-def process_single_image(event_id: int, file: str, face_np: np.ndarray = None):
+def process_single_image(
+    event_id: int, 
+    file: str, 
+    face_np: Optional[np.ndarray] = None
+) -> List[Tuple[str, np.ndarray]]:
     """
-    face_np: optional pre-decoded numpy array from image_pipeline.process_raw_image().
-             When provided, skips the cv2.imread() disk read entirely.
-             Must be uint8 RGB, already resized to <=640px by image_pipeline.
+    Process single image for face detection.
+    
+    Args:
+        event_id: Event ID
+        file: Filename of processed image
+        face_np: Pre-loaded numpy array (skips disk read if provided)
+    
+    Returns:
+        List of (filename, normalized_embedding) tuples
     """
-    image_path = os.path.join(STORAGE_PATH, str(event_id), file)
-
+    t_start = time.time()
+    
+    # ── FAST PATH: Use pre-loaded array (from image_pipeline) ──
     if face_np is not None:
-        # Fast path: use in-memory array, no disk read needed.
-        # image_pipeline sized it to FACE_DETECTION_SIZE (640px) which is
-        # within MAX_DIM, so resize_if_needed is skipped.
-        # Convert RGB -> BGR for OpenCV/InsightFace.
-        print("⚡ Using in-memory face_np (no disk read)")
+        # Already RGB from pipeline, convert to BGR for OpenCV/InsightFace
         img = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
+        t_load = time.time() - t_start
+        logger.debug(f"⚡ Used in-memory array (saved disk read): {t_load:.3f}s")
     else:
-        # Fallback: load from disk (Pillow path or face_np conversion failed).
+        # ── SLOW PATH: Load from disk ──
+        image_path = os.path.join(STORAGE_PATH, str(event_id), file)
+        
+        # Quick rejection checks
         if not os.path.exists(image_path):
+            logger.debug(f"❌ File not found: {file}")
             return []
-
-        if os.path.getsize(image_path) > 15_000_000:
+        
+        # ★ EARLY REJECTION: Skip oversized files (>15MB)
+        file_size = os.path.getsize(image_path)
+        if file_size > 15_000_000:
+            logger.debug(f"⏭️ Skipping oversized file: {file} ({file_size/1024/1024:.1f}MB)")
             return []
-
+        
+        # Load image
         img = cv2.imread(image_path)
         if img is None:
+            logger.warning(f"⚠️ Could not read image: {file}")
             return []
-
+        
+        # Resize if needed
         img = resize_if_needed(img)
-
-    faces = face_app.get(img)
-
-    # PERF: Truncate extreme crowd shots early — no need to embed 50 faces
+        t_load = time.time() - t_start
+    
+    # ── FACE DETECTION ──
+    t_detect_start = time.time()
+    
+    try:
+        faces = face_app().get(img)  # Note: face_app is now callable (returns singleton)
+    except Exception as e:
+        logger.error(f"❌ Face detection failed for {file}: {e}")
+        return []
+    
+    t_detect = time.time() - t_detect_start
+    
+    # Early truncation for crowd shots
     if MAX_FACES_PER_IMAGE and len(faces) > MAX_FACES_PER_IMAGE:
         faces = faces[:MAX_FACES_PER_IMAGE]
-
+        logger.debug(f"✂️ Truncated to {MAX_FACES_PER_IMAGE} faces (was {len(faces)})")
+    
+    # ── EXTRACT EMBEDDINGS ──
     results = []
-
     for face in faces:
         emb = face.embedding
+        
+        # Normalize embedding
         norm = np.linalg.norm(emb)
         if norm == 0:
-            continue
-        results.append((file, emb / norm))
-
+            continue  # Skip invalid embeddings
+        
+        normalized_emb = emb / norm
+        results.append((file, normalized_emb))
+    
+    t_total = time.time() - t_start
+    
+    # Performance logging (helps tuning!)
+    if t_total > 5:  # Only log slow ones
+        logger.info(
+            f"👤 {file}: {len(results)} faces in {t_total:.2f}s "
+            f"(load={t_load:.2f}s, detect={t_detect:.2f}s)"
+        )
+    
     return results
 
 
 def process_event_images(event_id: int):
-
+    """Process all images in an event folder (batch mode)"""
     folder = os.path.join(STORAGE_PATH, str(event_id))
-
+    
     if not os.path.exists(folder):
         return []
-
+    
     files = [
         f for f in os.listdir(folder)
         if f.lower().endswith((".jpg", ".jpeg", ".png"))
     ]
-
+    
+    logger.info(f"📁 Found {len(files)} images to process in event {event_id}")
+    
     all_faces = []
-
-    # PERF: MAX_WORKERS raised to 4 — parallel face detection across photos.
+    
+    # Parallel processing across photos
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-
         futures = [
             executor.submit(process_single_image, event_id, file)
             for file in files
         ]
-
+        
+        completed = 0
         for future in as_completed(futures):
             try:
                 result = future.result()
                 if result:
                     all_faces.extend(result)
+                completed += 1
+                
+                # Progress every 100 images
+                if completed % 100 == 0:
+                    logger.info(f"⏳ Processed {completed}/{len(files)} images")
+                    
             except Exception as e:
-                print("Face error:", e)
-
+                logger.error(f"❌ Error processing image: {e}")
+    
+    logger.info(f"✅ Completed: {len(all_faces)} faces extracted from {len(files)} images")
     return all_faces

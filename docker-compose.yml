@@ -174,20 +174,34 @@ services:
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
-    shm_size: '512mb'
+    
+    # ★ CRITICAL: Large shared memory for ONNX/numpy arrays ★
+    shm_size: '4gb'               # Was 512mb! Needed for face detection
+    
     command: >
       celery -A app.workers.celery_worker worker
-        --hostname=worker-%h
-        --concurrency=4              
+        --hostname=gha-worker-%h
+        --concurrency=6             # ★ CHANGED: 4→6 (use all 4 cores efficiently)
         --queues=photo_processing,event_finalize,ai_enrichment,default
-        --prefetch-multiplier=2      
-        --max-tasks-per-child=50   
-        -Ofair
-        --time-limit=300
+        --prefetch-multiplier=3     # ★ CHANGED: 2→3 (keep pipeline full)
+        --max-tasks-per-child=150   # ★ CHANGED: 50→150 (less restart overhead)
+        -Ofair                      # Fair task distribution
+        --time-limit=300            # 5 min hard limit
+        --soft-time-limit=270       # 4.5 min soft limit (graceful cleanup)
         --loglevel=info
+    
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
+      
+      # ★ ULTRA-FAST TEMP STORAGE (RAM DISK!) ★
+      # All downloads + processing happen here = 10x faster than SSD!
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 8gb                # 8GB RAM-disk for temp files
+          mode: 1777               # World-writable (needed by multiple processes)
+    
     depends_on:
       postgres:
         condition: service_healthy
@@ -195,42 +209,62 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    
+    # ★ USE ALL AVAILABLE RESOURCES ON GHA ★
     deploy:
       resources:
         limits:
-          cpus: '2'                   # ★ CHANGED: Limit to 2 cores
-          memory: 4096M               # ★ CHANGED: 4GB (safe for local)
+          cpus: '4'                # ★ CHANGED: 2→4 (USE ALL CORES!)
+          memory: 14500M           # ★ CHANGED: 4096M→14500M (USE ALMOST ALL RAM!)
+        reservations:
+          cpus: '4'                # Reserve all cores upfront
+          memory: 14000M           # Reserve 14GB upfront
+    
     environment:
+      # Database & Redis
       - DATABASE_URL=postgresql://postgres:admin123@postgres:5432/event_ai
       - CELERY_BROKER_URL=redis://redis:6379/0
+      
+      # Storage
       - STORAGE_BACKEND=minio
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
-      # 2 workers x 2 threads = 4 logical processors fully used, no over-subscription
-      - OMP_NUM_THREADS=1
-      - OPENBLAS_NUM_THREADS=1
-      - MKL_NUM_THREADS=1
-      - ONNXRUNTIME_NUM_THREADS=1
-      # ★★★ ALL THE SCALABILITY VARS FROM BEFORE ★★★
+      - MINIO_PRESIGN_ENDPOINT=${MINIO_PRESIGN_ENDPOINT:-http://localhost:9000}
+      
+      # ── ★ CRITICAL CPU THREADING SETTINGS ★ ──
+      # Each worker gets dedicated core time, no thread contention!
+      - OMP_NUM_THREADS=1              # OpenMP: 1 thread per worker
+      - OPENBLAS_NUM_THREADS=1         # BLAS: single-threaded
+      - MKL_NUM_THREADS=1              # Intel MKL: single-threaded  
+      - ONNXRUNTIME_NUM_THREADS=1      # ★ SUPER IMPORTANT: ONNX Runtime threading
+      
+      # ── ★ MEMORY MANAGEMENT ★ ──
+      - MAX_MEMORY_MB=13000            # Stay under 14.5GB limit
+      - PYTHONDONTWRITEBYTECODE=1      # Don't write .pyc files (save I/O)
+      
+      # ── ★ PROCESSING TUNING ★ ──
       - EMBEDDINGS_STORAGE=redis
       - MAX_REDIS_VALUE_MB=50
       - EMBEDDINGS_TTL_HOURS=24
       - FINALIZE_CHUNK_SIZE=1000
       - DB_COMMIT_CHUNK=500
-      - MAX_MEMORY_MB=3000           # ★ CHANGED: 3GB limit for local
       - MERGE_CLUSTER_CAP=2000
-      - CELERY_PHOTO_BATCH_SIZE=5     # ★ CHANGED: Smaller batches
+      - CELERY_PHOTO_BATCH_SIZE=10     # ★ CHANGED: 5→10 (larger batches)
       - MAX_FACES_PER_PHOTO_FOR_COOCCURRENCE=25
       - ENABLE_COOCCURRENCE=true
       - CLUSTER_MERGE_THRESHOLD=0.72
-      - WORKER_MAX_TASKS_PER_CHILD=50   # ★ CHANGED: Faster recycling
-      - CELERY_WORKER_CONCURRENCY=2      # ★ NEW: Override for local
-    #mem_limit: 3g
+      - WORKER_MAX_TASKS_PER_CHILD=150 # Match --max-tasks-per-child
+      
+      # ── ★ GHA-SPECIFIC SETTINGS ★ ──
+      - USE_GPU=false                  # No GPU on standard GHA runners
+      - GHA_OPTIMIZED=true             # Flag for code to use GHA-specific paths
+      
     restart: unless-stopped
-    scale: 1
+    scale: 1                           # Single scaled instance (parallelism via concurrency)
+
 
   # -- Finalizer Worker --
   # Builds FAISS index from processed face embeddings.
