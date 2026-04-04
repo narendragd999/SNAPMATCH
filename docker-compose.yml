@@ -161,16 +161,16 @@ services:
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
     restart: unless-stopped
 
-  # -- Photo Worker --
-  # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
-  #
-  # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
-  #                    on a 2-core machine. Each InsightFace worker needs
-  #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
-  # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
-  #                    when RAM is tight.
-  # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
-  #                    2 workers x 2 threads = 4 (all logical processors used).
+    # -- Photo Worker --
+    # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
+    #
+    # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
+    #                    on a 2-core machine. Each InsightFace worker needs
+    #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
+    # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
+    #                    when RAM is tight.
+    # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
+    #                    2 workers x 2 threads = 4 (all logical processors used).
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
