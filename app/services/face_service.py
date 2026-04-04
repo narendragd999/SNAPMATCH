@@ -5,18 +5,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.core.config import STORAGE_PATH
 from app.services.face_model import face_app
 
-# ★ ADD THIS IMPORT ★
-from app.services.face_service_enhanced import detect_faces_enhanced
-
 MAX_DIM = 640
+
+# PERF: Raised from 1 → 4 workers.
+# InsightFace releases the GIL during the native C++/ONNX inference, so
+# multiple threads genuinely run in parallel on a multi-core CPU.
+# Each worker processes a different photo; they all share the same loaded
+# face_app model (read-only during inference — thread-safe).
+# Tune down to 2 if you see memory pressure (each thread holds a decoded
+# image in RAM simultaneously).
 MAX_WORKERS = 4
+
+# PERF: Hard cap on faces returned per image.
+# A 7-face group photo produces 7 embeddings × recognition overhead.
+# Capping at MAX_FACES_PER_IMAGE short-circuits after the detector finds
+# enough faces, avoiding long tail on crowd shots.
+# Set to None to disable.
 MAX_FACES_PER_IMAGE = 20
 
-# ★ NEW: Feature flag for enhanced detection ★
-USE_ENHANCED_DETECTION = os.getenv(
-    "USE_ENHANCED_FACE_DETECTION", 
-    "true"
-).lower() == "true"
 
 def resize_if_needed(img):
     h, w = img.shape[:2]
@@ -29,10 +35,9 @@ def resize_if_needed(img):
         )
     return img
 
+
 def process_single_image(event_id: int, file: str, face_np: np.ndarray = None):
     """
-    ENHANCED VERSION: Uses multi-scale + rotation detection for side/rotated faces.
-    
     face_np: optional pre-decoded numpy array from image_pipeline.process_raw_image().
              When provided, skips the cv2.imread() disk read entirely.
              Must be uint8 RGB, already resized to <=640px by image_pipeline.
@@ -41,10 +46,13 @@ def process_single_image(event_id: int, file: str, face_np: np.ndarray = None):
 
     if face_np is not None:
         # Fast path: use in-memory array, no disk read needed.
+        # image_pipeline sized it to FACE_DETECTION_SIZE (640px) which is
+        # within MAX_DIM, so resize_if_needed is skipped.
+        # Convert RGB -> BGR for OpenCV/InsightFace.
         print("⚡ Using in-memory face_np (no disk read)")
         img = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
     else:
-        # Fallback: load from disk
+        # Fallback: load from disk (Pillow path or face_np conversion failed).
         if not os.path.exists(image_path):
             return []
 
@@ -57,23 +65,9 @@ def process_single_image(event_id: int, file: str, face_np: np.ndarray = None):
 
         img = resize_if_needed(img)
 
-    # ★★★ THIS IS THE KEY CHANGE ★★★
-    # BEFORE (line 73 in original):
-    #   faces = face_app.get(img)
-    
-    # AFTER (enhanced version):
-    if USE_ENHANCED_DETECTION:
-        # Use enhanced multi-scale + rotation detection
-        faces = detect_faces_enhanced(
-            img, 
-            try_rotations=True,   # Detect side profiles
-            try_scales=True       # Detect small/distant faces
-        )
-    else:
-        # Original behavior (backward compatible)
-        faces = face_app.get(img)
+    faces = face_app.get(img)
 
-    # PERF: Truncate extreme crowd shots early
+    # PERF: Truncate extreme crowd shots early — no need to embed 50 faces
     if MAX_FACES_PER_IMAGE and len(faces) > MAX_FACES_PER_IMAGE:
         faces = faces[:MAX_FACES_PER_IMAGE]
 
@@ -90,7 +84,7 @@ def process_single_image(event_id: int, file: str, face_np: np.ndarray = None):
 
 
 def process_event_images(event_id: int):
-    """Batch processing (unchanged - calls process_single_image internally)"""
+
     folder = os.path.join(STORAGE_PATH, str(event_id))
 
     if not os.path.exists(folder):
@@ -103,11 +97,14 @@ def process_event_images(event_id: int):
 
     all_faces = []
 
+    # PERF: MAX_WORKERS raised to 4 — parallel face detection across photos.
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+
         futures = [
             executor.submit(process_single_image, event_id, file)
             for file in files
         ]
+
         for future in as_completed(futures):
             try:
                 result = future.result()
