@@ -22,9 +22,9 @@ def get_face_app() -> FaceAnalysis:
         with _lock:
             if _face_app is None:
                 ctx_id   = 0 if USE_GPU else -1
-                det_size = (640, 640) if USE_GPU else (320, 320)
+                det_size = (640, 640) if USE_GPU else (640, 640)
                 app = FaceAnalysis(
-                    name="buffalo_s",
+                    name="buffalo_l",
                     allowed_modules=["detection", "recognition"],
                 )
                 app.prepare(ctx_id=ctx_id, det_size=det_size)
