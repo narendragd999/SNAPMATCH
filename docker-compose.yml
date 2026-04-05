@@ -22,6 +22,7 @@ services:
       POSTGRES_DB: event_ai
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     command: postgres -c listen_addresses='*'
     ports:
       - "5432:5432"
@@ -58,6 +59,7 @@ services:
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio_data:/data
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -80,6 +82,7 @@ services:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
       - ./storage:/app/storage
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     ports:
       - "8000:8000"
     depends_on:
@@ -159,24 +162,27 @@ services:
   #                    when RAM is tight.
   # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
   #                    2 workers x 2 threads = 4 (all logical processors used).
+    # -- Photo Worker (ENTERPRISE UPGRADE for 10K+ photos) --
   celery_photo:
     image: snapfind-backend:latest
     container_name: event_celery_photo
-    shm_size: '512mb'
+    shm_size: '2gb'                          # Increased from 512mb
     command: >
       celery -A app.workers.celery_worker worker
-      -Q photo_processing
-      --concurrency=4
+      -Q photo_processing,event_finalize      # Handle BOTH queues
+      --concurrency=4                         # Increased from 4
       --pool=prefork
-      --prefetch-multiplier=1
+      --prefetch-multiplier=1                 # Fair sharing
       --loglevel=info
-      --time-limit=180
-      --soft-time-limit=150
+      --time-limit=360                        # 6 min/batch (increased)
+      --soft-time-limit=300                   # 5 min soft limit
+      --max-tasks-per-child=1000              # Restart after 1000 tasks (memory leak prevention)
       --without-mingle
       --without-gossip
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints  # NEW: checkpoint volume
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,12 +199,14 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=snapfind
       - MINIO_PUBLIC_URL=/storage
-      # 2 workers x 2 threads = 4 logical processors fully used, no over-subscription
-      - OMP_NUM_THREADS=1
-      - OPENBLAS_NUM_THREADS=1
-      - MKL_NUM_THREADS=1
-      - ONNXRUNTIME_NUM_THREADS=1
-    mem_limit: 3g
+      - OMP_NUM_THREADS=2                      # Each worker gets 2 threads
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - ONNXRUNTIME_NUM_THREADS=2
+      - ENTERPRISE_PROCESSING=true             # NEW: enable enterprise mode
+    mem_limit: 6g                             # Increased from 3g
+    deploy:
+      replicas: 2                             # NEW: 2 worker containers for parallelism!
     restart: unless-stopped
 
   # -- Finalizer Worker --
@@ -222,6 +230,7 @@ services:
     volumes:
       - ./indexes:/app/indexes
       - insightface_models:/root/.insightface
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     depends_on:
       postgres:
         condition: service_healthy
@@ -262,6 +271,7 @@ services:
       --without-gossip
     volumes:
       - ./models:/app/models
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     depends_on:
       postgres:
         condition: service_healthy
@@ -302,6 +312,7 @@ services:
       --without-gossip
     volumes:
       - insightface_models:/root/.insightface
+      - snapfind_checkpoints:/tmp/snapfind_checkpoints   # ← THIS USES THE VOLUME BELOW ⬇️
     depends_on:
       postgres:
         condition: service_healthy
@@ -389,3 +400,5 @@ volumes:
   postgres_data:
   minio_data:
   insightface_models:
+  snapfind_checkpoints:                    # ← ADD THIS LINE
+    driver: local  

@@ -1688,3 +1688,150 @@ def delete_logo(
         db.commit()
 
     return {"message": "Logo removed"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE PROCESSING ENDPOINTS (Add these to your existing event_routes.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/{event_id}/processing/progress")
+async def get_processing_progress_endpoint(
+    event_id: int,
+    current_user: User = Depends(get_current_user),  # Use your existing auth dependency
+    db: Session = Depends(get_db)
+):
+    """
+    Get real-time processing progress for an event.
+    
+    Returns detailed progress including:
+    - Current phase (dispatching, batch_processing, finalizing, etc.)
+    - Completion percentage
+    - Faces detected so far
+    - Estimated time remaining
+    - Per-batch statistics
+    
+    Example Response:
+    {
+        "status": "processing",
+        "phase": "batch_processing",
+        "total_photos": 10000,
+        "num_batches": 200,
+        "batches_completed": 87,
+        "faces_detected": 45000,
+        "progress_percent": 43.5,
+        "eta_remaining": 4520,
+        "eta_human": "1h15m",
+        "started_at": "2026-04-04T15:30:00"
+    }
+    """
+    from app.workers.tasks import get_event_progress
+    
+    try:
+        progress = get_event_progress(event_id)
+        
+        if progress.get("status") == "not_found":
+            raise HTTPException(
+                status_code=404,
+                detail=f"No processing data found for event {event_id}. "
+                       f"The event may not have been processed yet."
+            )
+        
+        return {
+            "success": True,
+            "event_id": event_id,
+            "data": progress
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get progress: {str(e)}"
+        )
+
+
+@router.post("/{event_id}/process-enterprise")
+async def trigger_enterprise_processing(
+    event_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Start enterprise-grade processing for an event.
+    
+    This endpoint uses the new chunked processing pipeline
+    that can handle 10,000+ photos without timeouts.
+    
+    Use this instead of the old /process endpoint for large events.
+    
+    Returns immediately with job details (processing is async).
+    """
+    from app.workers.tasks import process_event
+    
+    # Verify user owns this event
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if event.owner_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # Trigger processing
+    result = process_event.delay(event_id)
+    
+    return {
+        "success": True,
+        "message": "Enterprise processing started",
+        "event_id": event_id,
+        "task_id": result.id,
+        "note": "Use GET /events/{event_id}/processing/progress to track progress"
+    }
+
+
+@router.get("/processing/active")
+async def list_active_processing_jobs(
+    current_user: User = Depends(require_role("admin")),  # Admin only
+    db: Session = Depends(get_db)
+):
+    """
+    List all currently active processing jobs (admin dashboard).
+    
+    Shows system-wide processing load and status.
+    """
+    import redis as redis_lib
+    
+    r = redis_lib.Redis.from_url(
+        os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+        decode_responses=True
+    )
+    
+    # Find all active processing keys
+    active_keys = r.keys("enterprise:event:*")
+    
+    active_jobs = []
+    for key in active_keys:
+        data = r.hgetall(key)
+        if data.get("status") in ["processing", "dispatching"]:
+            try:
+                eid = int(key.split(":")[-1])
+                active_jobs.append({
+                    "event_id": eid,
+                    "status": data.get("status"),
+                    "phase": data.get("phase"),
+                    "progress": float(data.get("progress_pct", 0)),
+                    "total_photos": int(data.get("total_photos", 0)),
+                    "batches_done": int(data.get("batches_completed", 0)),
+                    "batches_total": int(data.get("num_batches", 0)),
+                    "faces_detected": int(data.get("faces_detected", 0)),
+                    "eta": data.get("eta_human", "calculating..."),
+                    "started_at": data.get("started_at"),
+                })
+            except (ValueError, TypeError):
+                continue
+    
+    return {
+        "success": True,
+        "active_jobs_count": len(active_jobs),
+        "active_jobs": sorted(active_jobs, key=lambda x: x["event_id"])
+    }
