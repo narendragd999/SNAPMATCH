@@ -152,16 +152,16 @@ services:
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
     restart: unless-stopped
 
-  # -- Photo Worker --
-  # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
-  #
-  # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
-  #                    on a 2-core machine. Each InsightFace worker needs
-  #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
-  # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
-  #                    when RAM is tight.
-  # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
-  #                    2 workers x 2 threads = 4 (all logical processors used).
+    # -- Photo Worker --
+    # TUNED FOR: 2-core / 4-thread CPU, ~1.5GB RAM available for this worker
+    #
+    # --concurrency=2 -> 1 worker per real CPU core. More workers = thrashing
+    #                    on a 2-core machine. Each InsightFace worker needs
+    #                    ~500MB RAM, so 2 workers = ~1GB - safe given constraints.
+    # --prefetch-multiplier=1 -> don't pre-fetch; avoids holding tasks in memory
+    #                    when RAM is tight.
+    # OMP_NUM_THREADS=2 -> each worker gets both logical cores for ONNX math.
+    #                    2 workers x 2 threads = 4 (all logical processors used).
     # -- Photo Worker (ENTERPRISE UPGRADE for 10K+ photos) --
   celery_photo:
     image: snapfind-backend:latest
@@ -169,14 +169,14 @@ services:
     shm_size: '2gb'                          # Increased from 512mb
     command: >
       celery -A app.workers.celery_worker worker
-      -Q photo_processing,event_finalize      # Handle BOTH queues
-      --concurrency=4                         # Increased from 4
+      -Q photo_processing,event_finalize      
+      --concurrency=4                         
       --pool=prefork
-      --prefetch-multiplier=1                 # Fair sharing
+      --prefetch-multiplier=1                 
       --loglevel=info
-      --time-limit=360                        # 6 min/batch (increased)
-      --soft-time-limit=300                   # 5 min soft limit
-      --max-tasks-per-child=1000              # Restart after 1000 tasks (memory leak prevention)
+      --time-limit=360                        
+      --soft-time-limit=300                   
+      --max-tasks-per-child=1000              
       --without-mingle
       --without-gossip
     volumes:
@@ -204,9 +204,7 @@ services:
       - MKL_NUM_THREADS=2
       - ONNXRUNTIME_NUM_THREADS=2
       - ENTERPRISE_PROCESSING=true             # NEW: enable enterprise mode
-    mem_limit: 6g                             # Increased from 3g
-    deploy:
-      replicas: 2                             # NEW: 2 worker containers for parallelism!
+    mem_limit: 6g                             # Increased from 3g    
     restart: unless-stopped
 
   # -- Finalizer Worker --

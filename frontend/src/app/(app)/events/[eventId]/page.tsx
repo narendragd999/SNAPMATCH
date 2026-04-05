@@ -23,6 +23,8 @@ import EventQuotaBar from "@/components/EventQuotaBar";
 import { BrandingSettings, BrandingConfig } from '@/components/snapmatch/BrandingSettings';
 import { SlideshowSettings } from '@/components/snapmatch/SlideshowSettings';
 import { GuestManagement } from '@/components/GuestManagement';
+import { DevResetButton } from '@/components/DevResetButton';
+
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -2772,6 +2774,16 @@ export default function OwnerEventDetailPage() {
           brand_footer_text: event.brand_footer_text,
           brand_show_powered_by: event.brand_show_powered_by,
         } : null}
+      />
+
+      {/* ── Reset Event DEV ── */}
+      <DevResetButton 
+        eventId={event.id}
+        eventName={event.name}
+        onResetComplete={() => {
+          // Refresh event data after reset
+          fetchEvent();
+        }}
       />
 
     </div>

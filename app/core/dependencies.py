@@ -1,3 +1,9 @@
+"""
+app/core/dependencies.py
+
+Authentication & Authorization Dependencies
+"""
+
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -9,16 +15,30 @@ from app.core.config import SECRET_KEY, ALGORITHM
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 def get_db():
+    """
+    Database session dependency.
+    Yields a session and ensures it's closed after use.
+    """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+
 def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
+    """
+    Get the currently authenticated user from JWT token.
+    
+    Returns:
+        User: The authenticated user object
+    
+    Raises:
+        HTTPException 401: If token is invalid or user not found
+    """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
@@ -43,7 +63,17 @@ def get_current_admin_user(
 ):
     """
     Dependency that ensures the current user is an admin.
-    Raises 403 Forbidden if user is not an admin.
+    
+    Use this for admin-only endpoints:
+        @router.get("/admin-only")
+        async def admin_endpoint(user: User = Depends(get_current_admin_user)):
+            return {"message": "Admin only!"}
+    
+    Returns:
+        User: The authenticated admin user
+    
+    Raises:
+        HTTPException 403: If user is not an admin
     """
     if current_user.role != "admin":
         raise HTTPException(

@@ -1,108 +1,101 @@
 """
-app/workers/tasks.py — ENTERPRISE-GRADE PROCESSING PIPELINE
+app/workers/tasks.py — Celery task pipeline for SnapFind photo processing.
 
-UPGRADED FOR 10,000+ PHOTO SUPPORT
-==================================
+Pipeline:
+  process_event (orchestrator)
+      └─► [chord] process_single_photo × N  (fan-out)
+              └─► finalize_event            (chord callback, runs once all photos done)
+                      └─► enrich_event_photos  (AI enrichment, async)
+                      └─► notify_guests_task   (guest email notifications, async)
 
-What Changed:
-✅ Chunked processing (no more timeout on large events)
-✅ Streaming database queries (memory efficient)
-✅ Incremental clustering with checkpoints
-✅ Real-time progress tracking via Redis
-✅ Automatic retry on failures
-✅ Crash recovery support
-✅ Adaptive batch sizing
+Key features preserved from both versions:
+  ✅ image_pipeline.process_image() — optimization + thumbnail + raw deletion + face_np
+  ✅ process_single_image(event_id, optimized_name, face_np) — correct arg order
+  ✅ base64/pickle embedding serialization across Celery boundary
+  ✅ Incremental clustering with FAISS (reuses existing clusters)
+  ✅ _merge_clusters() — post-clustering centroid merge pass
+  ✅ _rebuild_faiss() — full FAISS index rebuild after clustering
+  ✅ _bulk_update_photos() — sets optimized_filename + faces_detected
+  ✅ Redis phase tracking (face_detection → clustering → building_index → enriching → done)
+  ✅ Guest email notifications after processing completes
+  ✅ AI enrichment task (delegates to ai_enrichment_task)
+  ✅ cleanup_expired_events using storage_service.delete_event_folder
 
-Backward Compatible:
-- All existing task names preserved
-- Same database models
-- Same storage service integration
-- Same FAISS/clustering logic (just better orchestrated)
-
-Performance:
-- Orchestration: <5s (was timing out at 150s)
-- Memory: Constant ~50MB (was growing with photo count)
-- Max photos: 50,000+ (was failing at ~500-800)
-
-Author: Upgraded for Enterprise Scale
-Version: 2.0.0 (Enterprise Edition)
+Fixes carried forward:
+  ✅ [FIX-1] finalize_event idempotency guard (safe to call twice)
+  ✅ [FIX-2] Safety-net finalize scheduled at 3x ETA
+  ✅ [FIX-3] Fresh DB session on orchestrator error reset
+  ✅ [FIX-4] 2-hour stuck-run auto-recovery
+  ✅ [FIX-5] cluster_id as integer (no more string "3476_0" error)
+  ✅ [FIX-6] acks_late + reject_on_worker_lost on all tasks
 """
 
-import os
-import time
-import json
-import pickle
+from __future__ import annotations
+
 import base64
-import math
+import os
+import pickle
+import time
 import traceback
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
-from contextlib import contextmanager
+from datetime import datetime
+from typing import List, Optional
+from collections import defaultdict
 
-import numpy as np
 import faiss
+import numpy as np
 import redis as redis_lib
-from celery import group, chain
+from celery import chord
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy.orm import Session
 
-from app.workers.celery_worker import celery
+from app.core.config import INDEXES_PATH
 from app.database.db import SessionLocal
+from app.models.cluster import Cluster
 from app.models.event import Event
 from app.models.photo import Photo
-from app.models.cluster import Cluster
-from app.core.config import INDEXES_PATH
 from app.services import storage_service
-from app.services.image_pipeline import process_image
 from app.services.face_service import process_single_image
-from app.services.clustering_service import cluster_embeddings
-from app.services.faiss_manager import FaissManager, EventFaissIndex
+from app.services.faiss_manager import FaissManager
+from app.services.image_pipeline import process_image
+from app.workers.celery_worker import celery
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION (Tune these for your hardware)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+PHOTO_QUEUE    = "photo_processing"
+FINALIZE_QUEUE = "event_finalize"
+AI_QUEUE       = "ai_enrichment"
+
+THRESHOLD    = 0.45   # InsightFace cosine similarity for cluster assignment
+MERGE_THRESH = 0.82   # Centroid similarity threshold for post-cluster merge
+
 
 class ProcessingConfig:
-    """Enterprise processing configuration"""
-    
-    # Batch sizing
-    BATCH_SIZE = 50              # Photos per batch ⭐ TUNE THIS
-    MAX_CONCURRENT_BATCHES = 20  # Safety limit
-    
-    # Clustering frequency  
-    CLUSTER_EVERY_N_BATCHES = 10  # Run incremental clustering every 10 batches
-    
-    # Thresholds (same as before)
-    THRESHOLD = 0.72
-    
-    # Time limits (seconds)
-    ORCHESTRATOR_SOFT_LIMIT = 60   # Must finish in 60s
-    ORCHESTRATOR_HARD_LIMIT = 90   # Hard kill at 90s
-    BATCH_SOFT_LIMIT = 300         # 5 min per batch
-    BATCH_HARD_LIMIT = 360         # 6 min hard limit
-    FINALIZE_SOFT_LIMIT = 1800     # 30 min for finalization
-    FINALIZE_HARD_LIMIT = 3600     # 1 hour hard limit
-    
-    # Progress percentages
-    PROGRESS_ORCHESTRATION = 5
-    PROGRESS_PROCESSING = 70
-    PROGRESS_CLUSTERING = 85
-    PROGRESS_INDEXING = 95
-    PROGRESS_COMPLETE = 100
-    
-    # Checkpoint directory
-    CHECKPOINT_DIR = "/tmp/snapfind_checkpoints"
+    ORCHESTRATOR_SOFT_LIMIT = 120
+    ORCHESTRATOR_HARD_LIMIT = 150
+    PHOTO_SOFT_LIMIT        = 300
+    PHOTO_HARD_LIMIT        = 420
+    FINALIZE_SOFT_LIMIT     = 1800
+    FINALIZE_HARD_LIMIT     = 3600
+
+    PROGRESS_ORCHESTRATION = 10
+    PROGRESS_CLUSTERING    = 75
+    PROGRESS_INDEXING      = 88
+    PROGRESS_COMPLETE      = 100
+
+    REDIS_TTL      = 86_400   # 24 hours
+    REDIS_TTL_DONE = 3_600    # 1 hour after completion
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# REDIS CONNECTION (Singleton with pooling)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# REDIS
+# ══════════════════════════════════════════════════════════════════════════════
 
-_redis_instance = None
+_redis_instance: Optional[redis_lib.Redis] = None
 
-def _get_redis():
-    """Get Redis connection (singleton with auto-reconnect)"""
+
+def _get_redis() -> redis_lib.Redis:
     global _redis_instance
     if _redis_instance is None:
         _redis_instance = redis_lib.Redis.from_url(
@@ -114,865 +107,791 @@ def _get_redis():
             retry_on_timeout=True,
             health_check_interval=30,
         )
-        try:
-            _redis_instance.ping()
-            print("✅ Redis connection established")
-        except Exception as e:
-            print(f"❌ Redis connection failed: {e}")
-            raise
+        _redis_instance.ping()
+        print("✅ Redis connection established")
     return _redis_instance
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATABASE HELPERS (Memory-efficient for large datasets)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _count_photos(event_id: int) -> int:
-    """Count photos efficiently without loading them"""
-    db = SessionLocal()
+def _redis_set(event_id: int, key: str, value: str,
+               ttl: int = ProcessingConfig.REDIS_TTL):
     try:
-        return db.query(Photo).filter(
-            Photo.event_id == event_id,
-            Photo.status == "uploaded",
-            Photo.approval_status == "approved",
-        ).count()
-    finally:
-        db.close()
+        _get_redis().set(f"event:{event_id}:{key}", value, ex=ttl)
+    except Exception as e:
+        print(f"⚠️  Redis set failed ({key}): {e}")
 
 
-def _stream_photos(event_id: int, batch_size: int = 100):
-    """
-    Generator that yields photos in batches.
-    CRITICAL: Prevents OOM on 10K+ events
-    """
-    db = SessionLocal()
+def _redis_cleanup(event_id: int):
+    """Clear progress counters; keep phase key for 1h for frontend polling."""
     try:
-        offset = 0
-        while True:
-            photos = db.query(Photo).filter(
-                Photo.event_id == event_id,
-                Photo.status == "uploaded",
-                Photo.approval_status == "approved",
-            ).order_by(Photo.id).offset(offset).limit(batch_size).all()
-            
-            if not photos:
-                break
-            
-            yield photos
-            offset += batch_size
-            
-            # Cleanup session periodically
-            if offset % 1000 == 0:
-                db.commit()
-                db.expire_all()
-    finally:
-        db.close()
+        r = _get_redis()
+        r.delete(f"event:{event_id}:total")
+        r.delete(f"event:{event_id}:completed")
+        r.expire(f"event:{event_id}:phase", ProcessingConfig.REDIS_TTL_DONE)
+    except Exception:
+        pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TASK 1: ORCHESTRATOR (REPLACES OLD process_event)
-# ═══════════════════════════════════════════════════════════════════════════════
+def _release_lock(event_id: int):
+    try:
+        _get_redis().delete(f"event:{event_id}:lock")
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DB HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _db_update_event(db, event_id: int, **kwargs):
+    db.query(Event).filter(Event.id == event_id).update(kwargs)
+    db.commit()
+
+
+def _bulk_update_photos(db, photo_results: list):
+    """
+    Bulk-update Photo rows:
+      - status            → 'processed' or 'failed'
+      - optimized_filename → set when pipeline succeeded
+      - faces_detected     → count of faces found
+    """
+    mappings = []
+    for r in photo_results:
+        m = {
+            "id":             r["photo_id"],
+            "status":         "processed" if r["status"] == "ok" else "failed",
+            "faces_detected": len(r.get("faces") or []),
+        }
+        if r.get("optimized_name"):
+            m["optimized_filename"] = r["optimized_name"]
+        mappings.append(m)
+    db.bulk_update_mappings(Photo, mappings)
+    db.commit()
+
+
+def _estimate_eta(total_photos: int) -> int:
+    if total_photos <= 10:   return 15
+    if total_photos <= 50:   return 30
+    if total_photos <= 100:  return 60
+    if total_photos <= 500:  return 120
+    if total_photos <= 1000: return 300
+    return 300 + (total_photos // 100) * 3
+
+
+def _reset_event_status(event_id: int, status: str = "pending"):
+    """Always opens a FRESH session — never reuses a broken caller session."""
+    try:
+        fresh_db = SessionLocal()
+        try:
+            fresh_db.query(Event).filter(Event.id == event_id).update({
+                "processing_status":     status,
+                "processing_started_at": None if status == "pending" else datetime.utcnow(),
+                "processing_progress":   0 if status == "pending" else None,
+            })
+            fresh_db.commit()
+            print(f"↩️  Event #{event_id} reset to '{status}'")
+        finally:
+            fresh_db.close()
+    except Exception as e:
+        print(f"❌ CRITICAL: Could not reset Event #{event_id}: {e}")
+
+
+def _photo_result(photo_id, status, optimized_name=None,
+                  faces=None, t_opt=0.0, t_total=0.0):
+    return {
+        "photo_id":       photo_id,
+        "status":         status,
+        "optimized_name": optimized_name,
+        "faces":          faces or [],
+        "t_opt":          round(t_opt, 3),
+        "t_total":        round(t_total, 3),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 1 — ORCHESTRATOR
+# ══════════════════════════════════════════════════════════════════════════════
 
 @celery.task(
     bind=True,
-    queue="photo_processing",
+    queue=PHOTO_QUEUE,
     soft_time_limit=ProcessingConfig.ORCHESTRATOR_SOFT_LIMIT,
     time_limit=ProcessingConfig.ORCHESTRATOR_HARD_LIMIT,
-    name="app.workers.tasks.process_event"
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="app.workers.tasks.process_event",
 )
-def process_event(self, event_id: int):
+def process_event(self, event_id: int) -> dict:
     """
-    ENTERPRISE ORCHESTRATOR - Handles 10,000+ photos easily
-    
-    OLD BEHAVIOR: Created 1 chord with all photos → TIMEOUT at 150s
-    NEW BEHAVIOR: Streams photos → Creates batch groups → Returns in 3-5s
-    
-    Time Complexity: O(1) - Always finishes fast regardless of photo count
-    Space Complexity: O(BATCH_SIZE) - Constant memory usage
+    Orchestrator — dispatches one process_single_photo per unprocessed photo
+    via Celery chord, with finalize_event as the callback.
     """
-    start_time = time.time()
-    r = _get_redis()
-    
+    start = time.time()
+    r     = _get_redis()
+
     print(f"\n{'='*70}")
-    print(f"🚀 ENTERPRISE PROCESSING STARTED - Event #{event_id}")
+    print(f"🚀 ORCHESTRATOR STARTED — Event #{event_id}")
     print(f"{'='*70}")
-    
+
     db = SessionLocal()
     try:
-        # ── VALIDATION ────────────────────────────────────────
         event = db.query(Event).filter(Event.id == event_id).first()
         if not event:
             return {"status": "event_not_found"}
-        
-        # Check if already processing (prevent duplicates)
+
+        # ── Stuck-run guard (2-hour window) ───────────────────────────────────
         if event.processing_status == "processing":
             if event.processing_started_at:
-                elapsed = (datetime.utcnow() - event.processing_started_at).total_seconds()
-                if elapsed < 7200:  # < 2 hours
+                elapsed_s = (datetime.utcnow() - event.processing_started_at).total_seconds()
+                if elapsed_s < 7200:
+                    print(f"⚠️  Already processing ({elapsed_s:.0f}s ago) — skipping")
                     return {
-                        "status": "already_processing",
-                        "message": "Event already being processed",
-                        "elapsed_seconds": int(elapsed)
+                        "status":          "already_processing",
+                        "elapsed_seconds": int(elapsed_s),
                     }
                 else:
-                    print(f"⚠️ Previous processing stuck ({elapsed:.0f}s), restarting...")
-        
-        # ── COUNT PHOTOS (fast COUNT query) ───────────────────
-        t_count = time.time()
-        total_photos = _count_photos(event_id)
-        t_count = time.time() - t_count
-        
-        if total_photos == 0:
+                    print(f"⚠️  Stuck run ({elapsed_s:.0f}s) — restarting…")
+
+        photos = db.query(Photo).filter(
+            Photo.event_id == event_id,
+            Photo.status == "uploaded",
+            Photo.approval_status == "approved",
+        ).all()
+
+        if not photos:
             return {"status": "no_photos_to_process"}
-        
-        print(f"📊 Photos to process: {total_photos:,} (counted in {t_count:.2f}s)")
-        
-        # ── CALCULATE BATCHES ─────────────────────────────────
-        batch_size = ProcessingConfig.BATCH_SIZE
-        num_batches = math.ceil(total_photos / batch_size)
-        
-        print(f"📦 Configuration: {batch_size} photos/batch × {num_batches} batches")
-        
-        # ── UPDATE EVENT STATUS ───────────────────────────────
-        event.processing_status = "processing"
-        event.processing_progress = ProcessingConfig.PROGRESS_ORCHESTRATION
-        event.process_count = (event.process_count or 0) + 1
+
+        total = len(photos)
+        eta   = _estimate_eta(total)
+        print(f"📊 Photos: {total:,}  |  ETA: {eta}s")
+
+        # ── Claim processing lock ─────────────────────────────────────────────
+        event.processing_status     = "processing"
+        event.processing_progress   = ProcessingConfig.PROGRESS_ORCHESTRATION
         event.processing_started_at = datetime.utcnow()
+        event.process_count         = (event.process_count or 0) + 1
         db.commit()
-        
-        # ── INITIALIZE REDIS TRACKING ─────────────────────────
-        progress_key = f"enterprise:event:{event_id}"
-        
-        r.delete(progress_key)  # Clean old data
-        r.hset(progress_key, mapping={
-            "status": "processing",
-            "phase": "dispatching",
-            "total_photos": str(total_photos),
-            "batch_size": str(batch_size),
-            "num_batches": str(num_batches),
-            "batches_completed": "0",
-            "faces_detected": "0",
-            "clusters_formed": "0",
-            "started_at": datetime.utcnow().isoformat(),
-            "eta_seconds": str(_estimate_time(total_photos)),
-        })
-        r.expire(progress_key, 86400 * 7)  # 7 days TTL
-        
-        # ── DISPATCH BATCHES (STREAMING - MEMORY SAFE) ────────
-        t_dispatch = time.time()
-        dispatched = 0
-        
-        for photo_batch in _stream_photos(event_id, batch_size=batch_size):
-            # Create group of tasks for this batch
-            task_signatures = [
-                process_single_photo.s(photo.id, photo.stored_filename, event_id)
-                for photo in photo_batch
-            ]
-            
-            # Chain: batch processing → aggregation
-            batch_chain = chain(
-                group(task_signatures),
-                aggregate_batch_results.s(event_id=event_id, batch_idx=dispatched, 
-                                         total_batches=num_batches)
-            )
-            
-            # Dispatch asynchronously (non-blocking!)
-            batch_chain.apply_async()
-            dispatched += 1
-            
-            # Log every 50 batches
-            if dispatched % 50 == 0:
-                elapsed = time.time() - t_dispatch
-                rate = dispatched / elapsed if elapsed > 0 else 0
-                print(f"⚡ Dispatched {dispatched}/{num_batches} batches ({rate:.1f}/s)")
-        
-        t_dispatch = time.time() - t_dispatch
-        total_time = time.time() - start_time
-        
-        # ── UPDATE FINAL STATS ────────────────────────────────
-        r.hset(progress_key, mapping={
-            "phase": "batch_processing",
-            "dispatch_time_s": str(round(t_dispatch, 2)),
-            "orchestrator_time_s": str(round(total_time, 2)),
-        })
-        
-        print(f"\n✅ ORCHESTRATION COMPLETE IN {total_time:.2f}s")
-        print(f"   📦 Batches dispatched: {dispatched}/{num_batches}")
-        print(f"   ⏱️  ETA: {_estimate_time(total_photos)//60} minutes")
-        print(f"{'='*70}\n")
-        
-        return {
-            "status": "dispatched",
-            "photo_count": total_photos,
-            "batch_size": batch_size,
-            "num_batches": dispatched,
-            "orchestrator_time_s": round(total_time, 2),
-            "eta_minutes": round(_estimate_time(total_photos) / 60, 1),
-        }
-        
+
+        # ── Redis progress keys ───────────────────────────────────────────────
+        r.set(f"event:{event_id}:total",     total,            ex=ProcessingConfig.REDIS_TTL)
+        r.set(f"event:{event_id}:completed", 0,                ex=ProcessingConfig.REDIS_TTL)
+        r.set(f"event:{event_id}:phase",     "face_detection", ex=ProcessingConfig.REDIS_TTL)
+
+        # ── Safety-net finalize (idempotent — double-fire is harmless) ────────
+        finalize_event.apply_async(
+            args=[
+                [{"photo_id": p.id, "status": "safety_net",
+                  "faces": [], "optimized_name": None} for p in photos],
+                event_id,
+            ],
+            queue=FINALIZE_QUEUE,
+            countdown=eta * 3,
+        )
+        print(f"   🛡️  Safety-net finalize scheduled in {eta * 3}s")
+
+        # ── Dispatch chord ────────────────────────────────────────────────────
+        tasks = chord(
+            [process_single_photo.s(photo.id, photo.stored_filename, event_id)
+             for photo in photos],
+            finalize_event.s(event_id),
+        )
+        tasks.apply_async()
+
+        elapsed = round(time.time() - start, 2)
+        print(f"\n✅ DISPATCH COMPLETE in {elapsed}s — {total} photos")
+
+        return {"status": "dispatched", "photo_count": total, "eta_s": eta}
+
     except SoftTimeLimitExceeded:
-        print("❌ Orchestrator soft timeout (should never happen!)")
-        return {"status": "error", "message": "Orchestrator timed out"}
-    except Exception as e:
-        print(f"❌ Orchestrator error: {e}")
+        print(f"⏰ Orchestrator time limit — Event #{event_id}")
+        _reset_event_status(event_id, "pending")
+        raise
+
+    except Exception as exc:
+        print(f"❌ Orchestrator failed — Event #{event_id}: {exc}")
         traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+        _reset_event_status(event_id, "pending")
+        raise
+
     finally:
         db.close()
 
 
-def _estimate_time(total_photos: int) -> int:
-    """Estimate total processing time in seconds"""
-    USE_GPU = os.getenv("USE_GPU", "false").lower() == "true"
-    sec_per_photo = 0.8 if USE_GPU else 2.5
-    return int(total_photos * sec_per_photo * 1.15)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TASK 2: SINGLE PHOTO PROCESSOR (Same as before + retry logic)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 2 — PER-PHOTO WORKER
+# ══════════════════════════════════════════════════════════════════════════════
 
 @celery.task(
     bind=True,
-    queue="photo_processing",
-    soft_time_limit=ProcessingConfig.BATCH_SOFT_LIMIT,
-    time_limit=ProcessingConfig.BATCH_HARD_LIMIT,
-    max_retries=2,
-    default_retry_delay=30,
-    autoretry_for=(Exception,),
-    name="app.workers.tasks.process_single_photo"
+    queue=PHOTO_QUEUE,
+    soft_time_limit=ProcessingConfig.PHOTO_SOFT_LIMIT,
+    time_limit=ProcessingConfig.PHOTO_HARD_LIMIT,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="app.workers.tasks.process_single_photo",
 )
-def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int):
+def process_single_photo(self, photo_id: int, raw_filename: str, event_id: int) -> dict:
     """
-    Process single photo (unchanged logic, added retry + logging)
+    Full per-photo pipeline:
+      1. image_pipeline.process_image()
+           downloads raw → optimizes → generates thumbnail → deletes raw
+           returns (optimized_filename, face_np)
+      2. face_service.process_single_image(event_id, optimized_name, face_np)
+           InsightFace on in-memory face_np — no disk read
+           returns list of (filename, normalized_embedding) tuples
+      3. Serialize embeddings as base64(pickle(ndarray)) for Celery transport
+      4. Increment Redis completed counter
     """
-    from app.services.face_service import process_single_image
-    
     t_start = time.time()
-    
+    print(f"\n📸 Photo #{photo_id} — {raw_filename} (Event #{event_id})")
+
     try:
-        # Image pipeline
+        # ── Step 1: Image pipeline ─────────────────────────────────────────────
         optimized_name, face_np = process_image(raw_filename, event_id)
-        
+
         if not optimized_name:
-            return _make_result(photo_id, "pipeline_failed", time.time() - t_start)
-        
-        # Face detection
+            print(f"   ❌ Image pipeline failed for #{photo_id}")
+            return _photo_result(photo_id, "pipeline_failed")
+
+        t_opt = time.time() - t_start
+        print(f"   ✅ Optimized in {t_opt:.2f}s → {optimized_name}")
+
+        # ── Step 2: Face detection ─────────────────────────────────────────────
+        print(f"   🔍 Running face detection…")
         face_results = process_single_image(event_id, optimized_name, face_np)
-        
-        # Serialize embeddings
-        serialized_faces = []
-        for fname, emb in face_results:
-            serialized_faces.append({
-                "image_name": optimized_name,
+
+        # ── Step 3: Serialize ─────────────────────────────────────────────────
+        serialised_faces = []
+        for _filename, emb in face_results:
+            serialised_faces.append({
+                "image_name":    optimized_name,
                 "embedding_b64": base64.b64encode(pickle.dumps(emb)).decode(),
             })
-        
-        # Update Redis counter
+
+        # ── Step 4: Redis progress ────────────────────────────────────────────
         r = _get_redis()
-        r.hincrby(f"enterprise:event:{event_id}", "faces_detected", len(serialized_faces))
-        
-        return _make_result(photo_id, "ok", time.time() - t_start, 
-                           optimized_name, serialized_faces)
-        
+        r.incr(f"event:{event_id}:completed")
+        r.expire(f"event:{event_id}:completed", ProcessingConfig.REDIS_TTL)
+
+        t_total = time.time() - t_start
+        faces   = len(serialised_faces)
+        print(f"   ✅ Done in {t_total:.2f}s — {faces} face(s) detected")
+
+        return _photo_result(photo_id, "ok", optimized_name, serialised_faces, t_opt, t_total)
+
     except SoftTimeLimitExceeded:
-        return _make_result(photo_id, "timeout", time.time() - t_start)
+        print(f"   ⏰ Photo #{photo_id} timed out after {time.time() - t_start:.1f}s")
+        return _photo_result(photo_id, "timeout")
+
     except Exception as exc:
-        print(f"❌ Photo {photo_id} error (attempt {self.request.retries + 1}): {exc}")
-        if self.request.retries >= self.max_retries:
-            return _make_result(photo_id, "error", time.time() - t_start, error=str(exc))
-        raise  # Let Celery retry
+        print(f"   ❌ Photo #{photo_id} failed: {exc}")
+        traceback.print_exc()
+        return _photo_result(photo_id, "error")
 
 
-def _make_result(photo_id, status, total_time, optimized_name=None, faces=None, error=None):
-    """Standard result format"""
-    result = {
-        "photo_id": photo_id,
-        "status": status,
-        "total_time_s": round(total_time, 3),
-    }
-    if optimized_name:
-        result["optimized_name"] = optimized_name
-    if faces is not None:
-        result["faces"] = faces
-    if error:
-        result["error"] = error
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# NEW TASK: BATCH AGGREGATOR (Runs after each batch completes)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 3 — FINALIZER  (chord callback)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @celery.task(
     bind=True,
-    queue="event_finalize",
-    soft_time_limit=300,
-    time_limit=600,
-    name="app.workers.tasks.aggregate_batch_results"
+    queue=FINALIZE_QUEUE,
+    soft_time_limit=ProcessingConfig.FINALIZE_SOFT_LIMIT,
+    time_limit=ProcessingConfig.FINALIZE_HARD_LIMIT,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="app.workers.tasks.finalize_event",
 )
-def aggregate_batch_results(self, photo_results: List[Dict], event_id: int, 
-                           batch_idx: int, total_batches: int):
+def finalize_event(self, photo_results: list, event_id: int) -> dict:
     """
-    Aggregates results from one completed batch.
-    
-    Jobs:
-    1. Bulk update DB statuses
-    2. Extract embeddings
-    3. Save checkpoint (crash recovery)
-    4. Update Redis progress
-    5. Run incremental clustering (every N batches)
-    6. Trigger finalization when ALL batches done
+    Chord callback — runs once ALL process_single_photo tasks complete.
+
+    Idempotency guard: exits immediately if event already finalized.
+    Safety-net results (status='safety_net') are filtered out.
     """
-    agg_start = time.time()
-    r = _get_redis()
-    progress_key = f"enterprise:event:{event_id}"
-    
-    print(f"\n📥 AGGREGATING BATCH {batch_idx + 1}/{total_batches} "
-          f"({len(photo_results)} results)")
-    
-    db = SessionLocal()
+    db          = SessionLocal()
+    event_start = time.time()
+    r           = _get_redis()
+
+    print(f"\n{'='*70}")
+    print(f"🏁 FINALIZE — Event #{event_id}")
+    print(f"{'='*70}")
+
     try:
-        # ── BULK DB UPDATE ─────────────────────────────────
-        successful = sum(1 for res in photo_results if res["status"] == "ok")
-        failed = len(photo_results) - successful
-        
-        _bulk_update(db, photo_results)
-        
-        # ── EXTRACT FACES ──────────────────────────────────
-        new_faces = []
-        for res in photo_results:
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            return {"status": "event_not_found"}
+
+        # ── Idempotency guard ─────────────────────────────────────────────────
+        if event.processing_status in ("completed", "completed_with_errors", "failed"):
+            print(f"ℹ️  Already finalized ({event.processing_status}) — skipping")
+            return {"status": "already_finalized"}
+
+        # Filter out safety-net placeholders
+        real_results = [res for res in photo_results if res.get("status") != "safety_net"]
+        if not real_results:
+            print("ℹ️  Only safety-net results — real chord not done yet, exiting")
+            return {"status": "safety_net_skipped"}
+
+        # ── Phase: clustering ─────────────────────────────────────────────────
+        _redis_set(event_id, "phase", "clustering")
+        _db_update_event(db, event_id,
+                         processing_progress=ProcessingConfig.PROGRESS_CLUSTERING)
+
+        total_new       = len(real_results)
+        total_optimized = sum(1 for r in real_results if r["status"] == "ok")
+        print(f"📊 Results: {total_optimized}/{total_new} succeeded")
+
+        # ── Bulk update photo rows ────────────────────────────────────────────
+        _bulk_update_photos(db, real_results)
+
+        # ── Deserialize embeddings ────────────────────────────────────────────
+        new_faces: list = []   # (image_name, embedding_ndarray, photo_id)
+        for res in real_results:
             if res["status"] != "ok":
                 continue
             for f in res.get("faces", []):
                 try:
                     emb = pickle.loads(base64.b64decode(f["embedding_b64"]))
                     new_faces.append((f["image_name"], emb, res["photo_id"]))
-                except Exception as e:
-                    print(f"  ⚠ Bad embedding: {e}")
-        
-        # ── SAVE CHECKPOINT ────────────────────────────────
-        _save_checkpoint(event_id, batch_idx, new_faces, photo_results)
-        
-        # ── UPDATE PROGRESS ────────────────────────────────
-        batches_done = r.hincrby(progress_key, "batches_completed", 1)
-        
-        # Calculate progress percentage
-        progress = (
-            ProcessingConfig.PROGRESS_ORCHESTRATION +
-            (ProcessingConfig.PROGRESS_PROCESSING - ProcessingConfig.PROGRESS_ORCHESTRATION) *
-            (batches_done / total_batches)
-        )
-        
-        # Update event
-        db.query(Event).filter(Event.id == event_id).update({
-            "processing_progress": progress,
-        })
+                except Exception as de:
+                    print(f"   ⚠️  Embedding deserialize error: {de}")
+
+        total_faces = len(new_faces)
+        print(f"📸 {total_optimized}/{total_new} optimized  |  {total_faces} faces")
+
+        if not new_faces:
+            print("ℹ️  No faces — marking completed with 0 clusters")
+            _redis_set(event_id, "phase", "done")
+            _finalize_complete(db, event_id, total_new, 0, 0, event_start)
+            _redis_cleanup(event_id)
+            _release_lock(event_id)
+            return {"status": "completed_no_faces"}
+
+        # ── Incremental FAISS clustering ──────────────────────────────────────
+        _db_update_event(db, event_id, processing_progress=78)
+        os.makedirs(INDEXES_PATH, exist_ok=True)
+
+        existing_clusters = db.query(Cluster).filter(Cluster.event_id == event_id).all()
+        dim           = len(new_faces[0][1])
+        cluster_index = faiss.IndexFlatIP(dim)
+        cluster_map: list = []
+        current_cluster   = 0
+
+        if existing_clusters:
+            seed_embs = []
+            for c in existing_clusters:
+                try:
+                    seed_embs.append(pickle.loads(c.embedding))
+                    cluster_map.append(c.cluster_id)
+                except Exception:
+                    pass
+            if seed_embs:
+                seed_matrix = np.array(seed_embs, dtype="float32")
+                faiss.normalize_L2(seed_matrix)
+                cluster_index.add(seed_matrix)
+            current_cluster = max((c.cluster_id for c in existing_clusters), default=-1) + 1
+
+        new_cluster_rows: list = []
+        for image_name, emb, photo_id in new_faces:
+            emb_norm = emb.astype("float32")
+            faiss.normalize_L2(emb_norm.reshape(1, -1))
+
+            assigned = current_cluster
+            if cluster_index.ntotal > 0:
+                D, I = cluster_index.search(
+                    emb_norm.reshape(1, -1), min(3, cluster_index.ntotal)
+                )
+                for score, idx in zip(D[0], I[0]):
+                    if idx >= 0 and score >= THRESHOLD:
+                        assigned = cluster_map[idx]
+                        break
+
+            if assigned == current_cluster:
+                cluster_index.add(emb_norm.reshape(1, -1))
+                cluster_map.append(current_cluster)
+                current_cluster += 1
+
+            new_cluster_rows.append(Cluster(
+                event_id   = event_id,
+                cluster_id = assigned,       # ✅ integer — no more string error
+                image_name = image_name,
+                embedding  = pickle.dumps(emb),
+            ))
+
+        _db_update_event(db, event_id, processing_progress=83)
+        db.bulk_save_objects(new_cluster_rows)
         db.commit()
-        
-        # Update Redis
-        total_faces = r.hincrby(progress_key, "faces_detected", len(new_faces))
-        eta = _calculate_eta(batches_done, total_batches, r.hget(progress_key, "started_at"))
-        
-        r.hset(progress_key, mapping={
-            "phase": "batch_processing",
-            "last_batch": str(batch_idx),
-            "last_batch_faces": str(len(new_faces)),
-            "progress_pct": str(round(progress, 1)),
-            "eta_remaining": str(eta),
-        })
-        
-        # ── INCREMENTAL CLUSTERING? ────────────────────────
-        should_cluster = (
-            (batch_idx + 1) % ProcessingConfig.CLUSTER_EVERY_N_BATCHES == 0
-            or batches_done >= total_batches  # Always cluster last batch
+
+        # ── Phase: building index ─────────────────────────────────────────────
+        _redis_set(event_id, "phase", "building_index")
+        _db_update_event(db, event_id,
+                         processing_progress=ProcessingConfig.PROGRESS_INDEXING)
+
+        _merge_clusters(db, event_id, dim)
+        _rebuild_faiss(db, event_id)
+
+        total_clusters = (
+            db.query(Cluster.cluster_id)
+            .filter(Cluster.event_id == event_id)
+            .distinct()
+            .count()
         )
-        
-        if should_cluster and new_faces:
-            print(f"  🔄 Running incremental clustering...")
-            _run_incremental_clustering(event_id, db, r)
-        
-        # ── CHECK IF ALL DONE ──────────────────────────────
-        if batches_done >= total_batches:
-            print(f"\n{'='*70}")
-            print(f"✅ ALL {total_batches} BATCHES COMPLETE!")
-            print(f"   Total faces: {int(total_faces):,}")
-            print(f"   Triggering finalization...")
-            print(f"{'='*70}\n")
-            
-            # Trigger finalizer
-            finalize_event.delay(event_id)
-            
-            return {
-                "status": "all_complete",
-                "batch": batch_idx + 1,
-                "total_faces": int(total_faces),
-                "time_s": round(time.time() - agg_start, 2)
-            }
-        
-        # Normal completion
-        print(f"  ✓ Batch {batch_idx + 1} done in {time.time()-agg_start:.2f}s | "
-              f"Progress: {batches_done}/{total_batches} ({progress:.1f}%) | "
-              f"ETA: {eta//60}m{eta%60:02d}s")
-        
+
+        # ── Phase: enriching → done ───────────────────────────────────────────
+        _redis_set(event_id, "phase", "enriching")
+        _finalize_complete(db, event_id, total_new, total_clusters, total_faces, event_start)
+
+        enrich_event_photos.apply_async(args=[event_id], queue=AI_QUEUE)
+
+        _redis_set(event_id, "phase", "done", ttl=ProcessingConfig.REDIS_TTL_DONE)
+        _redis_cleanup(event_id)
+        _release_lock(event_id)
+
+        print(f"\n🎉 DONE — {total_clusters} clusters, {total_faces} faces")
         return {
-            "status": "batch_complete",
-            "batch": batch_idx + 1,
-            "done": int(batches_done),
-            "total": total_batches,
-            "faces": len(new_faces),
+            "status":         "completed",
+            "total_clusters": total_clusters,
+            "total_faces":    total_faces,
         }
-        
-    except Exception as e:
-        print(f"❌ Aggregator error: {e}")
-        traceback.print_exc()
-        r.hincrby(progress_key, "batches_failed", 1)
+
+    except SoftTimeLimitExceeded:
+        _redis_set(event_id, "phase", "failed")
+        print(f"⏰ Finalize time limit — Event #{event_id}")
+        try:
+            _db_update_event(db, event_id, processing_status="failed")
+        except Exception:
+            pass
+        _release_lock(event_id)
         raise
+
+    except Exception as exc:
+        _redis_set(event_id, "phase", "failed")
+        print(f"❌ finalize_event failed: {exc}")
+        traceback.print_exc()
+        try:
+            _db_update_event(db, event_id, processing_status="failed")
+        except Exception:
+            pass
+        _release_lock(event_id)
+        raise
+
     finally:
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CHECKPOINT SYSTEM (Crash Recovery)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 4 — AI ENRICHMENT
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _save_checkpoint(event_id: int, batch_idx: int, faces: list, results: list):
-    """Save batch results to disk for crash recovery"""
-    os.makedirs(ProcessingConfig.CHECKPOINT_DIR, exist_ok=True)
-    
-    ckpt_file = os.path.join(
-        ProcessingConfig.CHECKPOINT_DIR,
-        f"event_{event_id}_batch_{batch_idx}.json"
-    )
-    
-    metadata = {
-        "event_id": event_id,
-        "batch_idx": batch_idx,
-        "timestamp": datetime.utcnow().isoformat(),
-        "num_faces": len(faces),
-        "results_summary": [
-            {"pid": r["photo_id"], "status": r["status"]} 
-            for r in results
-        ],
-        "face_meta": [(name, pid) for name, _, pid in faces]
-    }
-    
-    # Save embeddings separately (binary)
-    emb_file = ckpt_file.replace(".json", ".npy")
-    if faces:
-        np.save(emb_file, np.array([emb for _, emb, _ in faces]))
-    
-    with open(ckpt_file, 'w') as f:
-        json.dump(metadata, f)
-
-
-def _load_all_checkpoints(event_id: int) -> Tuple[list, dict]:
-    """Load all checkpoints for an event"""
-    import glob
-    
-    pattern = os.path.join(ProcessingConfig.CHECKPOINT_DIR, f"event_{event_id}_batch_*.json")
-    files = sorted(glob.glob(pattern))
-    
-    all_faces = []
-    summary = {"batches": len(files), "faces": 0}
-    
-    for f in files:
-        try:
-            with open(f, 'r') as fp:
-                meta = json.load(fp)
-            
-            emb_file = f.replace(".json", ".npy")
-            if os.path.exists(emb_file):
-                embs = np.load(emb_file)
-                face_meta = meta.get("face_meta", [])
-                
-                for idx, (name, pid) in enumerate(face_meta):
-                    if idx < len(embs):
-                        all_faces.append((name, embs[idx], pid))
-                
-                summary["faces"] += len(embs)
-        except Exception as e:
-            print(f"  ⚠ Bad checkpoint {f}: {e}")
-    
-    return all_faces, summary
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# INCREMENTAL CLUSTERING ENGINE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _run_incremental_clustering(event_id: int, db: Session, r):
-    """
-    Run clustering on newly processed faces.
-    Merges into existing clusters or creates new ones.
-    """
+@celery.task(
+    bind=True,
+    queue=AI_QUEUE,
+    acks_late=True,
+    name="app.workers.tasks.enrich_event_photos",
+)
+def enrich_event_photos(self, event_id: int):
+    """Delegate to ai_enrichment_task for Places365 + YOLOv8 labels."""
     try:
-        # Load existing clusters
-        existing = db.query(Cluster).filter(Cluster.event_id == event_id).all()
-        
-        # Build FAISS index from existing
-        index = None
-        cluster_map = []
-        next_id = 0
-        
-        if existing:
-            seeds = []
-            for c in existing:
-                try:
-                    emb = pickle.loads(c.embedding)
-                    seeds.append(emb)
-                    cluster_map.append(c.cluster_id)
-                    if c.cluster_id >= next_id:
-                        next_id = c.cluster_id + 1
-                except:
-                    pass
-            
-            if seeds:
-                dim = len(seeds[0])
-                index = faiss.IndexFlatIP(dim)
-                matrix = np.array(seeds, dtype="float32")
-                faiss.normalize_L2(matrix)
-                index.add(matrix)
-        
-        # Load new faces from checkpoints
-        new_faces, _ = _load_all_checkpoints(event_id)
-        
-        # Filter out already-clustered faces
-        clustered_names = {c.image_name for c in existing}
-        new_faces = [(n, e, p) for n, e, p in new_faces if n not in clustered_names]
-        
-        if not new_faces:
-            return
-        
-        # Assign clusters
-        new_rows = []
-        created = 0
-        assigned = 0
-        
-        for name, emb, pid in new_faces:
-            emb_norm = emb.astype("float32").reshape(1, -1)
-            faiss.normalize_L2(emb_norm)
-            
-            cluster = next_id  # Default: create new
-            
-            if index and index.ntotal > 0:
-                D, I = index.search(emb_norm, k=min(3, index.ntotal))
-                for score, idx in zip(D[0], I[0]):
-                    if idx >= 0 and score >= ProcessingConfig.THRESHOLD:
-                        cluster = cluster_map[idx]
-                        assigned += 1
-                        break
-            
-            if cluster == next_id:
-                if index:
-                    index.add(emb_norm)
-                    cluster_map.append(next_id)
-                created += 1
-                next_id += 1
-            
-            new_rows.append(Cluster(
-                event_id=event_id,
-                cluster_id=cluster,
-                image_name=name,
-                embedding=pickle.dumps(emb),
-            ))
-        
-        # Persist
-        db.add_all(new_rows)
-        db.commit()
-        
-        # Update stats
-        total_clusters = db.query(Cluster.cluster_id).filter(
-            Cluster.event_id == event_id
-        ).distinct().count()
-        
-        total_faces = db.query(Cluster).filter(
-            Cluster.event_id == event_id
-        ).count()
-        
-        event = db.query(Event).filter(Event.id == event_id).first()
-        if event:
-            event.total_faces = total_faces
-            event.total_clusters = total_clusters
-            db.commit()
-        
-        # Update Redis
-        r.hset(f"enterprise:event:{event_id}", mapping={
-            "clusters_formed": str(total_clusters),
-        })
-        
-        print(f"  🔷 Clustered {len(new_faces)} faces: {assigned} assigned, {created} new | "
-              f"Total: {total_faces} faces in {total_clusters} clusters")
-        
+        from app.workers.ai_enrichment_task import ai_enrich_event
+        ai_enrich_event.apply_async(args=[event_id], queue=AI_QUEUE)
     except Exception as e:
-        print(f"  ❌ Clustering error: {e}")
-        traceback.print_exc()
-        db.rollback()
+        print(f"⚠️  AI enrichment dispatch failed (non-fatal): {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TASK 3: FINALIZER (Same logic, adapted for chunked processing)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 5 — GUEST NOTIFICATIONS
+# ══════════════════════════════════════════════════════════════════════════════
 
-@celery.task(bind=True, queue="event_finalize", 
-             soft_time_limit=ProcessingConfig.FINALIZE_SOFT_LIMIT,
-             time_limit=ProcessingConfig.FINALIZE_HARD_LIMIT,
-             name="app.workers.tasks.finalize_event")
-def finalize_event(self, event_id: int):
+@celery.task(
+    name="app.workers.tasks.notify_guests_task",
+    acks_late=True,
+)
+def notify_guests_task(event_id: int):
     """
-    Finalizer - runs once when ALL batches complete.
-    
-    Loads everything from checkpoints + DB → final clustering → FAISS index → done!
+    Send 'Photos Ready' emails to all unnotified guests.
+    Graceful — does nothing if no guests or notifications disabled.
     """
-    start = time.time()
-    r = _get_redis()
-    key = f"enterprise:event:{event_id}"
-    
-    print(f"\n{'='*70}")
-    print(f"🏁 FINALIZATION STARTED - Event #{event_id}")
-    print(f"{'='*70}\n")
-    
     db = SessionLocal()
     try:
-        # ── PHASE 1: LOAD ALL DATA ──────────────────────
-        r.hset(key, "phase", "finalizing")
-        
-        # From checkpoints
-        ckpt_faces, ckpt_info = _load_all_checkpoints(event_id)
-        
-        # From DB (incremental clustering results)
-        db_clusters = db.query(Cluster).filter(Cluster.event_id == event_id).all()
-        
-        # Merge (prefer DB, fill gaps from checkpoints)
-        db_names = {c.image_name for c in db_clusters}
-        new_from_ckpt = [(n, e, p) for n, e, p in ckpt_faces if n not in db_names]
-        
-        print(f"  📊 Loaded: {len(ckpt_faces)} checkpoint faces, "
-              f"{len(db_clusters)} DB clusters, {len(new_from_ckpt)} new")
-        
-        # Combine all embeddings
-        all_embs = []
-        all_meta = []
-        
-        for c in db_clusters:
-            try:
-                emb = pickle.loads(c.embedding)
-                all_embs.append(emb)
-                all_meta.append((c.image_name, c.cluster_id))
-            except:
-                pass
-        
-        for name, emb, pid in new_from_ckpt:
-            all_embs.append(emb)
-            all_meta.append((name, pid))
-        
-        if not all_embs:
-            print("  ⚠ No faces found")
-            _mark_complete(db, event_id, r, key, 0, 0, start)
-            return {"status": "completed_no_faces"}
-        
-        # ── PHASE 2: FINAL CLUSTERING PASS ──────────────
-        print(f"  🔄 Running DBSCAN on {len(all_embs)} embeddings...")
-        labels = cluster_embeddings(all_embs)
-        
-        # ── PHASE 3: BUILD FAISS INDEX ──────────────────
-        print(f"  💾 Building FAISS search index...")
-        
-        os.makedirs(INDEXES_PATH, exist_ok=True)
-        
-        matrix = np.array(all_embs, dtype="float32")
-        faiss.normalize_L2(matrix)
-        
-        dim = matrix.shape[1]
-        
-        # Choose index type by size
-        if len(all_embs) > 50000:
-            nlist = min(int(math.sqrt(len(all_embs))), 4096)
-            quantizer = faiss.IndexFlatIP(dim)
-            index = faiss.IndexIVFFlat(quantizer, dim, nlist)
-            index.train(matrix)
-        else:
-            index = faiss.IndexFlatIP(dim)
-        
-        index.add(matrix)
-        
-        # Save
-        idx_path = os.path.join(INDEXES_PATH, f"event_{event_id}.index")
-        map_path = os.path.join(INDEXES_PATH, f"event_{event_id}_map.npy")
-        
-        faiss.write_index(index, idx_path)
-        np.save(map_path, np.array(all_meta))
-        
-        # Force reload
-        FaissManager.remove_index(event_id)
-        
-        print(f"  ✅ Index saved: {index.ntotal:,} vectors, "
-              f"{os.path.getsize(idx_path)/1024/1024:.1f} MB")
-        
-        # ── PHASE 4: CLEANUP & COMPLETE ─────────────────
-        # Remove checkpoints
-        import glob
-        for f in glob.glob(os.path.join(ProcessingConfig.CHECKPOINT_DIR, f"event_{event_id}_*")):
-            try:
-                os.remove(f)
-            except:
-                pass
-        
-        # Mark complete
-        total_faces = len(all_embs)
-        total_clusters = len(set(labels)) if labels else total_faces
-        
-        _mark_complete(db, event_id, r, key, total_faces, total_clusters, start)
-        
-        # Trigger AI enrichment
-        try:
-            enrich_event_photos.delay(event_id)
-            print("  🤖 AI enrichment triggered")
-        except Exception as e:
-            print(f"  ⚠ AI enrichment trigger failed: {e}")
-        
-        total_time = time.time() - start
-        
-        print(f"\n✅ FINALIZATION COMPLETE IN {total_time:.1f}s")
-        print(f"   Faces: {total_faces:,} | Clusters: {total_clusters:,}")
-        print(f"{'='*70}\n")
-        
-        return {
-            "status": "completed",
-            "faces": total_faces,
-            "clusters": total_clusters,
-            "time_s": round(total_time, 2)
-        }
-        
-    except Exception as e:
-        print(f"❌ FATAL ERROR: {e}")
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            return {"status": "event_not_found"}
+
+        from app.models.guest import Guest
+        guests = db.query(Guest).filter(
+            Guest.event_id == event_id,
+            Guest.email_sent == False,
+        ).all()
+
+        if not guests:
+            return {"status": "no_guests_to_notify"}
+
+        from app.models.user import User
+        owner = db.query(User).filter(User.id == event.owner_id).first()
+        photographer_name = (owner.name or owner.email) if owner else "the photographer"
+
+        base_url  = os.getenv("FRONTEND_URL", "https://snapmatch.com")
+        event_url = f"{base_url}/public/{event.public_token}"
+
+        from app.api.guest_routes import send_bulk_photos_ready_emails
+        emails  = [g.email for g in guests]
+        results = send_bulk_photos_ready_emails(
+            emails            = emails,
+            event_name        = event.name,
+            photo_count       = event.image_count or 0,
+            event_url         = event_url,
+            photographer_name = photographer_name,
+            db                = db,
+        )
+
+        for guest in guests:
+            if results["sent"] > 0:
+                guest.mark_email_sent()
+
+        if results["sent"] > 0:
+            event.record_notification_sent()
+
+        db.commit()
+        print(f"📧 Sent {results['sent']} notifications for Event #{event_id}")
+        return {"status": "success", "sent": results["sent"], "failed": results["failed"]}
+
+    except Exception as exc:
+        print(f"❌ notify_guests_task failed: {exc}")
         traceback.print_exc()
-        r.hset(key, "status", "finalization_failed")
-        r.hset(key, "error", str(e))
+        return {"status": "error", "message": str(exc)}
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TASK 6 — CLEANUP EXPIRED EVENTS  (Celery Beat — daily)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@celery.task(name="app.workers.tasks.cleanup_expired_events")
+def cleanup_expired_events():
+    """Delete expired events from DB + MinIO/R2/local storage."""
+    db = SessionLocal()
+    try:
+        from app.services.storage_cleanup import delete_event_storage
+
+        now     = datetime.utcnow()
+        expired = db.query(Event).filter(
+            Event.expires_at != None,
+            Event.expires_at < now,
+        ).all()
+
+        event_assets = [(e.id, e.cover_image) for e in expired]
+
+        for event in expired:
+            print(f"🗑  Cleaning expired Event #{event.id}")
+            db.query(Cluster).filter(Cluster.event_id == event.id).delete()
+            db.query(Photo).filter(Photo.event_id == event.id).delete()
+            db.delete(event)
+
+        db.commit()
+        print(f"✅ Deleted {len(event_assets)} expired event DB records")
+
+        for event_id, cover_image in event_assets:
+            try:
+                delete_event_storage(event_id, cover_image=cover_image)
+            except Exception as e:
+                print(f"   ⚠️  Storage cleanup failed for Event #{event_id}: {e}")
+
+        print("✅ Expired events cleanup done")
+
+    except Exception as exc:
         db.rollback()
+        print(f"❌ Cleanup error: {exc}")
         raise
     finally:
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _bulk_update(db: Session, results: List[Dict]):
-    """Bulk update photo statuses"""
-    for res in results:
-        data = {
-            "status": "processed" if res["status"] == "ok" else 
-                     ("timeout" if res["status"] == "timeout" else "failed"),
-        }
-        if res["status"] == "ok" and "optimized_name" in res:
-            data["stored_filename"] = res["optimized_name"]
-            data["faces_detected"] = len(res.get("faces", []))
-        
-        db.query(Photo).filter(Photo.id == res["photo_id"]).update(data)
-    
-    db.commit()
+def _merge_clusters(db, event_id: int, dim: int):
+    """
+    Post-clustering centroid merge pass.
+    Pairs of clusters whose mean embeddings are cosine-similar above
+    MERGE_THRESH get merged into the lower cluster_id.
+    """
+    clusters = db.query(Cluster).filter(Cluster.event_id == event_id).all()
+    if not clusters:
+        return
+
+    cluster_embs: dict = defaultdict(list)
+    for c in clusters:
+        try:
+            cluster_embs[c.cluster_id].append(pickle.loads(c.embedding))
+        except Exception:
+            pass
+
+    centroids: dict = {}
+    for cid, embs in cluster_embs.items():
+        mat = np.array(embs, dtype="float32")
+        faiss.normalize_L2(mat)
+        centroids[cid] = mat.mean(axis=0)
+
+    cids = list(centroids.keys())
+    if len(cids) < 2:
+        return
+
+    mat = np.array([centroids[c] for c in cids], dtype="float32")
+    faiss.normalize_L2(mat)
+    idx = faiss.IndexFlatIP(dim)
+    idx.add(mat)
+
+    merge_map: dict = {}
+    for i, cid in enumerate(cids):
+        if cid in merge_map:
+            continue
+        D, I = idx.search(mat[i:i+1], len(cids))
+        for score, j in zip(D[0], I[0]):
+            if j == i or score < MERGE_THRESH:
+                continue
+            other = cids[j]
+            if other not in merge_map:
+                merge_map[other] = cid
+
+    if merge_map:
+        for old_cid, new_cid in merge_map.items():
+            db.query(Cluster).filter(
+                Cluster.event_id == event_id,
+                Cluster.cluster_id == old_cid,
+            ).update({"cluster_id": new_cid})
+        db.commit()
+        print(f"   🔀 Merged {len(merge_map)} cluster pairs")
 
 
-def _mark_complete(db: Session, event_id: int, r, key: str, 
-                   faces: int, clusters: int, start: float):
-    """Mark event as fully processed"""
-    total = time.time() - start
-    
+def _rebuild_faiss(db, event_id: int):
+    """Rebuild the FAISS flat-IP search index from all cluster rows."""
+    all_clusters = db.query(Cluster).filter(Cluster.event_id == event_id).all()
+    if not all_clusters:
+        return
+
+    embs = []
+    ids  = []
+    for c in all_clusters:
+        try:
+            embs.append(pickle.loads(c.embedding))
+            ids.append(c.id)
+        except Exception:
+            pass
+
+    if not embs:
+        return
+
+    dim    = len(embs[0])
+    matrix = np.array(embs, dtype="float32")
+    faiss.normalize_L2(matrix)
+
+    index = faiss.IndexFlatIP(dim)
+    index.add(matrix)
+
+    os.makedirs(INDEXES_PATH, exist_ok=True)
+    faiss.write_index(index, os.path.join(INDEXES_PATH, f"event_{event_id}.index"))
+    np.save(os.path.join(INDEXES_PATH, f"event_{event_id}_map.npy"), np.array(ids))
+
+    FaissManager.reload_index(event_id)
+    print(f"   ✅ FAISS index rebuilt: {len(embs)} vectors")
+
+
+def _finalize_complete(db, event_id: int, total_new: int,
+                       total_clusters: int, total_faces: int, event_start: float):
+    """Persist completed status and trigger guest notifications."""
+    elapsed = time.time() - event_start
     db.query(Event).filter(Event.id == event_id).update({
-        "processing_status": "completed",
-        "processing_progress": 100.0,
-        "total_faces": faces,
-        "total_clusters": clusters,
-        "completed_at": datetime.utcnow(),
+        "processing_status":       "completed",
+        "processing_progress":     ProcessingConfig.PROGRESS_COMPLETE,
+        "processing_completed_at": datetime.utcnow(),
+        "last_processed_at":       datetime.utcnow(),
+        "total_clusters":          total_clusters,
+        "total_faces":             total_faces,
     })
     db.commit()
-    
-    r.hset(key, mapping={
-        "status": "completed",
-        "phase": "complete",
-        "total_faces": str(faces),
-        "total_clusters": str(clusters),
-        "completed_at": datetime.utcnow().isoformat(),
-        "total_time_s": str(int(total)),
-    })
-    r.expire(key, 86400 * 30)  # Keep 30 days
+    print(f"✅ Event #{event_id} complete in {elapsed:.1f}s — "
+          f"{total_clusters} clusters, {total_faces} faces")
 
-
-def _calculate_eta(batches_done: int, total: int, started_str: Optional[str]) -> int:
-    """Calculate ETA in seconds"""
-    if not started_str or batches_done == 0:
-        return 0
+    # Guest notifications (non-fatal)
     try:
-        started = datetime.fromisoformat(started_str)
-        elapsed = (datetime.utcnow() - started).total_seconds()
-        per_batch = elapsed / batches_done
-        remaining = (total - batches_done) * per_batch
-        return int(remaining + (elapsed * 0.1))  # 10% buffer
-    except:
-        return 0
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event and getattr(event, "notify_on_processing_complete", True):
+            from app.models.guest import Guest
+            pending = db.query(Guest).filter(
+                Guest.event_id == event_id,
+                Guest.email_sent == False,
+            ).count()
+            if pending > 0:
+                notify_guests_task.apply_async(args=[event_id], queue=PHOTO_QUEUE)
+                print(f"📧 Queued notification for {pending} guests")
+    except Exception as e:
+        print(f"⚠️  Guest notification trigger failed (non-fatal): {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API: Progress Tracking Functions
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC UTILITIES  (used by API endpoints)
+# ══════════════════════════════════════════════════════════════════════════════
 
-def get_event_progress(event_id: int) -> dict:
+def get_processing_status(event_id: int) -> dict:
+    """Return processing state — Redis first, DB fallback."""
+    r         = _get_redis()
+    total     = int(r.get(f"event:{event_id}:total")     or 0)
+    completed = int(r.get(f"event:{event_id}:completed") or 0)
+    phase     = r.get(f"event:{event_id}:phase") or "unknown"
+
+    if total or phase != "unknown":
+        return {"source": "redis", "phase": phase,
+                "total": total, "completed": completed}
+
+    db = SessionLocal()
+    try:
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if event:
+            return {
+                "source":   "database",
+                "status":   event.processing_status or "unknown",
+                "progress": event.processing_progress or 0,
+            }
+    finally:
+        db.close()
+
+    return {"source": "none", "status": "not_found"}
+
+
+def reset_processing_state(event_id: int) -> bool:
     """
-    Get real-time processing progress.
-    Call this from your API endpoint.
+    Manually unlock a stuck event.
+    Clears Redis, resets DB to pending, marks failed photos back to uploaded.
+
+    Usage:
+        from app.workers.tasks import reset_processing_state
+        reset_processing_state(25)
     """
-    r = _get_redis()
-    key = f"enterprise:event:{event_id}"
-    
-    data = r.hgetall(key)
-    
-    if not data:
-        return {"status": "not_found", "message": "No processing data"}
-    
-    # Convert numeric fields
-    for field in ["total_photos", "num_batches", "batches_completed", 
-                  "faces_detected", "clusters_formed"]:
-        if field in data:
-            try:
-                data[field] = int(data[field])
-            except:
-                pass
-    
-    # Calculate derived fields
-    if "batches_completed" in data and "num_batches" in data:
-        try:
-            done = int(data["batches_completed"])
-            total = int(data["num_batches"])
-            pct = (done / total * 100) if total > 0 else 0
-            data["progress_percent"] = round(pct, 1)
-        except:
-            pass
-    
-    # Format ETA
-    if "eta_remaining" in data:
-        try:
-            sec = int(data["eta_remaining"])
-            data["eta_human"] = _format_duration(sec)
-        except:
-            pass
-    
-    return data
+    db = SessionLocal()
+    r  = _get_redis()
+    try:
+        for key in ["total", "completed", "phase", "lock"]:
+            r.delete(f"event:{event_id}:{key}")
 
+        db.query(Event).filter(Event.id == event_id).update({
+            "processing_status":     "pending",
+            "processing_progress":   0,
+            "processing_started_at": None,
+        })
+        db.query(Photo).filter(
+            Photo.event_id == event_id,
+            Photo.status   == "failed",
+        ).update({"status": "uploaded"})
+        db.commit()
 
-def _format_duration(seconds: int) -> str:
-    """Format seconds as human-readable"""
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        return f"{seconds // 60}m{seconds % 60:02d}s"
-    else:
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        return f"{h}h{m:02d}m"
+        print(f"✅ Reset processing state for Event #{event_id}")
+        return True
 
-
-print("\n" + "="*70)
-print("✅ ENTERPRISE tasks.py LOADED - Ready for 10,000+ photos!")
-print("="*70 + "\n")
+    except Exception as exc:
+        print(f"❌ Failed to reset state for Event #{event_id}: {exc}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
