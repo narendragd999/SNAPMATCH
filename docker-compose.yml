@@ -170,7 +170,7 @@ services:
     command: >
       celery -A app.workers.celery_worker worker
       -Q photo_processing,event_finalize      
-      --concurrency=2                         
+      --concurrency=4                         
       --pool=prefork
       --prefetch-multiplier=1                 
       --loglevel=info
