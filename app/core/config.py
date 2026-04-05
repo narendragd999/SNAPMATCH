@@ -35,9 +35,3 @@ os.makedirs(INDEXES_PATH, exist_ok=True)
 # Must be exactly 4 digits.
 # Add this line to config.py:
 DEFAULT_EVENT_PIN = os.getenv("DEFAULT_EVENT_PIN", "0000")
-
-# ── Enterprise Processing Config ────────────────────────────────────────────
-CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/snapfind_checkpoints")
-
-# Ensure checkpoint directory exists
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)

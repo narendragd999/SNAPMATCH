@@ -19,8 +19,8 @@ class PricingConfig(Base):
     id         = Column(Integer, primary_key=True, index=True)
 
     # ── Free tier ──────────────────────────────────────────────────────────────
-    free_photo_quota   = Column(Integer, nullable=False, default=5000)
-    free_guest_quota   = Column(Integer, nullable=False, default=1000)
+    free_photo_quota   = Column(Integer, nullable=False, default=50)
+    free_guest_quota   = Column(Integer, nullable=False, default=10)
     free_validity_days = Column(Integer, nullable=False, default=7)
 
     # ── Paid tier limits ───────────────────────────────────────────────────────
